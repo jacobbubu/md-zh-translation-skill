@@ -4,6 +4,7 @@ import { readFile, writeFile } from "node:fs/promises";
 import process from "node:process";
 
 import { CliError, InputError } from "./errors.js";
+import { buildClaudeDesktopMcpConfig, installTarget, type InstallTarget } from "./install.js";
 import { translateMarkdownArticle, type TranslateOptions } from "./translate.js";
 
 export type CliIo = {
@@ -22,8 +23,11 @@ export type CliDependencies = {
 };
 
 type ParsedArgs = {
+  mode: "translate" | "install" | "mcp-config";
   inputPath?: string;
   outputPath?: string;
+  installTarget?: InstallTarget;
+  installPath?: string;
   showHelp: boolean;
   showVersion: boolean;
 };
@@ -36,10 +40,16 @@ Usage:
   md-zh-translate --input article.md --output article.zh.md
   md-zh-translate --input article.md
   cat article.md | md-zh-translate > article.zh.md
+  md-zh-translate install codex
+  md-zh-translate install claude-code
+  md-zh-translate install claude-desktop
+  md-zh-translate install all
+  md-zh-translate mcp-config
 
 Options:
   --input <path>   Read the source Markdown from a file. When provided, stdin is ignored.
   --output <path>  Write the final translated Markdown to a file. When omitted, output goes to stdout.
+  --path <path>    Override the install destination for a single install target.
   --help           Show this help text.
   --version        Show the CLI version.
 
@@ -63,15 +73,43 @@ Defaults:
   - Internal model: gpt-5.4-mini
   - Internal pipeline: frozen Scheme H
   - Final Markdown is beautified with @jacobbubu/md-zh-format
+
+Install targets:
+  - codex          Install the skill into $CODEX_HOME/skills or ~/.codex/skills
+  - claude-code    Install the skill into ~/.claude/skills
+  - claude-desktop Install a local MCP server entry into Claude Desktop config
+  - all            Install all supported targets with their default locations
+
+MCP:
+  - md-zh-translate-mcp starts the local stdio MCP server.
+  - md-zh-translate mcp-config prints a reusable MCP config JSON fragment for other clients.
 `;
 
 function parseArgs(argv: readonly string[]): ParsedArgs {
   const parsed: ParsedArgs = {
+    mode: "translate",
     showHelp: false,
     showVersion: false
   };
 
-  for (let index = 0; index < argv.length; index += 1) {
+  let index = 0;
+  if (argv[index] === "install") {
+    parsed.mode = "install";
+    index += 1;
+    const target = argv[index];
+    if (target && !target.startsWith("--")) {
+      if (!["codex", "claude-code", "claude-desktop", "all"].includes(target)) {
+        throw new InputError(`Unknown install target: ${target}`);
+      }
+      parsed.installTarget = target as InstallTarget;
+      index += 1;
+    }
+  } else if (argv[index] === "mcp-config") {
+    parsed.mode = "mcp-config";
+    index += 1;
+  }
+
+  for (; index < argv.length; index += 1) {
     const current = argv[index];
     switch (current) {
       case "--help":
@@ -94,9 +132,20 @@ function parseArgs(argv: readonly string[]): ParsedArgs {
         parsed.outputPath = argv[index + 1]!;
         index += 1;
         break;
+      case "--path":
+        if (argv[index + 1] == null || argv[index + 1]?.startsWith("--")) {
+          throw new InputError("--path requires a file path.");
+        }
+        parsed.installPath = argv[index + 1]!;
+        index += 1;
+        break;
       default:
         throw new InputError(`Unknown argument: ${current}`);
     }
+  }
+
+  if (parsed.mode === "install" && !parsed.showHelp && !parsed.installTarget) {
+    throw new InputError("Install requires a target: codex, claude-code, claude-desktop, or all.");
   }
   return parsed;
 }
@@ -155,6 +204,26 @@ export async function runCli(
 
     if (args.showVersion) {
       io.writeStdout(`${dependencies.version}\n`);
+      return 0;
+    }
+
+    if (args.mode === "mcp-config") {
+      io.writeStdout(`${JSON.stringify(buildClaudeDesktopMcpConfig(), null, 2)}\n`);
+      return 0;
+    }
+
+    if (args.mode === "install") {
+      io.writeStderr("[md-zh-translate] Installing integration target(s).\n");
+      const installOptions = {
+        target: args.installTarget!,
+        nodePath: process.execPath
+      } as const;
+      const results = await installTarget(
+        args.installPath ? { ...installOptions, pathOverride: args.installPath } : installOptions
+      );
+      io.writeStdout(
+        `${results.map((item) => `${item.target}\t${item.kind}\t${item.path}`).join("\n")}\n`
+      );
       return 0;
     }
 

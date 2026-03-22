@@ -1,5 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import os from "node:os";
+import path from "node:path";
+import { mkdtemp } from "node:fs/promises";
 
 import { runCli, type CliDependencies, type CliIo } from "../src/cli.js";
 
@@ -100,4 +103,25 @@ test("runCli writes progress and output file paths to stderr", async () => {
   assert.match((io as any).stderr, /Starting translation/);
   assert.match((io as any).stderr, /Wrote translated Markdown to output.md/);
   assert.equal((io as any).stdout, "");
+});
+
+test("runCli installs a Codex skill target", async () => {
+  const tmp = await mkdtemp(path.join(os.tmpdir(), "md-zh-install-cli-"));
+
+  const io = createIo();
+  const exitCode = await runCli(["install", "codex", "--path", tmp], io, createDependencies());
+
+  assert.equal(exitCode, 0);
+  assert.match((io as any).stdout, /codex\tskill\t/);
+  assert.match((io as any).stderr, /Installing integration target/);
+});
+
+test("runCli prints MCP config JSON", async () => {
+  const io = createIo();
+  const exitCode = await runCli(["mcp-config"], io, createDependencies());
+
+  assert.equal(exitCode, 0);
+  const parsed = JSON.parse((io as any).stdout) as { command: string; args: string[] };
+  assert.ok(parsed.command.length > 0);
+  assert.equal(parsed.args.length, 1);
 });

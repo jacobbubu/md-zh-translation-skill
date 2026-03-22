@@ -4,10 +4,12 @@
   "description": "CLI skill for translating English Markdown articles into polished Chinese Markdown with a hidden gated pipeline.",
   "type": "module",
   "bin": {
-    "md-zh-translate": "./dist/src/cli.js"
+    "md-zh-translate": "./dist/src/cli.js",
+    "md-zh-translate-mcp": "./dist/src/mcp-server.js"
   },
   "files": [
-    "dist",
+    "dist/src",
+    "README.md",
     "SKILL.md",
     "agents"
   ],
@@ -25,7 +27,11 @@
     ".": "./dist/src/index.js"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.27.1",
     "@jacobbubu/md-zh-format": "^1.0.1"
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "devDependencies": {
     "@semantic-release/commit-analyzer": "^13.0.1",

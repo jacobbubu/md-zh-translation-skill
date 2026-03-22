@@ -10,7 +10,20 @@
 
 ## 安装
 
-先克隆仓库，然后安装依赖并构建：
+如果包已经发布到 npm，优先直接安装：
+
+```bash
+npm install -g md-zh-translation-skill
+```
+
+安装完成后可以直接检查：
+
+```bash
+md-zh-translate --help
+md-zh-translate --version
+```
+
+如果你是在仓库源码里本地开发，再使用下面这套：
 
 ```bash
 git clone https://github.com/jacobbubu/md-zh-translation-skill.git
@@ -31,7 +44,7 @@ npm link
 node dist/src/cli.js --help
 ```
 
-## 最常用的 3 种模式
+## 最常用的 3 种翻译模式
 
 文件到文件：
 
@@ -58,10 +71,50 @@ md-zh-translate --help
 md-zh-translate --version
 ```
 
+## 一键安装到 AI 客户端
+
+安装完 npm 包后，可以直接把它接到不同客户端：
+
+安装到 Codex：
+
+```bash
+md-zh-translate install codex
+```
+
+安装到 Claude Code：
+
+```bash
+md-zh-translate install claude-code
+```
+
+安装到 Claude Desktop：
+
+```bash
+md-zh-translate install claude-desktop
+```
+
+一次安装全部默认目标：
+
+```bash
+md-zh-translate install all
+```
+
+如果你要写到自定义路径，可以对单个目标加 `--path`：
+
+```bash
+md-zh-translate install codex --path /custom/skills/root
+md-zh-translate install claude-desktop --path /custom/claude_desktop_config.json
+```
+
+安装结果会打印到 `stdout`，安装过程和故障写到 `stderr`。
+
 ## 参数与行为
 
 - `--input <path>`：从文件读取英文 Markdown。提供后会忽略 stdin。
 - `--output <path>`：把最终译文写到文件。不提供时，结果写到 stdout。
+- `install <target>`：安装到 `codex`、`claude-code`、`claude-desktop` 或 `all`。
+- `mcp-config`：打印可复用的 MCP 配置片段，方便接到其他 MCP 客户端。
+- `--path <path>`：给 install 子命令覆盖默认安装位置。
 - `--help`：打印完整帮助。
 - `--version`：打印当前版本号。
 
@@ -70,6 +123,7 @@ md-zh-translate --version
 - `stdout` 只输出最终译文。
 - `stderr` 只输出阶段进度和故障信息。
 - 当你使用 `--output` 时，`stdout` 默认保持为空。
+- 对 `install` 和 `mcp-config` 子命令，`stdout` 会输出结果摘要或配置 JSON。
 
 退出码：
 
@@ -139,8 +193,18 @@ codex --help
 
 这是设计行为。这个工具把最终译文留给 `stdout`，便于重定向、管道和脚本消费；阶段进度和故障都写到 `stderr`。
 
-## 在 Codex 里作为 Skill 使用
+### 5. Claude Desktop 是怎么接入的
 
-仓库根目录已经包含 `SKILL.md` 和 `agents/openai.yaml`。如果你要把它安装成一个本地 Codex skill，可以把整个仓库放到 `$CODEX_HOME/skills/md-zh-translation-skill` 下，再按你的 Codex 环境约定触发该 skill。
+Claude Desktop 不是 skill 安装，而是本地 MCP 安装。`md-zh-translate install claude-desktop` 会把一个本地 stdio MCP server 写进 Claude Desktop 配置，server 入口就是同包自带的 `md-zh-translate-mcp` 对应脚本。
+
+如果你想接入其他支持 MCP 的客户端，也可以先看配置片段：
+
+```bash
+md-zh-translate mcp-config
+```
+
+## 作为 Skill 使用
+
+仓库根目录已经包含 `SKILL.md` 和 `agents/openai.yaml`。Codex 和 Claude Code 的 install 子命令会分别把 skill 安装到它们各自的默认目录。
 
 对 skill 使用者来说，公开接口仍然只有 `md-zh-translate`，不会暴露 prompt 研究和评测流程。
