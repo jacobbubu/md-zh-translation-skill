@@ -1,0 +1,4 @@
+interface:
+  display_name: "MD Zh Translate"
+  short_description: "Translate English Markdown articles into polished Chinese Markdown via md-zh-translate"
+  default_prompt: "Use $md-zh-translation-skill to translate the provided English Markdown article into Chinese Markdown with the md-zh-translate CLI."

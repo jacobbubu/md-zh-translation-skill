@@ -1,0 +1,205 @@
+#!/usr/bin/env node
+
+import { readFile, writeFile } from "node:fs/promises";
+import process from "node:process";
+
+import { CliError, InputError } from "./errors.js";
+import { translateMarkdownArticle, type TranslateOptions } from "./translate.js";
+
+export type CliIo = {
+  isStdinTTY: boolean;
+  readFile: (path: string) => Promise<string>;
+  writeFile: (path: string, content: string) => Promise<void>;
+  readStdin: () => Promise<string>;
+  writeStdout: (content: string) => void;
+  writeStderr: (content: string) => void;
+};
+
+export type CliDependencies = {
+  translate: (source: string, options: TranslateOptions) => Promise<{ markdown: string }>;
+  version: string;
+  cwd: string;
+};
+
+type ParsedArgs = {
+  inputPath?: string;
+  outputPath?: string;
+  showHelp: boolean;
+  showVersion: boolean;
+};
+
+const HELP_TEXT = `md-zh-translate
+
+Translate an English Markdown article into polished Chinese Markdown.
+
+Usage:
+  md-zh-translate --input article.md --output article.zh.md
+  md-zh-translate --input article.md
+  cat article.md | md-zh-translate > article.zh.md
+
+Options:
+  --input <path>   Read the source Markdown from a file. When provided, stdin is ignored.
+  --output <path>  Write the final translated Markdown to a file. When omitted, output goes to stdout.
+  --help           Show this help text.
+  --version        Show the CLI version.
+
+Behavior modes:
+  1. File -> file     md-zh-translate --input in.md --output out.md
+  2. File -> stdout   md-zh-translate --input in.md
+  3. Stdin -> stdout  cat in.md | md-zh-translate
+
+Standard streams:
+  - stdout only contains the final translated Markdown, unless --help or --version is used.
+  - stderr reports progress, diagnostics, and failures.
+
+Exit codes:
+  0  Success.
+  2  Invalid arguments or missing input.
+  3  Codex CLI execution failed.
+  4  The hidden hard gate still failed after the repair loop.
+  5  Markdown beautification failed.
+
+Defaults:
+  - Internal model: gpt-5.4-mini
+  - Internal pipeline: frozen Scheme H
+  - Final Markdown is beautified with @jacobbubu/md-zh-format
+`;
+
+function parseArgs(argv: readonly string[]): ParsedArgs {
+  const parsed: ParsedArgs = {
+    showHelp: false,
+    showVersion: false
+  };
+
+  for (let index = 0; index < argv.length; index += 1) {
+    const current = argv[index];
+    switch (current) {
+      case "--help":
+        parsed.showHelp = true;
+        break;
+      case "--version":
+        parsed.showVersion = true;
+        break;
+      case "--input":
+        if (argv[index + 1] == null || argv[index + 1]?.startsWith("--")) {
+          throw new InputError("--input requires a file path.");
+        }
+        parsed.inputPath = argv[index + 1]!;
+        index += 1;
+        break;
+      case "--output":
+        if (argv[index + 1] == null || argv[index + 1]?.startsWith("--")) {
+          throw new InputError("--output requires a file path.");
+        }
+        parsed.outputPath = argv[index + 1]!;
+        index += 1;
+        break;
+      default:
+        throw new InputError(`Unknown argument: ${current}`);
+    }
+  }
+  return parsed;
+}
+
+async function readProcessStdin(): Promise<string> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of process.stdin) {
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)));
+  }
+  return Buffer.concat(chunks).toString("utf8");
+}
+
+function createDefaultIo(): CliIo {
+  return {
+    isStdinTTY: Boolean(process.stdin.isTTY),
+    readFile: (filePath) => readFile(filePath, "utf8"),
+    writeFile: (filePath, content) => writeFile(filePath, content, "utf8"),
+    readStdin: readProcessStdin,
+    writeStdout: (content) => {
+      process.stdout.write(content);
+    },
+    writeStderr: (content) => {
+      process.stderr.write(content);
+    }
+  };
+}
+
+function createDefaultDependencies(): CliDependencies {
+  return {
+    translate: translateMarkdownArticle,
+    version: process.env.npm_package_version ?? "0.1.0",
+    cwd: process.cwd()
+  };
+}
+
+function normalizeProgressMessage(message: string): string | null {
+  const trimmed = message.trim();
+  if (!trimmed) {
+    return null;
+  }
+  return `[md-zh-translate] ${trimmed}\n`;
+}
+
+export async function runCli(
+  argv: readonly string[],
+  io: CliIo = createDefaultIo(),
+  dependencies: CliDependencies = createDefaultDependencies()
+): Promise<number> {
+  try {
+    const args = parseArgs(argv);
+
+    if (args.showHelp) {
+      io.writeStdout(HELP_TEXT);
+      return 0;
+    }
+
+    if (args.showVersion) {
+      io.writeStdout(`${dependencies.version}\n`);
+      return 0;
+    }
+
+    const source = args.inputPath
+      ? await io.readFile(args.inputPath)
+      : io.isStdinTTY
+        ? null
+        : await io.readStdin();
+
+    if (!source || source.trim().length === 0) {
+      throw new InputError("No input Markdown provided. Use --input <path> or pipe content into stdin.");
+    }
+
+    const result = await dependencies.translate(source, {
+      cwd: dependencies.cwd,
+      sourcePathHint: args.inputPath ?? "stdin.md",
+      onProgress: (message) => {
+        const normalized = normalizeProgressMessage(message);
+        if (normalized) {
+          io.writeStderr(normalized);
+        }
+      }
+    });
+
+    if (args.outputPath) {
+      await io.writeFile(args.outputPath, `${result.markdown.trimEnd()}\n`);
+      io.writeStderr(`[md-zh-translate] Wrote translated Markdown to ${args.outputPath}\n`);
+      return 0;
+    }
+
+    io.writeStdout(`${result.markdown.trimEnd()}\n`);
+    return 0;
+  } catch (error) {
+    if (error instanceof CliError) {
+      io.writeStderr(`[md-zh-translate] ${error.message}\n`);
+      return error.exitCode;
+    }
+
+    const message = error instanceof Error ? error.message : String(error);
+    io.writeStderr(`[md-zh-translate] ${message}\n`);
+    return 3;
+  }
+}
+
+if (import.meta.url === `file://${process.argv[1]}`) {
+  const exitCode = await runCli(process.argv.slice(2));
+  process.exitCode = exitCode;
+}
