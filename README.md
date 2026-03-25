@@ -4,7 +4,8 @@
 
 ## 环境要求
 
-- Node.js `>= 20`
+- 运行已发布的 CLI：Node.js `>= 20`
+- 在仓库源码里开发、执行 `npm install`、跑 CI 或发版：Node.js `>= 24.10.0`
 - 本机已安装并可直接执行 `codex`
 - `codex` 已完成登录或鉴权
 
@@ -28,6 +29,7 @@ md-zh-translate --version
 ```bash
 git clone https://github.com/jacobbubu/md-zh-translation-skill.git
 cd md-zh-translation-skill
+nvm use
 npm install
 npm run build
 ```
