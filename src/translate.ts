@@ -1,7 +1,8 @@
 import { buildGateAuditPrompt, buildInitialPrompt, buildRepairPrompt, buildStylePolishPrompt } from "./internal/prompts/scheme-h.js";
 import { DefaultCodexExecutor, type CodexExecutor } from "./codex-exec.js";
 import { FormattingError, HardGateError } from "./errors.js";
-import { formatTranslatedMarkdown } from "./format.js";
+import { formatTranslatedBody, reconstructMarkdown } from "./format.js";
+import { extractFrontmatter, protectMarkdownSpans, restoreMarkdownSpans } from "./markdown-protection.js";
 
 const DEFAULT_MODEL = "gpt-5.4-mini";
 const MAX_REPAIR_CYCLES = 2;
@@ -30,7 +31,7 @@ export type TranslateOptions = {
   sourcePathHint?: string;
   model?: string;
   executor?: CodexExecutor;
-  formatter?: typeof formatTranslatedMarkdown;
+  formatter?: typeof formatTranslatedBody;
   onProgress?: (message: string, stage: TranslateProgress) => void;
 };
 
@@ -162,13 +163,15 @@ function report(options: TranslateOptions, stage: TranslateProgress, message: st
 
 export async function translateMarkdownArticle(source: string, options: TranslateOptions = {}): Promise<TranslateResult> {
   const executor = options.executor ?? new DefaultCodexExecutor();
-  const formatter = options.formatter ?? formatTranslatedMarkdown;
+  const formatter = options.formatter ?? formatTranslatedBody;
   const model = options.model ?? (process.env.TRANSLATION_MODEL?.trim() || DEFAULT_MODEL);
   const cwd = options.cwd ?? process.cwd();
   const sourcePathHint = options.sourcePathHint ?? "article.md";
+  const { frontmatter, body } = extractFrontmatter(source);
+  const { protectedBody, spans } = protectMarkdownSpans(body);
 
   report(options, "draft", `Starting translation with model ${model}.`);
-  const draftResult = await executor.execute(buildInitialPrompt(source), {
+  const draftResult = await executor.execute(buildInitialPrompt(protectedBody), {
     cwd,
     model,
     onStderr: (chunk) => report(options, "draft", chunk.trim())
@@ -176,7 +179,7 @@ export async function translateMarkdownArticle(source: string, options: Translat
   let currentTranslation = draftResult.text.trim();
 
   report(options, "audit", "Running hard gate audit.");
-  let auditResult = await executor.execute(buildGateAuditPrompt(source, currentTranslation), {
+  let auditResult = await executor.execute(buildGateAuditPrompt(protectedBody, currentTranslation), {
     cwd,
     model,
     outputSchema: GATE_AUDIT_SCHEMA,
@@ -188,7 +191,7 @@ export async function translateMarkdownArticle(source: string, options: Translat
   while (!isHardPass(gateAudit) && repairCyclesUsed < MAX_REPAIR_CYCLES && gateAudit.must_fix.length > 0) {
     repairCyclesUsed += 1;
     report(options, "repair", `Repair cycle ${repairCyclesUsed} of ${MAX_REPAIR_CYCLES}.`);
-    const repairResult = await executor.execute(buildRepairPrompt(source, currentTranslation, gateAudit.must_fix), {
+    const repairResult = await executor.execute(buildRepairPrompt(protectedBody, currentTranslation, gateAudit.must_fix), {
       cwd,
       model,
       onStderr: (chunk) => report(options, "repair", chunk.trim())
@@ -196,7 +199,7 @@ export async function translateMarkdownArticle(source: string, options: Translat
     currentTranslation = repairResult.text.trim();
 
     report(options, "audit", `Rechecking hard gate after repair cycle ${repairCyclesUsed}.`);
-    auditResult = await executor.execute(buildGateAuditPrompt(source, currentTranslation), {
+    auditResult = await executor.execute(buildGateAuditPrompt(protectedBody, currentTranslation), {
       cwd,
       model,
       outputSchema: GATE_AUDIT_SCHEMA,
@@ -211,15 +214,17 @@ export async function translateMarkdownArticle(source: string, options: Translat
   }
 
   report(options, "style", "Applying style polish after hard gate pass.");
-  const styleResult = await executor.execute(buildStylePolishPrompt(source, currentTranslation), {
+  const styleResult = await executor.execute(buildStylePolishPrompt(protectedBody, currentTranslation), {
     cwd,
     model,
     onStderr: (chunk) => report(options, "style", chunk.trim())
   });
 
+  const restoredBody = restoreMarkdownSpans(styleResult.text.trim(), spans);
   report(options, "format", "Formatting translated Markdown.");
   try {
-    const markdown = await formatter(styleResult.text.trim(), sourcePathHint);
+    const formattedBody = await formatter(restoredBody, sourcePathHint);
+    const markdown = reconstructMarkdown(frontmatter, formattedBody);
     return {
       markdown,
       model,

@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { HardGateError } from "../src/errors.js";
+import { extractFrontmatter, protectMarkdownSpans } from "../src/markdown-protection.js";
 import { parseGateAudit, translateMarkdownArticle, type GateAudit } from "../src/translate.js";
 import type { CodexExecOptions, CodexExecResult, CodexExecutor } from "../src/codex-exec.js";
 
@@ -100,4 +101,41 @@ test("translateMarkdownArticle fails after two repair cycles when the gate never
       return true;
     }
   );
+});
+
+test("translateMarkdownArticle preserves frontmatter and protected Markdown spans", async () => {
+  const source = [
+    "---",
+    "title: Hello World",
+    "tags:",
+    "  - ai",
+    "---",
+    "",
+    "# Intro",
+    "",
+    "Use `npm install` before running.",
+    "",
+    "```ts",
+    'const url = "https://example.com";',
+    "```",
+    "",
+    "Read [the docs](https://example.com/docs).",
+    ""
+  ].join("\n");
+
+  const { body } = extractFrontmatter(source);
+  const { protectedBody } = protectMarkdownSpans(body);
+  const passingAudit = JSON.stringify(createAudit(true));
+  const executor = new StubExecutor([protectedBody, passingAudit, protectedBody]);
+
+  const result = await translateMarkdownArticle(source, {
+    executor,
+    formatter: async (markdown) => markdown
+  });
+
+  assert.match(result.markdown, /^---\ntitle: Hello World\ntags:\n  - ai\n---\n/);
+  assert.match(result.markdown, /Use `npm install` before running\./);
+  assert.match(result.markdown, /```ts\nconst url = "https:\/\/example\.com";\n```/);
+  assert.match(result.markdown, /\[the docs\]\(https:\/\/example\.com\/docs\)/);
+  assert.equal(executor.prompts.some((prompt) => prompt.includes("title: Hello World")), false);
 });
