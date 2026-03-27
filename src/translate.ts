@@ -12,7 +12,9 @@ type AuditCheckKey =
   | "first_mention_bilingual"
   | "numbers_units_logic"
   | "chinese_punctuation"
-  | "unit_conversion_boundary";
+  | "unit_conversion_boundary"
+  | "protected_span_integrity"
+  | "frontmatter_isolation";
 
 export type GateAudit = {
   hard_checks: Record<AuditCheckKey, { pass: boolean; problem: string }>;
@@ -56,14 +58,18 @@ const GATE_AUDIT_SCHEMA = {
         "first_mention_bilingual",
         "numbers_units_logic",
         "chinese_punctuation",
-        "unit_conversion_boundary"
+        "unit_conversion_boundary",
+        "protected_span_integrity",
+        "frontmatter_isolation"
       ],
       properties: {
         paragraph_match: auditItemSchema(),
         first_mention_bilingual: auditItemSchema(),
         numbers_units_logic: auditItemSchema(),
         chinese_punctuation: auditItemSchema(),
-        unit_conversion_boundary: auditItemSchema()
+        unit_conversion_boundary: auditItemSchema(),
+        protected_span_integrity: auditItemSchema(),
+        frontmatter_isolation: auditItemSchema()
       }
     },
     must_fix: {
@@ -125,7 +131,9 @@ export function parseGateAudit(text: string): GateAudit {
     "first_mention_bilingual",
     "numbers_units_logic",
     "chinese_punctuation",
-    "unit_conversion_boundary"
+    "unit_conversion_boundary",
+    "protected_span_integrity",
+    "frontmatter_isolation"
   ];
 
   if (!hardChecks || typeof hardChecks !== "object") {
@@ -157,6 +165,18 @@ function isHardPass(audit: GateAudit): boolean {
   return Object.values(audit.hard_checks).every((item) => item.pass);
 }
 
+function validateStructuralGateChecks(audit: GateAudit): void {
+  if (!audit.hard_checks.protected_span_integrity.pass) {
+    const detail = audit.hard_checks.protected_span_integrity.problem || "Protected span integrity failed.";
+    throw new HardGateError(`Protected span integrity failed: ${detail}`);
+  }
+
+  if (!audit.hard_checks.frontmatter_isolation.pass) {
+    const detail = audit.hard_checks.frontmatter_isolation.problem || "Frontmatter isolation failed.";
+    throw new HardGateError(`Frontmatter isolation failed: ${detail}`);
+  }
+}
+
 function report(options: TranslateOptions, stage: TranslateProgress, message: string): void {
   options.onProgress?.(message, stage);
 }
@@ -186,6 +206,7 @@ export async function translateMarkdownArticle(source: string, options: Translat
     onStderr: (chunk) => report(options, "audit", chunk.trim())
   });
   let gateAudit = parseGateAudit(auditResult.text);
+  validateStructuralGateChecks(gateAudit);
   let repairCyclesUsed = 0;
 
   while (!isHardPass(gateAudit) && repairCyclesUsed < MAX_REPAIR_CYCLES && gateAudit.must_fix.length > 0) {
@@ -206,6 +227,7 @@ export async function translateMarkdownArticle(source: string, options: Translat
       onStderr: (chunk) => report(options, "audit", chunk.trim())
     });
     gateAudit = parseGateAudit(auditResult.text);
+    validateStructuralGateChecks(gateAudit);
   }
 
   if (!isHardPass(gateAudit)) {

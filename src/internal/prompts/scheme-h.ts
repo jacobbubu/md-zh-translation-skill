@@ -48,7 +48,9 @@ export const GATE_AUDIT_PROMPT = `
     "first_mention_bilingual": { "pass": true, "problem": "" },
     "numbers_units_logic": { "pass": true, "problem": "" },
     "chinese_punctuation": { "pass": true, "problem": "" },
-    "unit_conversion_boundary": { "pass": true, "problem": "" }
+    "unit_conversion_boundary": { "pass": true, "problem": "" },
+    "protected_span_integrity": { "pass": true, "problem": "" },
+    "frontmatter_isolation": { "pass": true, "problem": "" }
   },
   "must_fix": [
     "逐条列出必须修复的问题，描述要具体、可执行"
@@ -61,6 +63,8 @@ export const GATE_AUDIT_PROMPT = `
 3. numbers_units_logic：数字、年份、单位、比较关系、逻辑关系是否没有明显错漏。
 4. chinese_punctuation：是否符合中文标点习惯；如果保留完整英文段落，该英文段落内部可保留英文标点，不单独判错。
 5. unit_conversion_boundary：长度、重量、华氏温度、以英寸表示的累计降水量是否按规则补常见换算，其他单位是否没有被擅自换算。
+6. protected_span_integrity：所有占位符是否逐字保留、没有丢失、没有改写、没有增删、没有被污染进别的文本。
+7. frontmatter_isolation：frontmatter 不在本次任务范围内；如果译文试图补写、推测、改写 frontmatter，或把 frontmatter 内容带入正文，判为不通过。
 
 输出要求：
 - 只返回 JSON。
@@ -69,6 +73,7 @@ export const GATE_AUDIT_PROMPT = `
 - must_fix 必须原子化，一条只写一个具体问题。
 - 每条 must_fix 都要写清位置、问题和修复目标。
 - 如果某个 hard_check 判为 false，对应问题必须在 must_fix 中完整覆盖，不得遗漏。
+- 如果 protected_span_integrity 或 frontmatter_isolation 不通过，必须明确写出具体污染位置或被破坏的占位符，但不要输出修订稿。
 
 ${MARKDOWN_RULES}
 

@@ -6,14 +6,17 @@ import { extractFrontmatter, protectMarkdownSpans } from "../src/markdown-protec
 import { parseGateAudit, translateMarkdownArticle, type GateAudit } from "../src/translate.js";
 import type { CodexExecOptions, CodexExecResult, CodexExecutor } from "../src/codex-exec.js";
 
-function createAudit(pass: boolean, mustFix: string[] = []): GateAudit {
+function createAudit(pass: boolean, mustFix: string[] = [], overrides: Partial<GateAudit["hard_checks"]> = {}): GateAudit {
   return {
     hard_checks: {
       paragraph_match: { pass, problem: pass ? "" : "paragraph mismatch" },
       first_mention_bilingual: { pass, problem: pass ? "" : "missing bilingual term" },
       numbers_units_logic: { pass, problem: pass ? "" : "unit mismatch" },
       chinese_punctuation: { pass, problem: pass ? "" : "punctuation mismatch" },
-      unit_conversion_boundary: { pass, problem: pass ? "" : "conversion mismatch" }
+      unit_conversion_boundary: { pass, problem: pass ? "" : "conversion mismatch" },
+      protected_span_integrity: { pass: true, problem: "" },
+      frontmatter_isolation: { pass: true, problem: "" },
+      ...overrides
     },
     must_fix: mustFix
   };
@@ -138,4 +141,44 @@ test("translateMarkdownArticle preserves frontmatter and protected Markdown span
   assert.match(result.markdown, /```ts\nconst url = "https:\/\/example\.com";\n```/);
   assert.match(result.markdown, /\[the docs\]\(https:\/\/example\.com\/docs\)/);
   assert.equal(executor.prompts.some((prompt) => prompt.includes("title: Hello World")), false);
+});
+
+test("translateMarkdownArticle fails immediately when protected span integrity is broken", async () => {
+  const source = "# Title\n\nBody";
+  const brokenAudit = JSON.stringify(
+    createAudit(false, ["占位符被改写"], {
+      protected_span_integrity: { pass: false, problem: "占位符 @@MDZH_INLINE_CODE_0001@@ 被改写。" }
+    })
+  );
+  const executor = new StubExecutor(["# 标题\n\n正文", brokenAudit]);
+
+  await assert.rejects(
+    () =>
+      translateMarkdownArticle(source, {
+        executor,
+        formatter: async (markdown) => markdown
+      }),
+    (error: unknown) => {
+      assert.ok(error instanceof HardGateError);
+      assert.match(error.message, /Protected span integrity failed/);
+      return true;
+    }
+  );
+
+  assert.equal(executor.prompts.length, 2);
+});
+
+test("parseGateAudit requires structural hard checks", () => {
+  const invalid = JSON.stringify({
+    hard_checks: {
+      paragraph_match: { pass: true, problem: "" },
+      first_mention_bilingual: { pass: true, problem: "" },
+      numbers_units_logic: { pass: true, problem: "" },
+      chinese_punctuation: { pass: true, problem: "" },
+      unit_conversion_boundary: { pass: true, problem: "" }
+    },
+    must_fix: []
+  });
+
+  assert.throws(() => parseGateAudit(invalid), /protected_span_integrity/);
 });
