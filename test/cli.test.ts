@@ -2,9 +2,10 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import os from "node:os";
 import path from "node:path";
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, symlink, writeFile } from "node:fs/promises";
+import { pathToFileURL } from "node:url";
 
-import { runCli, type CliDependencies, type CliIo } from "../src/cli.js";
+import { isMainCliModule, runCli, type CliDependencies, type CliIo } from "../src/cli.js";
 
 function createIo(overrides: Partial<CliIo> = {}): CliIo {
   let stdout = "";
@@ -124,4 +125,22 @@ test("runCli prints MCP config JSON", async () => {
   const parsed = JSON.parse((io as any).stdout) as { command: string; args: string[] };
   assert.ok(parsed.command.length > 0);
   assert.equal(parsed.args.length, 1);
+});
+
+test("isMainCliModule matches a direct file path", async () => {
+  const tmp = await mkdtemp(path.join(os.tmpdir(), "md-zh-cli-main-"));
+  const entryFile = path.join(tmp, "cli-entry.js");
+  await writeFile(entryFile, "export {};\n", "utf8");
+
+  assert.equal(isMainCliModule(pathToFileURL(entryFile).href, entryFile), true);
+});
+
+test("isMainCliModule matches a symlinked executable path", async () => {
+  const tmp = await mkdtemp(path.join(os.tmpdir(), "md-zh-cli-symlink-"));
+  const entryFile = path.join(tmp, "cli-entry.js");
+  const symlinkPath = path.join(tmp, "md-zh-translate");
+  await writeFile(entryFile, "export {};\n", "utf8");
+  await symlink(entryFile, symlinkPath);
+
+  assert.equal(isMainCliModule(pathToFileURL(entryFile).href, symlinkPath), true);
 });
