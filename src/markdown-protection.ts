@@ -9,7 +9,10 @@ export type ProtectedKind =
   | "code_block"
   | "inline_code"
   | "link_destination"
-  | "image_destination";
+  | "image_destination"
+  | "autolink"
+  | "html_attribute"
+  | "html_block";
 
 export type ProtectedSpan = {
   id: string;
@@ -64,8 +67,11 @@ export function protectMarkdownSpans(body: string): ProtectedMarkdown {
 
   let protectedBody = body;
   protectedBody = protectFencedCodeBlocks(protectedBody, register);
+  protectedBody = protectHtmlBlocks(protectedBody, register);
   protectedBody = protectInlineCode(protectedBody, register);
   protectedBody = protectLinkDestinations(protectedBody, register);
+  protectedBody = protectAutolinks(protectedBody, register);
+  protectedBody = protectHtmlAttributes(protectedBody, register);
 
   return { protectedBody, spans };
 }
@@ -165,6 +171,36 @@ function protectLinkDestinations(
     const kind: ProtectedKind = label.startsWith("![") ? "image_destination" : "link_destination";
     return `${label}(${register(kind, destination)})`;
   });
+}
+
+function protectAutolinks(
+  input: string,
+  register: (kind: ProtectedKind, raw: string) => string
+): string {
+  return input.replace(/<((https?:\/\/|mailto:)[^>\s]+)>/gi, (_match, raw: string) => {
+    return `<${register("autolink", raw)}>`;
+  });
+}
+
+function protectHtmlAttributes(
+  input: string,
+  register: (kind: ProtectedKind, raw: string) => string
+): string {
+  return input.replace(/\b(href|src|poster)=("([^"]*)"|'([^']*)')/gi, (_match, attribute: string, quoted: string, doubleQuoted?: string, singleQuoted?: string) => {
+    const rawValue = doubleQuoted ?? singleQuoted ?? "";
+    const quote = quoted[0] ?? '"';
+    return `${attribute}=${quote}${register("html_attribute", rawValue)}${quote}`;
+  });
+}
+
+function protectHtmlBlocks(
+  input: string,
+  register: (kind: ProtectedKind, raw: string) => string
+): string {
+  return input.replace(
+    /<(div|section|article|details|summary|figure|figcaption|table|thead|tbody|tfoot|tr|td|th|aside|header|footer|nav)\b[\s\S]*?<\/\1>/gi,
+    (raw) => register("html_block", raw)
+  );
 }
 
 export function restoreMarkdownSpans(protectedBody: string, spans: ProtectedSpan[]): string {

@@ -49,3 +49,30 @@ test("protectMarkdownSpans and restoreMarkdownSpans preserve code, inline code, 
   const restored = restoreMarkdownSpans(protectedMarkdown.protectedBody, protectedMarkdown.spans);
   assert.equal(restored, source);
 });
+
+test("protectMarkdownSpans preserves autolinks, HTML attributes, and raw HTML blocks", () => {
+  const source = [
+    "Visit <https://example.com/docs> and <mailto:test@example.com>.",
+    "",
+    '<a href="https://example.com/page" src="/img/demo.png">Example</a>',
+    "",
+    "<details>",
+    "<summary>Keep this raw HTML block untouched</summary>",
+    "<p>Even if it contains prose, do not send it into the model.</p>",
+    "</details>",
+    ""
+  ].join("\n");
+
+  const protectedMarkdown = protectMarkdownSpans(source);
+
+  assert.match(protectedMarkdown.protectedBody, /@@MDZH_AUTOLINK_/);
+  assert.match(protectedMarkdown.protectedBody, /href="@@MDZH_HTML_ATTRIBUTE_/);
+  assert.match(protectedMarkdown.protectedBody, /src="@@MDZH_HTML_ATTRIBUTE_/);
+  assert.match(protectedMarkdown.protectedBody, /@@MDZH_HTML_BLOCK_/);
+  assert.doesNotMatch(protectedMarkdown.protectedBody, /https:\/\/example\.com\/docs/);
+  assert.doesNotMatch(protectedMarkdown.protectedBody, /mailto:test@example\.com/);
+  assert.doesNotMatch(protectedMarkdown.protectedBody, /Keep this raw HTML block untouched/);
+
+  const restored = restoreMarkdownSpans(protectedMarkdown.protectedBody, protectedMarkdown.spans);
+  assert.equal(restored, source);
+});
