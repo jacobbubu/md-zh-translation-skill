@@ -1,7 +1,9 @@
 #!/usr/bin/env node
 
+import { realpathSync } from "node:fs";
 import { readFile, writeFile } from "node:fs/promises";
 import process from "node:process";
+import { fileURLToPath } from "node:url";
 
 import { CliError, InputError } from "./errors.js";
 import { buildClaudeDesktopMcpConfig, installTarget, type InstallTarget } from "./install.js";
@@ -268,7 +270,19 @@ export async function runCli(
   }
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+export function isMainCliModule(importMetaUrl: string, argv1: string | undefined = process.argv[1]): boolean {
+  if (!argv1) {
+    return false;
+  }
+
+  try {
+    return realpathSync(fileURLToPath(importMetaUrl)) === realpathSync(argv1);
+  } catch {
+    return false;
+  }
+}
+
+if (isMainCliModule(import.meta.url)) {
   const exitCode = await runCli(process.argv.slice(2));
   process.exitCode = exitCode;
 }
