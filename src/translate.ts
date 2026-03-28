@@ -13,8 +13,7 @@ type AuditCheckKey =
   | "numbers_units_logic"
   | "chinese_punctuation"
   | "unit_conversion_boundary"
-  | "protected_span_integrity"
-  | "frontmatter_isolation";
+  | "protected_span_integrity";
 
 export type GateAudit = {
   hard_checks: Record<AuditCheckKey, { pass: boolean; problem: string }>;
@@ -59,8 +58,7 @@ const GATE_AUDIT_SCHEMA = {
         "numbers_units_logic",
         "chinese_punctuation",
         "unit_conversion_boundary",
-        "protected_span_integrity",
-        "frontmatter_isolation"
+        "protected_span_integrity"
       ],
       properties: {
         paragraph_match: auditItemSchema(),
@@ -68,8 +66,7 @@ const GATE_AUDIT_SCHEMA = {
         numbers_units_logic: auditItemSchema(),
         chinese_punctuation: auditItemSchema(),
         unit_conversion_boundary: auditItemSchema(),
-        protected_span_integrity: auditItemSchema(),
-        frontmatter_isolation: auditItemSchema()
+        protected_span_integrity: auditItemSchema()
       }
     },
     must_fix: {
@@ -132,8 +129,7 @@ export function parseGateAudit(text: string): GateAudit {
     "numbers_units_logic",
     "chinese_punctuation",
     "unit_conversion_boundary",
-    "protected_span_integrity",
-    "frontmatter_isolation"
+    "protected_span_integrity"
   ];
 
   if (!hardChecks || typeof hardChecks !== "object") {
@@ -169,11 +165,6 @@ function validateStructuralGateChecks(audit: GateAudit): void {
   if (!audit.hard_checks.protected_span_integrity.pass) {
     const detail = audit.hard_checks.protected_span_integrity.problem || "Protected span integrity failed.";
     throw new HardGateError(`Protected span integrity failed: ${detail}`);
-  }
-
-  if (!audit.hard_checks.frontmatter_isolation.pass) {
-    const detail = audit.hard_checks.frontmatter_isolation.problem || "Frontmatter isolation failed.";
-    throw new HardGateError(`Frontmatter isolation failed: ${detail}`);
   }
 }
 

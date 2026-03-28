@@ -7,7 +7,6 @@ export type FrontmatterSplit = {
 
 export type ProtectedKind =
   | "code_block"
-  | "inline_code"
   | "link_destination"
   | "image_destination"
   | "autolink"
@@ -68,10 +67,13 @@ export function protectMarkdownSpans(body: string): ProtectedMarkdown {
   let protectedBody = body;
   protectedBody = protectFencedCodeBlocks(protectedBody, register);
   protectedBody = protectHtmlBlocks(protectedBody, register);
-  protectedBody = protectInlineCode(protectedBody, register);
-  protectedBody = protectLinkDestinations(protectedBody, register);
-  protectedBody = protectAutolinks(protectedBody, register);
-  protectedBody = protectHtmlAttributes(protectedBody, register);
+  protectedBody = mapOutsideInlineCode(protectedBody, (text) => {
+    let next = text;
+    next = protectLinkDestinations(next, register);
+    next = protectAutolinks(next, register);
+    next = protectHtmlAttributes(next, register);
+    return next;
+  });
 
   return { protectedBody, spans };
 }
@@ -117,19 +119,18 @@ function protectFencedCodeBlocks(
   return output;
 }
 
-function protectInlineCode(
-  input: string,
-  register: (kind: ProtectedKind, raw: string) => string
-): string {
+function mapOutsideInlineCode(input: string, transform: (text: string) => string): string {
   let output = "";
   let index = 0;
+  let textStart = 0;
 
   while (index < input.length) {
     if (input[index] !== "`") {
-      output += input[index];
       index += 1;
       continue;
     }
+
+    output += transform(input.slice(textStart, index));
 
     let tickCount = 1;
     while (input[index + tickCount] === "`") {
@@ -150,16 +151,18 @@ function protectInlineCode(
     }
 
     if (closingIndex < 0) {
-      output += input.slice(start, start + tickCount);
       index = start + tickCount;
+      textStart = start;
       continue;
     }
 
     const raw = input.slice(start, closingIndex + tickCount);
-    output += register("inline_code", raw);
+    output += raw;
     index = closingIndex + tickCount;
+    textStart = index;
   }
 
+  output += transform(input.slice(textStart));
   return output;
 }
 

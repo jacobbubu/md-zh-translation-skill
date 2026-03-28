@@ -15,7 +15,6 @@ function createAudit(pass: boolean, mustFix: string[] = [], overrides: Partial<G
       chinese_punctuation: { pass, problem: pass ? "" : "punctuation mismatch" },
       unit_conversion_boundary: { pass, problem: pass ? "" : "conversion mismatch" },
       protected_span_integrity: { pass: true, problem: "" },
-      frontmatter_isolation: { pass: true, problem: "" },
       ...overrides
     },
     must_fix: mustFix
