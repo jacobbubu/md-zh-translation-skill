@@ -143,6 +143,70 @@ test("translateMarkdownArticle preserves frontmatter and protected Markdown span
   assert.equal(executor.prompts.some((prompt) => prompt.includes("title: Hello World")), false);
 });
 
+test("translateMarkdownArticle falls back to the hard-pass translation when style polish breaks a protected span", async () => {
+  const source = [
+    "# Sandbox",
+    "",
+    "Run this command:",
+    "",
+    "```bash",
+    "/sandbox",
+    "```",
+    ""
+  ].join("\n");
+
+  const { protectedBody } = protectMarkdownSpans(source);
+  const passingAudit = JSON.stringify(createAudit(true));
+  const brokenStyle = protectedBody.replace("@@MDZH_CODE_BLOCK_0001@@", "");
+  const executor = new StubExecutor([protectedBody, passingAudit, brokenStyle]);
+  const progress: string[] = [];
+
+  const result = await translateMarkdownArticle(source, {
+    executor,
+    formatter: async (markdown) => markdown,
+    onProgress: (message) => progress.push(message)
+  });
+
+  assert.equal(result.styleApplied, false);
+  assert.match(result.markdown, /```bash\n\/sandbox\n```/);
+  assert.ok(
+    progress.some((message) =>
+      message.includes("falling back to the hard-pass translation")
+    )
+  );
+});
+
+test("translateMarkdownArticle fails when the hard-pass translation already broke a protected span", async () => {
+  const source = [
+    "# Sandbox",
+    "",
+    "Run this command:",
+    "",
+    "```bash",
+    "/sandbox",
+    "```",
+    ""
+  ].join("\n");
+
+  const { protectedBody } = protectMarkdownSpans(source);
+  const passingAudit = JSON.stringify(createAudit(true));
+  const brokenDraft = protectedBody.replace("@@MDZH_CODE_BLOCK_0001@@", "");
+  const executor = new StubExecutor([brokenDraft, passingAudit]);
+
+  await assert.rejects(
+    () =>
+      translateMarkdownArticle(source, {
+        executor,
+        formatter: async (markdown) => markdown
+      }),
+    (error: unknown) => {
+      assert.ok(error instanceof HardGateError);
+      assert.match(error.message, /Protected span integrity failed/);
+      return true;
+    }
+  );
+});
+
 test("translateMarkdownArticle fails immediately when protected span integrity is broken", async () => {
   const source = "# Title\n\nBody";
   const brokenAudit = JSON.stringify(

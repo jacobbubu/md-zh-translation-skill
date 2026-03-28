@@ -235,6 +235,8 @@ export async function translateMarkdownArticle(source: string, options: Translat
     throw new HardGateError(`Hard gate failed after ${repairCyclesUsed} repair cycle(s): ${remaining}`);
   }
 
+  const hardPassBody = restoreMarkdownSpans(currentTranslation, spans);
+
   report(options, "style", "Applying style polish after hard gate pass.");
   const styleResult = await executor.execute(buildStylePolishPrompt(protectedBody, currentTranslation), {
     cwd,
@@ -242,7 +244,22 @@ export async function translateMarkdownArticle(source: string, options: Translat
     onStderr: (chunk) => report(options, "style", chunk.trim())
   });
 
-  const restoredBody = restoreMarkdownSpans(styleResult.text.trim(), spans);
+  let restoredBody = hardPassBody;
+  let styleApplied = false;
+  try {
+    restoredBody = restoreMarkdownSpans(styleResult.text.trim(), spans);
+    styleApplied = true;
+  } catch (error) {
+    if (!(error instanceof HardGateError)) {
+      throw error;
+    }
+    report(
+      options,
+      "style",
+      "Style polish changed protected Markdown spans; falling back to the hard-pass translation."
+    );
+  }
+
   report(options, "format", "Formatting translated Markdown.");
   try {
     const formattedBody = await formatter(restoredBody, sourcePathHint);
@@ -251,7 +268,7 @@ export async function translateMarkdownArticle(source: string, options: Translat
       markdown,
       model,
       repairCyclesUsed,
-      styleApplied: true,
+      styleApplied,
       gateAudit
     };
   } catch (error) {
