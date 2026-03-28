@@ -376,6 +376,8 @@ async function translateProtectedSegment(
   chunkPromptContext: ChunkPromptContext,
   chunkLabel: string
 ): Promise<SegmentTranslationResult> {
+  let threadId: string | undefined;
+
   report(
     context.options,
     "draft",
@@ -386,29 +388,17 @@ async function translateProtectedSegment(
     {
       cwd: context.cwd,
       model: context.model,
+      reuseSession: true,
       onStderr: (stderrChunk) =>
         reportChunkProgress(context.options, "draft", chunkPromptContext.chunkIndex - 1, plan, chunkLabel, stderrChunk)
     }
   );
+  threadId = draftResult.threadId;
   let currentTranslation = draftResult.text;
 
-  report(
-    context.options,
-    "audit",
-    `Chunk ${chunkPromptContext.chunkIndex}/${plan.chunks.length}${chunkLabel}: running hard gate audit.`
-  );
-  let auditResult = await context.executor.execute(
-    withChunkContext(buildGateAuditPrompt(segment.source, currentTranslation), chunkPromptContext),
-    {
-      cwd: context.cwd,
-      model: context.model,
-      outputSchema: GATE_AUDIT_SCHEMA,
-      onStderr: (stderrChunk) =>
-        reportChunkProgress(context.options, "audit", chunkPromptContext.chunkIndex - 1, plan, chunkLabel, stderrChunk)
-    }
-  );
-  let gateAudit = parseGateAudit(auditResult.text);
-  validateStructuralGateChecks(gateAudit);
+  let auditState = await runGateAudit(segment.source, currentTranslation, plan, context, chunkPromptContext, chunkLabel, threadId);
+  let gateAudit = auditState.audit;
+  threadId = auditState.threadId;
   let repairCyclesUsed = 0;
 
   while (!isHardPass(gateAudit) && repairCyclesUsed < MAX_REPAIR_CYCLES && gateAudit.must_fix.length > 0) {
@@ -426,29 +416,17 @@ async function translateProtectedSegment(
       {
         cwd: context.cwd,
         model: context.model,
+        ...(threadId ? { threadId } : { reuseSession: true }),
         onStderr: (stderrChunk) =>
           reportChunkProgress(context.options, "repair", chunkPromptContext.chunkIndex - 1, plan, chunkLabel, stderrChunk)
       }
     );
+    threadId = repairResult.threadId ?? threadId;
     currentTranslation = repairResult.text;
 
-    report(
-      context.options,
-      "audit",
-      `Chunk ${chunkPromptContext.chunkIndex}/${plan.chunks.length}${chunkLabel}: rechecking hard gate after repair cycle ${repairCyclesUsed}.`
-    );
-    auditResult = await context.executor.execute(
-      withChunkContext(buildGateAuditPrompt(segment.source, currentTranslation), chunkPromptContext),
-      {
-        cwd: context.cwd,
-        model: context.model,
-        outputSchema: GATE_AUDIT_SCHEMA,
-        onStderr: (stderrChunk) =>
-          reportChunkProgress(context.options, "audit", chunkPromptContext.chunkIndex - 1, plan, chunkLabel, stderrChunk)
-      }
-    );
-    gateAudit = parseGateAudit(auditResult.text);
-    validateStructuralGateChecks(gateAudit);
+    auditState = await runGateAudit(segment.source, currentTranslation, plan, context, chunkPromptContext, chunkLabel, threadId);
+    gateAudit = auditState.audit;
+    threadId = auditState.threadId;
   }
 
   if (!isHardPass(gateAudit)) {
@@ -468,6 +446,76 @@ async function translateProtectedSegment(
     restoredBody,
     repairCyclesUsed,
     gateAudit
+  };
+}
+
+type GateAuditRunResult = {
+  audit: GateAudit;
+  threadId?: string;
+};
+
+async function runGateAudit(
+  source: string,
+  translation: string,
+  plan: MarkdownChunkPlan,
+  context: ChunkTranslationContext,
+  chunkPromptContext: ChunkPromptContext,
+  chunkLabel: string,
+  threadId?: string
+): Promise<GateAuditRunResult> {
+  report(
+    context.options,
+    "audit",
+    `Chunk ${chunkPromptContext.chunkIndex}/${plan.chunks.length}${chunkLabel}: running hard gate audit.`
+  );
+
+  const prompt = withChunkContext(buildGateAuditPrompt(source, translation), chunkPromptContext);
+
+  if (threadId) {
+    const resumedResult = await context.executor.execute(prompt, {
+      cwd: context.cwd,
+      model: context.model,
+      threadId,
+      onStderr: (stderrChunk) =>
+        reportChunkProgress(context.options, "audit", chunkPromptContext.chunkIndex - 1, plan, chunkLabel, stderrChunk)
+    });
+
+    let resumedAudit: GateAudit | null = null;
+    try {
+      resumedAudit = parseGateAudit(resumedResult.text);
+    } catch (error) {
+      if (!(error instanceof HardGateError)) {
+        throw error;
+      }
+      report(
+        context.options,
+        "audit",
+        `Chunk ${chunkPromptContext.chunkIndex}/${plan.chunks.length}${chunkLabel}: resumed audit did not return stable JSON; retrying with a structured fresh call.`
+      );
+    }
+
+    if (resumedAudit) {
+      validateStructuralGateChecks(resumedAudit);
+      return {
+        audit: resumedAudit,
+        ...(resumedResult.threadId ?? threadId ? { threadId: resumedResult.threadId ?? threadId } : {})
+      };
+    }
+  }
+
+  const structuredResult = await context.executor.execute(prompt, {
+    cwd: context.cwd,
+    model: context.model,
+    outputSchema: GATE_AUDIT_SCHEMA,
+    reuseSession: true,
+    onStderr: (stderrChunk) =>
+      reportChunkProgress(context.options, "audit", chunkPromptContext.chunkIndex - 1, plan, chunkLabel, stderrChunk)
+  });
+  const structuredAudit = parseGateAudit(structuredResult.text);
+  validateStructuralGateChecks(structuredAudit);
+  return {
+    audit: structuredAudit,
+    ...(structuredResult.threadId ? { threadId: structuredResult.threadId } : {})
   };
 }
 

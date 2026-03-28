@@ -55,7 +55,7 @@ class PromptAwareExecutor implements CodexExecutor {
   async execute(prompt: string, options: CodexExecOptions): Promise<CodexExecResult> {
     this.prompts.push(prompt);
 
-    if (options.outputSchema) {
+    if (options.outputSchema || prompt.includes('"hard_checks"') || prompt.includes("只返回 JSON")) {
       return createExecResult(this.passingAudit);
     }
 
@@ -69,11 +69,12 @@ class PromptAwareExecutor implements CodexExecutor {
   }
 }
 
-function createExecResult(text: string): CodexExecResult {
+function createExecResult(text: string, threadId?: string): CodexExecResult {
   return {
     text,
     stderr: "",
     jsonl: "",
+    ...(threadId ? { threadId } : {}),
     usage: {
       inputTokens: 0,
       cachedInputTokens: 0,
@@ -81,6 +82,37 @@ function createExecResult(text: string): CodexExecResult {
       totalTokens: 0
     }
   };
+}
+
+class SessionReuseExecutor implements CodexExecutor {
+  readonly calls: CodexExecOptions[] = [];
+
+  async execute(prompt: string, options: CodexExecOptions): Promise<CodexExecResult> {
+    this.calls.push(options);
+
+    if (options.outputSchema) {
+      return createExecResult(JSON.stringify(createAudit(true)), "thread-1");
+    }
+
+    if (prompt.includes("只返回 JSON")) {
+      if (options.threadId === "thread-1") {
+        return createExecResult("not-json", "thread-1");
+      }
+
+      return createExecResult(JSON.stringify(createAudit(true)), "thread-1");
+    }
+
+    if (prompt.includes("【must_fix】")) {
+      assert.equal(options.threadId, "thread-1");
+      return createExecResult("# 标题（Title）\n\n正文", "thread-1");
+    }
+
+    if (prompt.includes("只做“风格与可读性润色”")) {
+      return createExecResult("# 标题（Title）\n\n正文");
+    }
+
+    return createExecResult("# 标题\n\n正文", "thread-1");
+  }
 }
 
 function extractPromptSection(prompt: string, label: string): string | null {
@@ -256,6 +288,55 @@ test("translateMarkdownArticle runs the hidden pipeline chunk by chunk for long 
   assert.equal(result.markdown, source);
   assert.ok(executor.prompts.length >= chunkPlan.chunks.length * 3);
   assert.ok(executor.prompts[0]?.includes("当前分块：第 1 /"));
+});
+
+test("translateMarkdownArticle reuses a Codex thread within a segment", async () => {
+  const source = "# Title\n\nBody";
+  const firstAudit = JSON.stringify(createAudit(false, ["标题首现术语缺少中英对照"]));
+  const secondAudit = JSON.stringify(createAudit(true));
+  const calls: CodexExecOptions[] = [];
+  const responses = [
+    createExecResult("# 标题\n\n正文", "thread-1"),
+    createExecResult(firstAudit, "thread-1"),
+    createExecResult("# 标题（Title）\n\n正文", "thread-1"),
+    createExecResult(secondAudit, "thread-1"),
+    createExecResult("# 标题（Title）\n\n正文")
+  ];
+
+  const executor: CodexExecutor = {
+    async execute(_prompt, options) {
+      calls.push(options);
+      const next = responses.shift();
+      assert.ok(next, "Unexpected extra Codex call");
+      return next;
+    }
+  };
+
+  await translateMarkdownArticle(source, {
+    executor,
+    formatter: async (markdown) => markdown
+  });
+
+  assert.equal(calls[0]?.reuseSession, true);
+  assert.equal(calls[1]?.threadId, "thread-1");
+  assert.equal(calls[2]?.threadId, "thread-1");
+  assert.equal(calls[3]?.threadId, "thread-1");
+});
+
+test("translateMarkdownArticle falls back to a structured fresh audit when resumed audit is not valid JSON", async () => {
+  const source = "# Title\n\nBody";
+  const executor = new SessionReuseExecutor();
+
+  const result = await translateMarkdownArticle(source, {
+    executor,
+    formatter: async (markdown) => markdown
+  });
+
+  assert.equal(result.markdown, "# 标题（Title）\n\n正文");
+  assert.equal(executor.calls[0]?.reuseSession, true);
+  assert.equal(executor.calls[1]?.threadId, "thread-1");
+  assert.ok(executor.calls[2]?.outputSchema);
+  assert.equal(executor.calls[2]?.reuseSession, true);
 });
 
 test("translateMarkdownArticle passes segment heading hints into prompts for heading-like blocks", async () => {

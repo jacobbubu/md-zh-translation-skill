@@ -17,6 +17,7 @@ export type CodexExecResult = {
   stderr: string;
   jsonl: string;
   usage: CodexUsage;
+  threadId?: string;
 };
 
 export type CodexExecOptions = {
@@ -24,6 +25,8 @@ export type CodexExecOptions = {
   model: string;
   outputSchema?: Record<string, unknown>;
   onStderr?: (chunk: string) => void;
+  reuseSession?: boolean;
+  threadId?: string;
 };
 
 export interface CodexExecutor {
@@ -58,6 +61,25 @@ function parseUsage(jsonl: string): CodexUsage {
   };
 }
 
+function parseThreadId(jsonl: string): string | undefined {
+  for (const line of jsonl.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed) {
+      continue;
+    }
+    try {
+      const event = JSON.parse(trimmed) as Record<string, unknown>;
+      if (event.type === "thread.started" && typeof event.thread_id === "string" && event.thread_id.length > 0) {
+        return event.thread_id;
+      }
+    } catch {
+      continue;
+    }
+  }
+
+  return undefined;
+}
+
 export class DefaultCodexExecutor implements CodexExecutor {
   async execute(prompt: string, options: CodexExecOptions): Promise<CodexExecResult> {
     const workingDir = options.cwd ?? process.cwd();
@@ -69,22 +91,9 @@ export class DefaultCodexExecutor implements CodexExecutor {
       await writeFile(schemaPath, `${JSON.stringify(options.outputSchema, null, 2)}\n`, "utf8");
     }
 
-    const args = [
-      "exec",
-      "--skip-git-repo-check",
-      "--json",
-      "--ephemeral",
-      "--sandbox",
-      "read-only",
-      "--color",
-      "never",
-      "-C",
-      workingDir,
-      "-m",
-      options.model,
-      "-o",
-      outputPath
-    ];
+    const args = options.threadId
+      ? buildResumeArgs(options, outputPath)
+      : buildExecArgs(options, workingDir, outputPath);
 
     if (schemaPath) {
       args.push("--output-schema", schemaPath);
@@ -126,11 +135,14 @@ export class DefaultCodexExecutor implements CodexExecutor {
         throw new CodexExecutionError("Codex returned an empty final message.");
       }
 
+      const threadId = parseThreadId(stdout) ?? options.threadId;
+
       return {
         text,
         stderr,
         jsonl: stdout,
-        usage: parseUsage(stdout)
+        usage: parseUsage(stdout),
+        ...(threadId ? { threadId } : {})
       };
     } catch (error) {
       if (error instanceof CodexExecutionError) {
@@ -141,4 +153,50 @@ export class DefaultCodexExecutor implements CodexExecutor {
       await rm(tempDir, { recursive: true, force: true });
     }
   }
+}
+
+function buildExecArgs(options: CodexExecOptions, workingDir: string, outputPath: string): string[] {
+  const args = [
+    "exec",
+    "--skip-git-repo-check",
+    "--json",
+    "--sandbox",
+    "read-only",
+    "--color",
+    "never",
+    "-C",
+    workingDir,
+    "-m",
+    options.model,
+    "-o",
+    outputPath
+  ];
+
+  if (!options.reuseSession) {
+    args.splice(3, 0, "--ephemeral");
+  }
+
+  return args;
+}
+
+function buildResumeArgs(options: CodexExecOptions, outputPath: string): string[] {
+  if (!options.threadId) {
+    throw new CodexExecutionError("Codex resume requires a threadId.");
+  }
+
+  if (options.outputSchema) {
+    throw new CodexExecutionError("Codex resume does not support outputSchema.");
+  }
+
+  return [
+    "exec",
+    "resume",
+    "--skip-git-repo-check",
+    "--json",
+    "-m",
+    options.model,
+    "-o",
+    outputPath,
+    options.threadId
+  ];
 }
