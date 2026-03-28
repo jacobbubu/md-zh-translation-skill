@@ -2,7 +2,13 @@ import { buildGateAuditPrompt, buildInitialPrompt, buildRepairPrompt, buildStyle
 import { DefaultCodexExecutor, type CodexExecutor } from "./codex-exec.js";
 import { FormattingError, HardGateError } from "./errors.js";
 import { formatTranslatedBody, reconstructMarkdown } from "./format.js";
-import { extractFrontmatter, protectMarkdownSpans, restoreMarkdownSpans } from "./markdown-protection.js";
+import { planMarkdownChunks, type MarkdownChunk, type MarkdownChunkPlan } from "./markdown-chunks.js";
+import {
+  extractFrontmatter,
+  protectMarkdownSpans,
+  restoreMarkdownSpans,
+  type ProtectedSpan
+} from "./markdown-protection.js";
 
 const DEFAULT_MODEL = "gpt-5.4-mini";
 const MAX_REPAIR_CYCLES = 2;
@@ -42,6 +48,7 @@ export type TranslateResult = {
   repairCyclesUsed: number;
   styleApplied: boolean;
   gateAudit: GateAudit;
+  chunkCount: number;
 };
 
 const GATE_AUDIT_SCHEMA = {
@@ -180,89 +187,441 @@ export async function translateMarkdownArticle(source: string, options: Translat
   const sourcePathHint = options.sourcePathHint ?? "article.md";
   const { frontmatter, body } = extractFrontmatter(source);
   const { protectedBody, spans } = protectMarkdownSpans(body);
-
-  report(options, "draft", `Starting translation with model ${model}.`);
-  const draftResult = await executor.execute(buildInitialPrompt(protectedBody), {
-    cwd,
-    model,
-    onStderr: (chunk) => report(options, "draft", chunk.trim())
-  });
-  let currentTranslation = draftResult.text.trim();
-
-  report(options, "audit", "Running hard gate audit.");
-  let auditResult = await executor.execute(buildGateAuditPrompt(protectedBody, currentTranslation), {
-    cwd,
-    model,
-    outputSchema: GATE_AUDIT_SCHEMA,
-    onStderr: (chunk) => report(options, "audit", chunk.trim())
-  });
-  let gateAudit = parseGateAudit(auditResult.text);
-  validateStructuralGateChecks(gateAudit);
+  const chunkPlan = planMarkdownChunks(protectedBody);
+  const spanIndex = new Map(spans.map((span) => [span.id, span]));
+  const restoredChunks: string[] = [];
+  const gateAudits: GateAudit[] = [];
   let repairCyclesUsed = 0;
-
-  while (!isHardPass(gateAudit) && repairCyclesUsed < MAX_REPAIR_CYCLES && gateAudit.must_fix.length > 0) {
-    repairCyclesUsed += 1;
-    report(options, "repair", `Repair cycle ${repairCyclesUsed} of ${MAX_REPAIR_CYCLES}.`);
-    const repairResult = await executor.execute(buildRepairPrompt(protectedBody, currentTranslation, gateAudit.must_fix), {
-      cwd,
-      model,
-      onStderr: (chunk) => report(options, "repair", chunk.trim())
-    });
-    currentTranslation = repairResult.text.trim();
-
-    report(options, "audit", `Rechecking hard gate after repair cycle ${repairCyclesUsed}.`);
-    auditResult = await executor.execute(buildGateAuditPrompt(protectedBody, currentTranslation), {
-      cwd,
-      model,
-      outputSchema: GATE_AUDIT_SCHEMA,
-      onStderr: (chunk) => report(options, "audit", chunk.trim())
-    });
-    gateAudit = parseGateAudit(auditResult.text);
-    validateStructuralGateChecks(gateAudit);
-  }
-
-  if (!isHardPass(gateAudit)) {
-    const remaining = gateAudit.must_fix.length > 0 ? gateAudit.must_fix.join(" | ") : "Gate audit still failed after the repair loop.";
-    throw new HardGateError(`Hard gate failed after ${repairCyclesUsed} repair cycle(s): ${remaining}`);
-  }
-
-  const hardPassBody = restoreMarkdownSpans(currentTranslation, spans);
-
-  report(options, "style", "Applying style polish after hard gate pass.");
-  const styleResult = await executor.execute(buildStylePolishPrompt(protectedBody, currentTranslation), {
-    cwd,
-    model,
-    onStderr: (chunk) => report(options, "style", chunk.trim())
-  });
-
-  let restoredBody = hardPassBody;
   let styleApplied = false;
-  try {
-    restoredBody = restoreMarkdownSpans(styleResult.text.trim(), spans);
-    styleApplied = true;
-  } catch (error) {
-    if (!(error instanceof HardGateError)) {
-      throw error;
-    }
-    report(
+
+  for (const chunk of chunkPlan.chunks) {
+    const chunkResult = await translateProtectedChunk(chunk, chunkPlan, {
+      cwd,
+      executor,
+      model,
       options,
-      "style",
-      "Style polish changed protected Markdown spans; falling back to the hard-pass translation."
-    );
+      sourcePathHint,
+      spanIndex
+    });
+
+    restoredChunks.push(chunkResult.body + chunk.separatorAfter);
+    gateAudits.push(chunkResult.gateAudit);
+    repairCyclesUsed += chunkResult.repairCyclesUsed;
+    styleApplied = styleApplied || chunkResult.styleApplied;
   }
 
   report(options, "format", "Formatting translated Markdown.");
   try {
-    const formattedBody = await formatter(restoredBody, sourcePathHint);
+    const formattedBody = await formatter(restoredChunks.join(""), sourcePathHint);
     const markdown = reconstructMarkdown(frontmatter, formattedBody);
     return {
       markdown,
       model,
       repairCyclesUsed,
       styleApplied,
-      gateAudit
+      gateAudit: mergeGateAudits(gateAudits),
+      chunkCount: chunkPlan.chunks.length
     };
   } catch (error) {
     throw new FormattingError(error instanceof Error ? error.message : String(error));
   }
+}
+
+function mergeGateAudits(audits: readonly GateAudit[]): GateAudit {
+  const merged: GateAudit = {
+    hard_checks: {
+      paragraph_match: { pass: true, problem: "" },
+      first_mention_bilingual: { pass: true, problem: "" },
+      numbers_units_logic: { pass: true, problem: "" },
+      chinese_punctuation: { pass: true, problem: "" },
+      unit_conversion_boundary: { pass: true, problem: "" },
+      protected_span_integrity: { pass: true, problem: "" }
+    },
+    must_fix: []
+  };
+
+  for (const audit of audits) {
+    for (const [key, value] of Object.entries(audit.hard_checks) as Array<
+      [AuditCheckKey, GateAudit["hard_checks"][AuditCheckKey]]
+    >) {
+      if (!value.pass) {
+        merged.hard_checks[key] = value;
+      }
+    }
+  }
+
+  return merged;
+}
+
+type ChunkTranslationContext = {
+  executor: CodexExecutor;
+  model: string;
+  cwd: string;
+  sourcePathHint: string;
+  options: TranslateOptions;
+  spanIndex: ReadonlyMap<string, ProtectedSpan>;
+};
+
+type ChunkTranslationResult = {
+  body: string;
+  repairCyclesUsed: number;
+  styleApplied: boolean;
+  gateAudit: GateAudit;
+};
+
+async function translateProtectedChunk(
+  chunk: MarkdownChunk,
+  plan: MarkdownChunkPlan,
+  context: ChunkTranslationContext
+): Promise<ChunkTranslationResult> {
+  const chunkLabel = formatChunkLabel(chunk, plan);
+  const chunkPromptContext = buildChunkPromptContext(chunk, plan, context.sourcePathHint);
+  const segments = splitProtectedChunkSegments(chunk.source, context.spanIndex);
+  const rebuiltSegments: string[] = [];
+  const segmentAudits: GateAudit[] = [];
+  let repairCyclesUsed = 0;
+  let styleApplied = false;
+
+  for (const segment of segments) {
+    if (segment.kind === "fixed") {
+      rebuiltSegments.push(restoreMarkdownSpans(segment.source, segment.spans) + segment.separatorAfter);
+      continue;
+    }
+
+    const segmentLabel =
+      segments.length > 1
+        ? `${chunkLabel}, segment ${segment.index + 1}/${segments.length}`
+        : chunkLabel;
+    const segmentResult = await translateProtectedSegment(segment, plan, context, chunkPromptContext, segmentLabel);
+    rebuiltSegments.push(segmentResult.body + segment.separatorAfter);
+    segmentAudits.push(segmentResult.gateAudit);
+    repairCyclesUsed += segmentResult.repairCyclesUsed;
+    styleApplied = styleApplied || segmentResult.styleApplied;
+  }
+
+  return {
+    body: rebuiltSegments.join(""),
+    repairCyclesUsed,
+    styleApplied,
+    gateAudit: mergeGateAudits(segmentAudits)
+  };
+}
+
+type ProtectedChunkSegment = {
+  kind: "fixed" | "translatable";
+  index: number;
+  source: string;
+  separatorAfter: string;
+  spans: ProtectedSpan[];
+};
+
+async function translateProtectedSegment(
+  segment: ProtectedChunkSegment,
+  plan: MarkdownChunkPlan,
+  context: ChunkTranslationContext,
+  chunkPromptContext: ChunkPromptContext,
+  chunkLabel: string
+): Promise<ChunkTranslationResult> {
+  report(
+    context.options,
+    "draft",
+    `Chunk ${chunkPromptContext.chunkIndex}/${plan.chunks.length}${chunkLabel}: starting translation with model ${context.model}.`
+  );
+  const draftResult = await context.executor.execute(
+    withChunkContext(buildInitialPrompt(segment.source), chunkPromptContext),
+    {
+      cwd: context.cwd,
+      model: context.model,
+      onStderr: (stderrChunk) =>
+        reportChunkProgress(context.options, "draft", chunkPromptContext.chunkIndex - 1, plan, chunkLabel, stderrChunk)
+    }
+  );
+  let currentTranslation = draftResult.text;
+
+  report(
+    context.options,
+    "audit",
+    `Chunk ${chunkPromptContext.chunkIndex}/${plan.chunks.length}${chunkLabel}: running hard gate audit.`
+  );
+  let auditResult = await context.executor.execute(
+    withChunkContext(buildGateAuditPrompt(segment.source, currentTranslation), chunkPromptContext),
+    {
+      cwd: context.cwd,
+      model: context.model,
+      outputSchema: GATE_AUDIT_SCHEMA,
+      onStderr: (stderrChunk) =>
+        reportChunkProgress(context.options, "audit", chunkPromptContext.chunkIndex - 1, plan, chunkLabel, stderrChunk)
+    }
+  );
+  let gateAudit = parseGateAudit(auditResult.text);
+  validateStructuralGateChecks(gateAudit);
+  let repairCyclesUsed = 0;
+
+  while (!isHardPass(gateAudit) && repairCyclesUsed < MAX_REPAIR_CYCLES && gateAudit.must_fix.length > 0) {
+    repairCyclesUsed += 1;
+    report(
+      context.options,
+      "repair",
+      `Chunk ${chunkPromptContext.chunkIndex}/${plan.chunks.length}${chunkLabel}: repair cycle ${repairCyclesUsed} of ${MAX_REPAIR_CYCLES}.`
+    );
+    const repairResult = await context.executor.execute(
+      withChunkContext(
+        buildRepairPrompt(segment.source, currentTranslation, gateAudit.must_fix),
+        chunkPromptContext
+      ),
+      {
+        cwd: context.cwd,
+        model: context.model,
+        onStderr: (stderrChunk) =>
+          reportChunkProgress(context.options, "repair", chunkPromptContext.chunkIndex - 1, plan, chunkLabel, stderrChunk)
+      }
+    );
+    currentTranslation = repairResult.text;
+
+    report(
+      context.options,
+      "audit",
+      `Chunk ${chunkPromptContext.chunkIndex}/${plan.chunks.length}${chunkLabel}: rechecking hard gate after repair cycle ${repairCyclesUsed}.`
+    );
+    auditResult = await context.executor.execute(
+      withChunkContext(buildGateAuditPrompt(segment.source, currentTranslation), chunkPromptContext),
+      {
+        cwd: context.cwd,
+        model: context.model,
+        outputSchema: GATE_AUDIT_SCHEMA,
+        onStderr: (stderrChunk) =>
+          reportChunkProgress(context.options, "audit", chunkPromptContext.chunkIndex - 1, plan, chunkLabel, stderrChunk)
+      }
+    );
+    gateAudit = parseGateAudit(auditResult.text);
+    validateStructuralGateChecks(gateAudit);
+  }
+
+  if (!isHardPass(gateAudit)) {
+    const remaining =
+      gateAudit.must_fix.length > 0
+        ? gateAudit.must_fix.join(" | ")
+        : "Gate audit still failed after the repair loop.";
+    throw new HardGateError(
+      `Chunk ${chunkPromptContext.chunkIndex}/${plan.chunks.length}${chunkLabel} failed after ${repairCyclesUsed} repair cycle(s): ${remaining}`
+    );
+  }
+
+  const hardPassBody = restoreMarkdownSpans(currentTranslation, segment.spans);
+
+  report(
+    context.options,
+    "style",
+    `Chunk ${chunkPromptContext.chunkIndex}/${plan.chunks.length}${chunkLabel}: applying style polish after hard gate pass.`
+  );
+  const styleResult = await context.executor.execute(
+    withChunkContext(buildStylePolishPrompt(segment.source, currentTranslation), chunkPromptContext),
+    {
+      cwd: context.cwd,
+      model: context.model,
+      onStderr: (stderrChunk) =>
+        reportChunkProgress(context.options, "style", chunkPromptContext.chunkIndex - 1, plan, chunkLabel, stderrChunk)
+    }
+  );
+
+  let restoredBody = hardPassBody;
+  let styleApplied = false;
+  try {
+    restoredBody = restoreMarkdownSpans(styleResult.text, segment.spans);
+    styleApplied = true;
+  } catch (error) {
+    if (!(error instanceof HardGateError)) {
+      throw error;
+    }
+    report(
+      context.options,
+      "style",
+      `Chunk ${chunkPromptContext.chunkIndex}/${plan.chunks.length}${chunkLabel}: style polish changed protected Markdown spans; falling back to the hard-pass translation.`
+    );
+  }
+
+  return {
+    body: restoredBody,
+    repairCyclesUsed,
+    styleApplied,
+    gateAudit
+  };
+}
+
+function splitProtectedChunkSegments(
+  source: string,
+  spanIndex: ReadonlyMap<string, ProtectedSpan>
+): ProtectedChunkSegment[] {
+  const blocks = splitRawBlocks(source);
+  const segments: ProtectedChunkSegment[] = [];
+  let pending: Array<{ content: string; separator: string }> = [];
+
+  const flushPending = () => {
+    if (pending.length === 0) {
+      return;
+    }
+    const lastBlock = pending.at(-1)!;
+    const segmentSource = pending
+      .map((block, index) =>
+        index === pending.length - 1 ? block.content : `${block.content}${block.separator}`
+      )
+      .join("");
+    segments.push({
+      kind: "translatable",
+      index: segments.length,
+      source: segmentSource,
+      separatorAfter: lastBlock.separator,
+      spans: collectChunkSpans(segmentSource, spanIndex)
+    });
+    pending = [];
+  };
+
+  for (const block of blocks) {
+    const fixedSpan = getFixedProtectedBlockSpan(block.content, spanIndex);
+    if (!fixedSpan) {
+      pending.push(block);
+      continue;
+    }
+
+    flushPending();
+    segments.push({
+      kind: "fixed",
+      index: segments.length,
+      source: block.content,
+      separatorAfter: block.separator,
+      spans: [fixedSpan]
+    });
+  }
+
+  flushPending();
+
+  return segments;
+}
+
+function getFixedProtectedBlockSpan(
+  content: string,
+  spanIndex: ReadonlyMap<string, ProtectedSpan>
+): ProtectedSpan | null {
+  const trimmed = content.trim();
+  if (!/^@@MDZH_[A-Z_]+_\d{4}@@$/.test(trimmed)) {
+    return null;
+  }
+
+  const span = spanIndex.get(trimmed);
+  if (!span) {
+    return null;
+  }
+
+  return span.kind === "code_block" || span.kind === "html_block" ? span : null;
+}
+
+function splitRawBlocks(source: string): Array<{ content: string; separator: string }> {
+  if (source.length === 0) {
+    return [];
+  }
+
+  const blocks: Array<{ content: string; separator: string }> = [];
+  const pattern = /\n{2,}/g;
+  let lastIndex = 0;
+
+  for (const match of source.matchAll(pattern)) {
+    const separatorStart = match.index ?? 0;
+    const content = source.slice(lastIndex, separatorStart);
+    const separator = match[0];
+
+    if (content.length === 0) {
+      if (blocks.length > 0) {
+        blocks[blocks.length - 1]!.separator += separator;
+      }
+      lastIndex = separatorStart + separator.length;
+      continue;
+    }
+
+    blocks.push({ content, separator });
+    lastIndex = separatorStart + separator.length;
+  }
+
+  const tail = source.slice(lastIndex);
+  if (tail.length > 0 || blocks.length === 0) {
+    blocks.push({ content: tail, separator: "" });
+  }
+
+  return blocks;
+}
+
+function collectChunkSpans(
+  source: string,
+  spanIndex: ReadonlyMap<string, ProtectedSpan>
+): ProtectedSpan[] {
+  const placeholderPattern = /@@MDZH_[A-Z_]+_\d{4}@@/g;
+  const spanIds = [...new Set(source.match(placeholderPattern) ?? [])];
+  return spanIds.map((spanId) => {
+    const span = spanIndex.get(spanId);
+    if (!span) {
+      throw new HardGateError(`Protected span integrity failed: unknown placeholder ${spanId}.`);
+    }
+    return span;
+  });
+}
+
+type ChunkPromptContext = {
+  documentTitle: string | null;
+  headingPath: string[];
+  chunkIndex: number;
+  chunkCount: number;
+  sourcePathHint: string;
+};
+
+function buildChunkPromptContext(
+  chunk: MarkdownChunk,
+  plan: MarkdownChunkPlan,
+  sourcePathHint: string
+): ChunkPromptContext {
+  return {
+    documentTitle: plan.documentTitle,
+    headingPath: chunk.headingPath,
+    chunkIndex: chunk.index + 1,
+    chunkCount: plan.chunks.length,
+    sourcePathHint
+  };
+}
+
+function withChunkContext(prompt: string, context: ChunkPromptContext): string {
+  const headingPath =
+    context.headingPath.length > 0 ? context.headingPath.join(" > ") : "无明确标题路径";
+  const documentTitle = context.documentTitle ?? "无标题";
+  const contextLines = [
+    "【全文上下文】",
+    `源文件提示：${context.sourcePathHint}`,
+    `全文标题：${documentTitle}`,
+    `当前分块：第 ${context.chunkIndex} / ${context.chunkCount} 块`,
+    `当前章节路径：${headingPath}`,
+    "说明：当前输入只覆盖全文的一部分。请保持术语、专名、语气和上下文的一致性，不要补写未出现在当前分块中的段落。"
+  ].join("\n");
+
+  return prompt.replace("【英文原文】", `${contextLines}\n\n【英文原文】`);
+}
+
+function formatChunkLabel(chunk: MarkdownChunk, plan: MarkdownChunkPlan): string {
+  const label = chunk.headingPath.at(-1) ?? plan.documentTitle;
+  return label ? ` (${label})` : "";
+}
+
+function reportChunkProgress(
+  options: TranslateOptions,
+  stage: TranslateProgress,
+  chunkIndex: number,
+  plan: MarkdownChunkPlan,
+  chunkLabel: string,
+  message: string
+): void {
+  const trimmed = message.trim();
+  if (!trimmed) {
+    return;
+  }
+  report(
+    options,
+    stage,
+    `Chunk ${chunkIndex + 1}/${plan.chunks.length}${chunkLabel}: ${trimmed}`
+  );
 }

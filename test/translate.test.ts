@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { HardGateError } from "../src/errors.js";
+import { planMarkdownChunks } from "../src/markdown-chunks.js";
 import { extractFrontmatter, protectMarkdownSpans } from "../src/markdown-protection.js";
 import { parseGateAudit, translateMarkdownArticle, type GateAudit } from "../src/translate.js";
 import type { CodexExecOptions, CodexExecResult, CodexExecutor } from "../src/codex-exec.js";
@@ -76,7 +77,7 @@ test("translateMarkdownArticle repairs once and then runs style polish", async (
   assert.equal(result.repairCyclesUsed, 1);
   assert.equal(result.styleApplied, true);
   assert.equal(result.markdown, "# 标题（Title）\n\n更自然的正文");
-  assert.ok(progress.some((message) => message.includes("Repair cycle 1")));
+  assert.ok(progress.some((message) => message.includes("repair cycle 1")));
 });
 
 test("translateMarkdownArticle fails after two repair cycles when the gate never passes", async () => {
@@ -99,7 +100,7 @@ test("translateMarkdownArticle fails after two repair cycles when the gate never
       }),
     (error: unknown) => {
       assert.ok(error instanceof HardGateError);
-      assert.match(error.message, /Hard gate failed/);
+      assert.match(error.message, /failed after 2 repair cycle/);
       return true;
     }
   );
@@ -144,19 +145,17 @@ test("translateMarkdownArticle preserves frontmatter and protected Markdown span
 
 test("translateMarkdownArticle falls back to the hard-pass translation when style polish breaks a protected span", async () => {
   const source = [
-    "# Sandbox",
+    "# Docs",
     "",
-    "Run this command:",
+    "Read [the docs](https://example.com/docs).",
     "",
-    "```bash",
-    "/sandbox",
-    "```",
+    "Keep going.",
     ""
   ].join("\n");
 
   const { protectedBody } = protectMarkdownSpans(source);
   const passingAudit = JSON.stringify(createAudit(true));
-  const brokenStyle = protectedBody.replace("@@MDZH_CODE_BLOCK_0001@@", "");
+  const brokenStyle = protectedBody.replace("@@MDZH_LINK_DESTINATION_0001@@", "");
   const executor = new StubExecutor([protectedBody, passingAudit, brokenStyle]);
   const progress: string[] = [];
 
@@ -167,7 +166,7 @@ test("translateMarkdownArticle falls back to the hard-pass translation when styl
   });
 
   assert.equal(result.styleApplied, false);
-  assert.match(result.markdown, /```bash\n\/sandbox\n```/);
+  assert.match(result.markdown, /\[the docs\]\(https:\/\/example\.com\/docs\)/);
   assert.ok(
     progress.some((message) =>
       message.includes("falling back to the hard-pass translation")
@@ -175,21 +174,52 @@ test("translateMarkdownArticle falls back to the hard-pass translation when styl
   );
 });
 
+test("translateMarkdownArticle runs the hidden pipeline chunk by chunk for long Markdown sections", async () => {
+  const source = [
+    "# Title",
+    "",
+    "Intro paragraph.",
+    "",
+    "## First Section",
+    "",
+    "Alpha paragraph with [docs](https://example.com/docs).",
+    "",
+    "## Second Section",
+    "",
+    "Beta paragraph.",
+    ""
+  ].join("\n");
+
+  const { protectedBody } = protectMarkdownSpans(source);
+  const chunkPlan = planMarkdownChunks(protectedBody);
+  const passingAudit = JSON.stringify(createAudit(true));
+  const responses = chunkPlan.chunks.flatMap((chunk) => [chunk.source, passingAudit, chunk.source]);
+  const executor = new StubExecutor(responses);
+
+  const result = await translateMarkdownArticle(source, {
+    executor,
+    formatter: async (markdown) => markdown
+  });
+
+  assert.equal(result.chunkCount, chunkPlan.chunks.length);
+  assert.equal(result.markdown, source);
+  assert.equal(executor.prompts.length, chunkPlan.chunks.length * 3);
+  assert.ok(executor.prompts[0]?.includes("当前分块：第 1 /"));
+});
+
 test("translateMarkdownArticle fails when the hard-pass translation already broke a protected span", async () => {
   const source = [
-    "# Sandbox",
+    "# Docs",
     "",
-    "Run this command:",
+    "Read [the docs](https://example.com/docs).",
     "",
-    "```bash",
-    "/sandbox",
-    "```",
+    "Keep going.",
     ""
   ].join("\n");
 
   const { protectedBody } = protectMarkdownSpans(source);
   const passingAudit = JSON.stringify(createAudit(true));
-  const brokenDraft = protectedBody.replace("@@MDZH_CODE_BLOCK_0001@@", "");
+  const brokenDraft = protectedBody.replace("@@MDZH_LINK_DESTINATION_0001@@", "");
   const executor = new StubExecutor([brokenDraft, passingAudit]);
 
   await assert.rejects(
