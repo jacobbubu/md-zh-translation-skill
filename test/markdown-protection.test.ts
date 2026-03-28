@@ -39,11 +39,10 @@ test("protectMarkdownSpans and restoreMarkdownSpans preserve code, inline code, 
 
   const protectedMarkdown = protectMarkdownSpans(source);
 
-  assert.match(protectedMarkdown.protectedBody, /@@MDZH_INLINE_CODE_0002@@/);
   assert.match(protectedMarkdown.protectedBody, /@@MDZH_CODE_BLOCK_0001@@/);
-  assert.match(protectedMarkdown.protectedBody, /@@MDZH_LINK_DESTINATION_0003@@/);
-  assert.match(protectedMarkdown.protectedBody, /@@MDZH_IMAGE_DESTINATION_0004@@/);
-  assert.doesNotMatch(protectedMarkdown.protectedBody, /npm install/);
+  assert.match(protectedMarkdown.protectedBody, /@@MDZH_LINK_DESTINATION_0002@@/);
+  assert.match(protectedMarkdown.protectedBody, /@@MDZH_IMAGE_DESTINATION_0003@@/);
+  assert.match(protectedMarkdown.protectedBody, /`npm install`/);
   assert.doesNotMatch(protectedMarkdown.protectedBody, /https:\/\/example\.com\/docs/);
 
   const restored = restoreMarkdownSpans(protectedMarkdown.protectedBody, protectedMarkdown.spans);
@@ -72,6 +71,24 @@ test("protectMarkdownSpans preserves autolinks, HTML attributes, and raw HTML bl
   assert.doesNotMatch(protectedMarkdown.protectedBody, /https:\/\/example\.com\/docs/);
   assert.doesNotMatch(protectedMarkdown.protectedBody, /mailto:test@example\.com/);
   assert.doesNotMatch(protectedMarkdown.protectedBody, /Keep this raw HTML block untouched/);
+
+  const restored = restoreMarkdownSpans(protectedMarkdown.protectedBody, protectedMarkdown.spans);
+  assert.equal(restored, source);
+});
+
+test("protectMarkdownSpans does not rewrite inline code while still protecting URLs outside it", () => {
+  const source = [
+    "Keep `~/.ssh/config` and `href=\"https://example.com\"` untouched.",
+    "",
+    "See [docs](https://example.com/docs) for details.",
+    ""
+  ].join("\n");
+
+  const protectedMarkdown = protectMarkdownSpans(source);
+
+  assert.match(protectedMarkdown.protectedBody, /`~\/\.ssh\/config`/);
+  assert.match(protectedMarkdown.protectedBody, /`href="https:\/\/example\.com"`/);
+  assert.match(protectedMarkdown.protectedBody, /@@MDZH_LINK_DESTINATION_0001@@/);
 
   const restored = restoreMarkdownSpans(protectedMarkdown.protectedBody, protectedMarkdown.spans);
   assert.equal(restored, source);
