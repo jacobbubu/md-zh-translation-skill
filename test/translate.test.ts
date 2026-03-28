@@ -288,7 +288,12 @@ test("translateMarkdownArticle passes segment heading hints into prompts for hea
     formatter: async (markdown) => markdown
   });
 
-  assert.ok(executor.prompts.some((prompt) => prompt.includes("当前分段标题：Step One: Run Check (No Prompt)")));
+  assert.ok(
+    executor.prompts.some(
+      (prompt) =>
+        prompt.includes("当前分段标题：") && prompt.includes("Step One: Run Check (No Prompt)")
+    )
+  );
 });
 
 test("translateMarkdownArticle fails when the hard-pass translation already broke a protected span", async () => {
