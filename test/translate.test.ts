@@ -48,6 +48,33 @@ class StubExecutor implements CodexExecutor {
   }
 }
 
+class DelayedExecutor implements CodexExecutor {
+  readonly prompts: string[] = [];
+
+  constructor(
+    private readonly responses: string[],
+    private readonly delayMs: number
+  ) {}
+
+  async execute(prompt: string, _options: CodexExecOptions): Promise<CodexExecResult> {
+    this.prompts.push(prompt);
+    const next = this.responses.shift();
+    assert.ok(next != null, "Unexpected extra Codex call");
+    await new Promise((resolve) => setTimeout(resolve, this.delayMs));
+    return {
+      text: next,
+      stderr: "",
+      jsonl: "",
+      usage: {
+        inputTokens: 0,
+        cachedInputTokens: 0,
+        outputTokens: 0,
+        totalTokens: 0
+      }
+    };
+  }
+}
+
 test("parseGateAudit accepts fenced JSON output", () => {
   const audit = createAudit(true);
   const parsed = parseGateAudit(`\`\`\`json\n${JSON.stringify(audit, null, 2)}\n\`\`\``);
@@ -78,6 +105,25 @@ test("translateMarkdownArticle repairs once and then runs style polish", async (
   assert.equal(result.styleApplied, true);
   assert.equal(result.markdown, "# 标题（Title）\n\n更自然的正文");
   assert.ok(progress.some((message) => message.includes("Repair cycle 1")));
+});
+
+test("translateMarkdownArticle emits heartbeat progress while waiting on long stages", async () => {
+  const source = "# Title\n\nBody";
+  const passingAudit = JSON.stringify(createAudit(true));
+  const executor = new DelayedExecutor(["# 标题\n\n正文", passingAudit, "# 标题\n\n正文"], 25);
+  const progress: string[] = [];
+
+  const result = await translateMarkdownArticle(source, {
+    executor,
+    formatter: async (markdown) => markdown,
+    onProgress: (message) => progress.push(message),
+    progressHeartbeatMs: 10
+  });
+
+  assert.equal(result.markdown, "# 标题\n\n正文");
+  assert.ok(progress.some((message) => message.includes("Still generating draft translation")));
+  assert.ok(progress.some((message) => message.includes("Still waiting for hard gate audit")));
+  assert.ok(progress.some((message) => message.includes("Still applying style polish")));
 });
 
 test("translateMarkdownArticle fails after two repair cycles when the gate never passes", async () => {

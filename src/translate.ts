@@ -35,6 +35,7 @@ export type TranslateOptions = {
   executor?: CodexExecutor;
   formatter?: typeof formatTranslatedBody;
   onProgress?: (message: string, stage: TranslateProgress) => void;
+  progressHeartbeatMs?: number;
 };
 
 export type TranslateResult = {
@@ -181,6 +182,31 @@ function report(options: TranslateOptions, stage: TranslateProgress, message: st
   options.onProgress?.(message, stage);
 }
 
+async function runStageWithHeartbeat<T>(
+  options: TranslateOptions,
+  stage: TranslateProgress,
+  waitingMessage: string,
+  task: () => Promise<T>
+): Promise<T> {
+  const heartbeatMs = options.progressHeartbeatMs ?? 15_000;
+  if (heartbeatMs <= 0) {
+    return task();
+  }
+
+  let elapsedMs = 0;
+  const timer = setInterval(() => {
+    elapsedMs += heartbeatMs;
+    report(options, stage, `${waitingMessage} (${Math.round(elapsedMs / 1000)}s elapsed).`);
+  }, heartbeatMs);
+  timer.unref?.();
+
+  try {
+    return await task();
+  } finally {
+    clearInterval(timer);
+  }
+}
+
 export async function translateMarkdownArticle(source: string, options: TranslateOptions = {}): Promise<TranslateResult> {
   const executor = options.executor ?? new DefaultCodexExecutor();
   const formatter = options.formatter ?? formatTranslatedBody;
@@ -191,20 +217,24 @@ export async function translateMarkdownArticle(source: string, options: Translat
   const { protectedBody, spans } = protectMarkdownSpans(body);
 
   report(options, "draft", `Starting translation with model ${model}.`);
-  const draftResult = await executor.execute(buildInitialPrompt(protectedBody), {
-    cwd,
-    model,
-    onStderr: (chunk) => report(options, "draft", chunk.trim())
-  });
+  const draftResult = await runStageWithHeartbeat(options, "draft", "Still generating draft translation", () =>
+    executor.execute(buildInitialPrompt(protectedBody), {
+      cwd,
+      model,
+      onStderr: (chunk) => report(options, "draft", chunk.trim())
+    })
+  );
   let currentTranslation = draftResult.text.trim();
 
   report(options, "audit", "Running hard gate audit.");
-  let auditResult = await executor.execute(buildGateAuditPrompt(protectedBody, currentTranslation), {
-    cwd,
-    model,
-    outputSchema: GATE_AUDIT_SCHEMA,
-    onStderr: (chunk) => report(options, "audit", chunk.trim())
-  });
+  let auditResult = await runStageWithHeartbeat(options, "audit", "Still waiting for hard gate audit", () =>
+    executor.execute(buildGateAuditPrompt(protectedBody, currentTranslation), {
+      cwd,
+      model,
+      outputSchema: GATE_AUDIT_SCHEMA,
+      onStderr: (chunk) => report(options, "audit", chunk.trim())
+    })
+  );
   let gateAudit = parseGateAudit(auditResult.text);
   validateStructuralGateChecks(gateAudit);
   let repairCyclesUsed = 0;
@@ -212,20 +242,32 @@ export async function translateMarkdownArticle(source: string, options: Translat
   while (!isHardPass(gateAudit) && repairCyclesUsed < MAX_REPAIR_CYCLES && gateAudit.must_fix.length > 0) {
     repairCyclesUsed += 1;
     report(options, "repair", `Repair cycle ${repairCyclesUsed} of ${MAX_REPAIR_CYCLES}.`);
-    const repairResult = await executor.execute(buildRepairPrompt(protectedBody, currentTranslation, gateAudit.must_fix), {
-      cwd,
-      model,
-      onStderr: (chunk) => report(options, "repair", chunk.trim())
-    });
+    const repairResult = await runStageWithHeartbeat(
+      options,
+      "repair",
+      `Still applying repair cycle ${repairCyclesUsed}`,
+      () =>
+        executor.execute(buildRepairPrompt(protectedBody, currentTranslation, gateAudit.must_fix), {
+          cwd,
+          model,
+          onStderr: (chunk) => report(options, "repair", chunk.trim())
+        })
+    );
     currentTranslation = repairResult.text.trim();
 
     report(options, "audit", `Rechecking hard gate after repair cycle ${repairCyclesUsed}.`);
-    auditResult = await executor.execute(buildGateAuditPrompt(protectedBody, currentTranslation), {
-      cwd,
-      model,
-      outputSchema: GATE_AUDIT_SCHEMA,
-      onStderr: (chunk) => report(options, "audit", chunk.trim())
-    });
+    auditResult = await runStageWithHeartbeat(
+      options,
+      "audit",
+      `Still rechecking hard gate after repair cycle ${repairCyclesUsed}`,
+      () =>
+        executor.execute(buildGateAuditPrompt(protectedBody, currentTranslation), {
+          cwd,
+          model,
+          outputSchema: GATE_AUDIT_SCHEMA,
+          onStderr: (chunk) => report(options, "audit", chunk.trim())
+        })
+    );
     gateAudit = parseGateAudit(auditResult.text);
     validateStructuralGateChecks(gateAudit);
   }
@@ -238,11 +280,13 @@ export async function translateMarkdownArticle(source: string, options: Translat
   const hardPassBody = restoreMarkdownSpans(currentTranslation, spans);
 
   report(options, "style", "Applying style polish after hard gate pass.");
-  const styleResult = await executor.execute(buildStylePolishPrompt(protectedBody, currentTranslation), {
-    cwd,
-    model,
-    onStderr: (chunk) => report(options, "style", chunk.trim())
-  });
+  const styleResult = await runStageWithHeartbeat(options, "style", "Still applying style polish", () =>
+    executor.execute(buildStylePolishPrompt(protectedBody, currentTranslation), {
+      cwd,
+      model,
+      onStderr: (chunk) => report(options, "style", chunk.trim())
+    })
+  );
 
   let restoredBody = hardPassBody;
   let styleApplied = false;
