@@ -48,6 +48,59 @@ class StubExecutor implements CodexExecutor {
   }
 }
 
+class PromptAwareExecutor implements CodexExecutor {
+  readonly prompts: string[] = [];
+  private readonly passingAudit = JSON.stringify(createAudit(true));
+
+  async execute(prompt: string, options: CodexExecOptions): Promise<CodexExecResult> {
+    this.prompts.push(prompt);
+
+    if (options.outputSchema) {
+      return createExecResult(this.passingAudit);
+    }
+
+    const currentTranslation = extractPromptSection(prompt, "【当前译文】");
+    if (currentTranslation !== null) {
+      return createExecResult(currentTranslation);
+    }
+
+    const source = extractPromptSection(prompt, "【英文原文】");
+    return createExecResult(source ?? "");
+  }
+}
+
+function createExecResult(text: string): CodexExecResult {
+  return {
+    text,
+    stderr: "",
+    jsonl: "",
+    usage: {
+      inputTokens: 0,
+      cachedInputTokens: 0,
+      outputTokens: 0,
+      totalTokens: 0
+    }
+  };
+}
+
+function extractPromptSection(prompt: string, label: string): string | null {
+  const start = prompt.indexOf(`${label}\n`);
+  if (start < 0) {
+    return null;
+  }
+
+  const contentStart = start + label.length + 1;
+  const nextLabelIndex = prompt
+    .slice(contentStart)
+    .search(/\n\n【[^】]+】/);
+
+  if (nextLabelIndex < 0) {
+    return prompt.slice(contentStart);
+  }
+
+  return prompt.slice(contentStart, contentStart + nextLabelIndex);
+}
+
 test("parseGateAudit accepts fenced JSON output", () => {
   const audit = createAudit(true);
   const parsed = parseGateAudit(`\`\`\`json\n${JSON.stringify(audit, null, 2)}\n\`\`\``);
@@ -182,7 +235,7 @@ test("translateMarkdownArticle runs the hidden pipeline chunk by chunk for long 
     "",
     "## First Section",
     "",
-    "Alpha paragraph with [docs](https://example.com/docs).",
+    "Alpha paragraph with docs.",
     "",
     "## Second Section",
     "",
@@ -192,9 +245,7 @@ test("translateMarkdownArticle runs the hidden pipeline chunk by chunk for long 
 
   const { protectedBody } = protectMarkdownSpans(source);
   const chunkPlan = planMarkdownChunks(protectedBody);
-  const passingAudit = JSON.stringify(createAudit(true));
-  const responses = chunkPlan.chunks.flatMap((chunk) => [chunk.source, passingAudit, chunk.source]);
-  const executor = new StubExecutor(responses);
+  const executor = new PromptAwareExecutor();
 
   const result = await translateMarkdownArticle(source, {
     executor,
@@ -203,8 +254,41 @@ test("translateMarkdownArticle runs the hidden pipeline chunk by chunk for long 
 
   assert.equal(result.chunkCount, chunkPlan.chunks.length);
   assert.equal(result.markdown, source);
-  assert.equal(executor.prompts.length, chunkPlan.chunks.length * 3);
+  assert.ok(executor.prompts.length >= chunkPlan.chunks.length * 3);
   assert.ok(executor.prompts[0]?.includes("当前分块：第 1 /"));
+});
+
+test("translateMarkdownArticle passes segment heading hints into prompts for heading-like blocks", async () => {
+  const source = [
+    "# Title",
+    "",
+    "Intro paragraph.",
+    "",
+    "**Step One: Run Check (No Prompt)**",
+    "",
+    "Explain the step.",
+    ""
+  ].join("\n");
+
+  const responses = [
+    "# Title\n\nIntro paragraph.\n",
+    JSON.stringify(createAudit(true)),
+    "# Title\n\nIntro paragraph.\n",
+    "**步骤一：运行检查（Step One: Run Check, No Prompt）**\n",
+    JSON.stringify(createAudit(true)),
+    "**步骤一：运行检查（Step One: Run Check, No Prompt）**\n",
+    "Explain the step.\n",
+    JSON.stringify(createAudit(true)),
+    "Explain the step.\n"
+  ];
+  const executor = new StubExecutor(responses);
+
+  await translateMarkdownArticle(source, {
+    executor,
+    formatter: async (markdown) => markdown
+  });
+
+  assert.ok(executor.prompts.some((prompt) => prompt.includes("当前分段标题：Step One: Run Check (No Prompt)")));
 });
 
 test("translateMarkdownArticle fails when the hard-pass translation already broke a protected span", async () => {

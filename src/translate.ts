@@ -288,11 +288,15 @@ async function translateProtectedChunk(
       continue;
     }
 
+    const segmentPromptContext: ChunkPromptContext = {
+      ...chunkPromptContext,
+      segmentHeadings: extractSegmentHeadingHints(segment.source)
+    };
     const segmentLabel =
       segments.length > 1
         ? `${chunkLabel}, segment ${segment.index + 1}/${segments.length}`
         : chunkLabel;
-    const segmentResult = await translateProtectedSegment(segment, plan, context, chunkPromptContext, segmentLabel);
+    const segmentResult = await translateProtectedSegment(segment, plan, context, segmentPromptContext, segmentLabel);
     rebuiltSegments.push(segmentResult.body + segment.separatorAfter);
     segmentAudits.push(segmentResult.gateAudit);
     repairCyclesUsed += segmentResult.repairCyclesUsed;
@@ -479,6 +483,9 @@ function splitProtectedChunkSegments(
   for (const block of blocks) {
     const fixedSpan = getFixedProtectedBlockSpan(block.content, spanIndex);
     if (!fixedSpan) {
+      if (isHeadingLikeBlock(block.content) && pending.length > 0) {
+        flushPending();
+      }
       pending.push(block);
       continue;
     }
@@ -513,6 +520,19 @@ function getFixedProtectedBlockSpan(
   }
 
   return span.kind === "code_block" || span.kind === "html_block" ? span : null;
+}
+
+function isHeadingLikeBlock(content: string): boolean {
+  const trimmed = content.trim();
+  if (trimmed.length === 0) {
+    return false;
+  }
+
+  if (/^#{1,6}[ \t]+.+$/.test(trimmed)) {
+    return true;
+  }
+
+  return /^\*\*[^*\n].+\*\*$/.test(trimmed);
 }
 
 function splitRawBlocks(source: string): Array<{ content: string; separator: string }> {
@@ -564,12 +584,37 @@ function collectChunkSpans(
   });
 }
 
+function extractSegmentHeadingHints(source: string): string[] {
+  const hints: string[] = [];
+
+  for (const block of splitRawBlocks(source)) {
+    const trimmed = block.content.trim();
+    if (trimmed.length === 0) {
+      continue;
+    }
+
+    const atxMatch = trimmed.match(/^#{1,6}[ \t]+(.+?)(?:[ \t]+#+)?$/);
+    if (atxMatch?.[1]) {
+      hints.push(atxMatch[1].trim());
+      continue;
+    }
+
+    const boldMatch = trimmed.match(/^\*\*(.+)\*\*$/);
+    if (boldMatch?.[1]) {
+      hints.push(boldMatch[1].trim());
+    }
+  }
+
+  return hints;
+}
+
 type ChunkPromptContext = {
   documentTitle: string | null;
   headingPath: string[];
   chunkIndex: number;
   chunkCount: number;
   sourcePathHint: string;
+  segmentHeadings: string[];
 };
 
 function buildChunkPromptContext(
@@ -582,7 +627,8 @@ function buildChunkPromptContext(
     headingPath: chunk.headingPath,
     chunkIndex: chunk.index + 1,
     chunkCount: plan.chunks.length,
-    sourcePathHint
+    sourcePathHint,
+    segmentHeadings: []
   };
 }
 
@@ -590,13 +636,17 @@ function withChunkContext(prompt: string, context: ChunkPromptContext): string {
   const headingPath =
     context.headingPath.length > 0 ? context.headingPath.join(" > ") : "无明确标题路径";
   const documentTitle = context.documentTitle ?? "无标题";
+  const segmentHeadings =
+    context.segmentHeadings.length > 0 ? context.segmentHeadings.join(" | ") : "无显式标题";
   const contextLines = [
     "【全文上下文】",
     `源文件提示：${context.sourcePathHint}`,
     `全文标题：${documentTitle}`,
     `当前分块：第 ${context.chunkIndex} / ${context.chunkCount} 块`,
     `当前章节路径：${headingPath}`,
-    "说明：当前输入只覆盖全文的一部分。请保持术语、专名、语气和上下文的一致性，不要补写未出现在当前分块中的段落。"
+    `当前分段标题：${segmentHeadings}`,
+    "说明：当前输入只覆盖全文的一部分。请保持术语、专名、语气和上下文的一致性，不要补写未出现在当前分块中的段落。",
+    "如果当前分段标题、加粗标题、列表项标题里包含冒号、括号限定语、枚举标签或英文补充说明，翻译时必须完整保留这些信息，不要只保留其中一部分。"
   ].join("\n");
 
   return prompt.replace("【英文原文】", `${contextLines}\n\n【英文原文】`);
