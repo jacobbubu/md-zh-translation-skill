@@ -6,6 +6,7 @@ import { planMarkdownChunks, type MarkdownChunk, type MarkdownChunkPlan } from "
 import {
   extractFrontmatter,
   protectMarkdownSpans,
+  reprotectMarkdownSpans,
   restoreMarkdownSpans,
   type ProtectedSpan
 } from "./markdown-protection.js";
@@ -453,10 +454,11 @@ async function translateProtectedSegment(
     );
   }
 
-  const restoredBody = restoreMarkdownSpans(currentTranslation, segment.spans);
+  const canonicalProtectedBody = reprotectMarkdownSpans(currentTranslation, segment.spans);
+  const restoredBody = restoreMarkdownSpans(canonicalProtectedBody, segment.spans);
 
   return {
-    protectedBody: currentTranslation,
+    protectedBody: canonicalProtectedBody,
     restoredBody,
     repairCyclesUsed,
     gateAudit

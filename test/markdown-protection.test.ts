@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import {
   extractFrontmatter,
   protectMarkdownSpans,
+  reprotectMarkdownSpans,
   restoreMarkdownSpans
 } from "../src/markdown-protection.js";
 import { HardGateError } from "../src/errors.js";
@@ -111,6 +112,24 @@ test("restoreMarkdownSpans accepts raw URL-like spans that were expanded back to
 
   const restored = restoreMarkdownSpans(expanded, protectedMarkdown.spans);
   assert.equal(restored, source);
+});
+
+test("reprotectMarkdownSpans folds expanded URL-like spans back into placeholders", () => {
+  const source = [
+    "Read [the docs](https://example.com/docs) and <https://example.com/guide>.",
+    "",
+    '<a href="https://example.com/page">Example</a>',
+    ""
+  ].join("\n");
+
+  const protectedMarkdown = protectMarkdownSpans(source);
+  const expanded = protectedMarkdown.protectedBody
+    .replace("@@MDZH_LINK_DESTINATION_0001@@", "https://example.com/docs")
+    .replace("@@MDZH_AUTOLINK_0002@@", "https://example.com/guide")
+    .replace("@@MDZH_HTML_ATTRIBUTE_0003@@", "https://example.com/page");
+
+  const reprotected = reprotectMarkdownSpans(expanded, protectedMarkdown.spans);
+  assert.equal(reprotected, protectedMarkdown.protectedBody);
 });
 
 test("restoreMarkdownSpans still rejects code blocks that lost their placeholder", () => {

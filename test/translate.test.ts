@@ -287,6 +287,63 @@ test("translateMarkdownArticle runs the hidden pipeline chunk by chunk for long 
   assert.ok(executor.prompts[0]?.includes("当前分块：第 1 /"));
 });
 
+test("translateMarkdownArticle canonicalizes expanded URL spans before chunk-level style polish", async () => {
+  const source = [
+    "# Docs",
+    "",
+    "Read [docs](https://example.com/docs).",
+    "",
+    "```bash",
+    "printf 'ok'",
+    "```",
+    "",
+    "See [guide](https://example.com/guide).",
+    ""
+  ].join("\n");
+
+  class CanonicalChunkExecutor implements CodexExecutor {
+    readonly prompts: string[] = [];
+    private draftCallCount = 0;
+
+    async execute(prompt: string, options: CodexExecOptions): Promise<CodexExecResult> {
+      this.prompts.push(prompt);
+
+      if (options.outputSchema || prompt.includes('"hard_checks"') || prompt.includes("只返回 JSON")) {
+        return createExecResult(JSON.stringify(createAudit(true)));
+      }
+
+      if (prompt.includes("只做“风格与可读性润色”")) {
+        assert.match(prompt, /@@MDZH_CODE_BLOCK_0001@@/);
+        assert.match(prompt, /@@MDZH_LINK_DESTINATION_0002@@/);
+        assert.match(prompt, /@@MDZH_LINK_DESTINATION_0003@@/);
+        assert.doesNotMatch(prompt, /\]\(https:\/\/example\.com\/docs\)/);
+        assert.doesNotMatch(prompt, /\]\(https:\/\/example\.com\/guide\)/);
+        return createExecResult(extractPromptSection(prompt, "【当前译文】") ?? "");
+      }
+
+      this.draftCallCount += 1;
+      if (this.draftCallCount === 1) {
+        return createExecResult("# Docs\n\nRead [docs](https://example.com/docs).\n");
+      }
+      if (this.draftCallCount === 2) {
+        return createExecResult("See [guide](https://example.com/guide).\n");
+      }
+
+      throw new Error("Unexpected extra draft call");
+    }
+  }
+
+  const executor = new CanonicalChunkExecutor();
+  const result = await translateMarkdownArticle(source, {
+    executor,
+    formatter: async (markdown) => markdown
+  });
+
+  assert.match(result.markdown, /^# Docs\n\nRead \[docs\]\(https:\/\/example\.com\/docs\)\./);
+  assert.match(result.markdown, /```bash\nprintf 'ok'\n```/);
+  assert.match(result.markdown, /See \[guide\]\(https:\/\/example\.com\/guide\)\.\n$/);
+});
+
 test("translateMarkdownArticle keeps standalone code blocks out of translatable segment prompts", async () => {
   const source = [
     "# Title",

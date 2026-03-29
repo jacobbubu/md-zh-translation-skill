@@ -207,16 +207,12 @@ function protectHtmlBlocks(
 }
 
 export function restoreMarkdownSpans(protectedBody: string, spans: ProtectedSpan[]): string {
-  let output = protectedBody;
+  let output = reprotectMarkdownSpans(protectedBody, spans);
 
   for (const span of spans) {
     const matches = output.match(new RegExp(escapeRegex(span.id), "g")) ?? [];
     if (matches.length === 1) {
       output = output.replace(span.id, span.raw);
-      continue;
-    }
-
-    if (matches.length === 0 && canAcceptExpandedProtectedSpan(output, span)) {
       continue;
     }
 
@@ -235,18 +231,65 @@ export function restoreMarkdownSpans(protectedBody: string, spans: ProtectedSpan
   return output;
 }
 
-function canAcceptExpandedProtectedSpan(output: string, span: ProtectedSpan): boolean {
+export function reprotectMarkdownSpans(protectedBody: string, spans: ProtectedSpan[]): string {
+  let output = protectedBody;
+
+  for (const span of spans) {
+    const matches = output.match(new RegExp(escapeRegex(span.id), "g")) ?? [];
+    if (matches.length === 1) {
+      continue;
+    }
+
+    if (matches.length === 0) {
+      const reprotected = reprotectExpandedProtectedSpan(output, span);
+      if (reprotected !== null) {
+        output = reprotected;
+        continue;
+      }
+    }
+
+    if (matches.length !== 1) {
+      throw new HardGateError(
+        `Protected span integrity failed for ${span.id}: expected 1 placeholder occurrence, found ${matches.length}.`
+      );
+    }
+  }
+
+  return output;
+}
+
+function reprotectExpandedProtectedSpan(output: string, span: ProtectedSpan): string | null {
   switch (span.kind) {
     case "link_destination":
     case "image_destination":
-      return new RegExp(`\\]\\(${escapeRegex(span.raw)}\\)`).test(output);
+      return replaceFirstLiteral(output, `](${span.raw})`, `](${span.id})`);
     case "autolink":
-      return new RegExp(`<${escapeRegex(span.raw)}>`).test(output);
+      return replaceFirstLiteral(output, `<${span.raw}>`, `<${span.id}>`);
     case "html_attribute":
-      return new RegExp(`\\b(?:href|src|poster)=([\"'])${escapeRegex(span.raw)}\\1`, "i").test(output);
+      for (const attribute of ["href", "src", "poster"]) {
+        for (const quote of ['"', "'"]) {
+          const replaced = replaceFirstLiteral(
+            output,
+            `${attribute}=${quote}${span.raw}${quote}`,
+            `${attribute}=${quote}${span.id}${quote}`
+          );
+          if (replaced !== null) {
+            return replaced;
+          }
+        }
+      }
+      return null;
     default:
-      return false;
+      return null;
   }
+}
+
+function replaceFirstLiteral(source: string, search: string, replacement: string): string | null {
+  const index = source.indexOf(search);
+  if (index < 0) {
+    return null;
+  }
+  return `${source.slice(0, index)}${replacement}${source.slice(index + search.length)}`;
 }
 
 function escapeRegex(value: string): string {
