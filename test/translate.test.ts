@@ -160,8 +160,8 @@ class WrappedInlineCodeExecutor implements CodexExecutor {
 
     if (options.outputSchema || prompt.includes('"hard_checks"') || prompt.includes("只返回 JSON")) {
       const currentTranslation = extractPromptSection(prompt, "【当前译文】") ?? "";
-      assert.match(currentTranslation, /@@MDZH_INLINE_CODE_\d{4,}@@/);
-      assert.doesNotMatch(currentTranslation, /`@@MDZH_INLINE_CODE_\d{4,}@@`/);
+      assert.match(currentTranslation, /`~\/\.ssh`/);
+      assert.doesNotMatch(currentTranslation, /@@MDZH_INLINE_CODE_\d{4,}@@/);
       return createExecResult(wrapAuditForSegments(prompt, createAudit(true)));
     }
 
@@ -169,7 +169,7 @@ class WrappedInlineCodeExecutor implements CodexExecutor {
       return createExecResult(extractPromptSection(prompt, "【当前译文】") ?? "");
     }
 
-    return createExecResult("With sandbox: 访问 `@@MDZH_INLINE_CODE_0001@@` 会被阻止。\n");
+    return createExecResult("With sandbox: 访问 `~/.ssh` 会被阻止。\n");
   }
 }
 
@@ -415,7 +415,7 @@ test("translateMarkdownArticle canonicalizes expanded URL spans before chunk-lev
   assert.match(result.markdown, /See \[guide\]\(https:\/\/example\.com\/guide\)\.\n$/);
 });
 
-test("translateMarkdownArticle keeps translatable strong emphasis visible at chunk-level style polish", async () => {
+test("translateMarkdownArticle keeps translatable strong emphasis and raw inline code visible at chunk-level style polish", async () => {
   const source = [
     "# Title",
     "",
@@ -436,8 +436,8 @@ test("translateMarkdownArticle keeps translatable strong emphasis visible at chu
       }
 
       if (prompt.includes("只做“风格与可读性润色”")) {
-        assert.match(prompt, /@@MDZH_INLINE_CODE_\d{4,}@@/);
-        assert.doesNotMatch(prompt, /`~\/\.bashrc`/);
+        assert.match(prompt, /`~\/\.bashrc`/);
+        assert.doesNotMatch(prompt, /@@MDZH_INLINE_CODE_\d{4,}@@/);
         assert.match(prompt, /\*\*Deny\*\*/);
         return createExecResult(extractPromptSection(prompt, "【当前译文】") ?? "");
       }
@@ -464,7 +464,7 @@ test("translateMarkdownArticle keeps translatable strong emphasis visible at chu
   assert.match(result.markdown, /本次测试请选择 \*\*Deny\*\*\。?/);
 });
 
-test("translateMarkdownArticle canonicalizes wrapped inline code placeholders before segment audit", async () => {
+test("translateMarkdownArticle passes raw inline code through before segment audit", async () => {
   const source = "With sandbox: access to `~/.ssh` is blocked.\n";
   const executor = new WrappedInlineCodeExecutor();
 

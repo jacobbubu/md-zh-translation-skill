@@ -157,7 +157,7 @@ test("restoreMarkdownSpans still rejects code blocks that lost their placeholder
   );
 });
 
-test("protectSegmentFormattingSpans protects inline code without hiding translatable strong emphasis", () => {
+test("protectSegmentFormattingSpans keeps inline code visible while still preserving translatable formatting", () => {
   const source = [
     "> Why is this blocked? `~/.bashrc` is sensitive.",
     "",
@@ -169,7 +169,7 @@ test("protectSegmentFormattingSpans protects inline code without hiding translat
 
   const protectedMarkdown = protectSegmentFormattingSpans(source, 7000);
 
-  assert.match(protectedMarkdown.protectedBody, /@@MDZH_INLINE_CODE_7000@@/);
+  assert.match(protectedMarkdown.protectedBody, /`~\/\.bashrc`/);
   assert.match(protectedMarkdown.protectedBody, /\*\*Deny\*\*/);
   assert.match(protectedMarkdown.protectedBody, /\*\*Expected behavior:\*\*/);
   assert.equal(restoreMarkdownSpans(protectedMarkdown.protectedBody, protectedMarkdown.spans), source);
@@ -197,21 +197,11 @@ test("protectSegmentFormattingSpans protects inline markdown links around protec
   );
 });
 
-test("reprotectMarkdownSpans folds wrapped local inline code placeholders back into canonical form", () => {
-  const source = [
-    "> Why is this blocked? `~/.bashrc` is sensitive.",
-    "",
-    "Choose **Deny** for this test.",
-    ""
-  ].join("\n");
-
+test("protectSegmentFormattingSpans does not create local inline code placeholders", () => {
+  const source = "> Why is this blocked? `~/.bashrc` is sensitive.\n";
   const protectedMarkdown = protectSegmentFormattingSpans(source, 7100);
-  const wrapped = protectedMarkdown.protectedBody.replace(
-    "@@MDZH_INLINE_CODE_7100@@",
-    "`@@MDZH_INLINE_CODE_7100@@`"
-  );
 
-  const reprotected = reprotectMarkdownSpans(wrapped, protectedMarkdown.spans);
-  assert.equal(reprotected, protectedMarkdown.protectedBody);
-  assert.equal(restoreMarkdownSpans(wrapped, protectedMarkdown.spans), source);
+  assert.doesNotMatch(protectedMarkdown.protectedBody, /@@MDZH_INLINE_CODE_7100@@/);
+  assert.equal(protectedMarkdown.spans.some((span) => span.kind === "inline_code"), false);
+  assert.equal(restoreMarkdownSpans(protectedMarkdown.protectedBody, protectedMarkdown.spans), source);
 });

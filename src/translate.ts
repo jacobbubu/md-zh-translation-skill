@@ -418,10 +418,7 @@ async function translateProtectedChunk(
       segmentLabel,
       nextLocalSpanIndex
     );
-    nextLocalSpanIndex += segmentResult.spans.filter((span) =>
-      span.kind === "inline_code" ||
-      span.kind === "inline_markdown_link"
-    ).length;
+    nextLocalSpanIndex += segmentResult.spans.filter((span) => span.kind === "inline_markdown_link").length;
     draftedSegments.push(segmentResult);
   }
 

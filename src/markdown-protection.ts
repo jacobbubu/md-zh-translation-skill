@@ -90,8 +90,7 @@ export function protectSegmentFormattingSpans(body: string, startIndex = 1): Pro
     return id;
   };
 
-  let protectedBody = mapOutsideInlineCode(body, (text) => protectInlineMarkdownLinks(text, register));
-  protectedBody = protectInlineCodeSegments(protectedBody, register);
+  const protectedBody = mapOutsideInlineCode(body, (text) => protectInlineMarkdownLinks(text, register));
 
   return { protectedBody, spans };
 }
