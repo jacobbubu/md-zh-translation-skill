@@ -1,7 +1,8 @@
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcessByStdio } from "node:child_process";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import type { Readable, Writable } from "node:stream";
 
 import { CodexExecutionError } from "./errors.js";
 
@@ -33,6 +34,18 @@ export type CodexExecOptions = {
 export interface CodexExecutor {
   execute(prompt: string, options: CodexExecOptions): Promise<CodexExecResult>;
 }
+
+type SpawnFn = (
+  command: string,
+  args: readonly string[],
+  options: {
+    cwd: string;
+    stdio: ["pipe", "pipe", "pipe"];
+  }
+) => ChildProcessByStdio<Writable, Readable, Readable>;
+
+const MAX_RETRYABLE_EXEC_FAILURES = 2;
+const RETRYABLE_EXEC_FAILURE_DELAY_MS = 250;
 
 function parseUsage(jsonl: string): CodexUsage {
   let latestUsage: Record<string, unknown> | null = null;
@@ -81,78 +94,123 @@ function parseThreadId(jsonl: string): string | undefined {
   return undefined;
 }
 
+function isRetryableCodexFailure(stderr: string): boolean {
+  return (
+    stderr.includes("codex_core::shell_snapshot") &&
+    stderr.includes("Failed to delete shell snapshot")
+  );
+}
+
+function sleep(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, milliseconds);
+  });
+}
+
 export class DefaultCodexExecutor implements CodexExecutor {
+  constructor(
+    private readonly spawnFn: SpawnFn = spawn,
+    private readonly sleepFn: (milliseconds: number) => Promise<void> = sleep
+  ) {}
+
   async execute(prompt: string, options: CodexExecOptions): Promise<CodexExecResult> {
     const workingDir = options.cwd ?? process.cwd();
-    const tempDir = await mkdtemp(path.join(tmpdir(), "md-zh-translate-"));
-    const outputPath = path.join(tempDir, "last-message.txt");
-    const schemaPath = options.outputSchema ? path.join(tempDir, "output-schema.json") : null;
+    let attempt = 0;
+    let lastError: CodexExecutionError | null = null;
 
-    if (schemaPath) {
-      await writeFile(schemaPath, `${JSON.stringify(options.outputSchema, null, 2)}\n`, "utf8");
+    while (attempt <= MAX_RETRYABLE_EXEC_FAILURES) {
+      const tempDir = await mkdtemp(path.join(tmpdir(), "md-zh-translate-"));
+      const outputPath = path.join(tempDir, "last-message.txt");
+      const schemaPath = options.outputSchema ? path.join(tempDir, "output-schema.json") : null;
+      let stdout = "";
+      let stderr = "";
+
+      try {
+        if (schemaPath) {
+          await writeFile(schemaPath, `${JSON.stringify(options.outputSchema, null, 2)}\n`, "utf8");
+        }
+
+        const args = options.threadId
+          ? buildResumeArgs(options, outputPath)
+          : buildExecArgs(options, workingDir, outputPath);
+
+        if (schemaPath) {
+          args.push("--output-schema", schemaPath);
+        }
+
+        args.push("-");
+
+        const child = this.spawnFn("codex", args, {
+          cwd: workingDir,
+          stdio: ["pipe", "pipe", "pipe"]
+        });
+
+        child.stdout.on("data", (chunk) => {
+          stdout += String(chunk);
+        });
+        child.stderr.on("data", (chunk) => {
+          stderr += String(chunk);
+        });
+
+        child.stdin.write(prompt);
+        child.stdin.end();
+
+        const exitCode = await new Promise<number>((resolve, reject) => {
+          child.once("error", reject);
+          child.once("close", (code) => resolve(code ?? 1));
+        });
+
+        if (exitCode !== 0) {
+          options.onStderr?.(stderr);
+          const error = new CodexExecutionError(
+            stderr.trim() || stdout.trim() || `codex exec exited with ${exitCode}`
+          );
+          if (isRetryableCodexFailure(stderr) && attempt < MAX_RETRYABLE_EXEC_FAILURES) {
+            lastError = error;
+            attempt += 1;
+            await this.sleepFn(RETRYABLE_EXEC_FAILURE_DELAY_MS * attempt);
+            continue;
+          }
+          throw error;
+        }
+
+        const text = (await readFile(outputPath, "utf8")).trim();
+        if (!text) {
+          throw new CodexExecutionError("Codex returned an empty final message.");
+        }
+
+        const threadId = parseThreadId(stdout) ?? options.threadId;
+
+        return {
+          text,
+          stderr,
+          jsonl: stdout,
+          usage: parseUsage(stdout),
+          ...(threadId ? { threadId } : {})
+        };
+      } catch (error) {
+        if (isRetryableCodexFailure(stderr) && attempt < MAX_RETRYABLE_EXEC_FAILURES) {
+          const retryableError =
+            error instanceof CodexExecutionError
+              ? error
+              : new CodexExecutionError(error instanceof Error ? error.message : String(error));
+          lastError = retryableError;
+          attempt += 1;
+          await this.sleepFn(RETRYABLE_EXEC_FAILURE_DELAY_MS * attempt);
+          continue;
+        }
+        if (error instanceof CodexExecutionError) {
+          lastError = error;
+          throw error;
+        }
+        lastError = new CodexExecutionError(error instanceof Error ? error.message : String(error));
+        throw lastError;
+      } finally {
+        await rm(tempDir, { recursive: true, force: true });
+      }
     }
 
-    const args = options.threadId
-      ? buildResumeArgs(options, outputPath)
-      : buildExecArgs(options, workingDir, outputPath);
-
-    if (schemaPath) {
-      args.push("--output-schema", schemaPath);
-    }
-
-    args.push("-");
-
-    const child = spawn("codex", args, {
-      cwd: workingDir,
-      stdio: ["pipe", "pipe", "pipe"]
-    });
-
-    let stdout = "";
-    let stderr = "";
-
-    child.stdout.on("data", (chunk) => {
-      stdout += String(chunk);
-    });
-    child.stderr.on("data", (chunk) => {
-      stderr += String(chunk);
-    });
-
-    child.stdin.write(prompt);
-    child.stdin.end();
-
-    const exitCode = await new Promise<number>((resolve, reject) => {
-      child.once("error", reject);
-      child.once("close", (code) => resolve(code ?? 1));
-    });
-
-    try {
-      if (exitCode !== 0) {
-        options.onStderr?.(stderr);
-        throw new CodexExecutionError(stderr.trim() || stdout.trim() || `codex exec exited with ${exitCode}`);
-      }
-
-      const text = (await readFile(outputPath, "utf8")).trim();
-      if (!text) {
-        throw new CodexExecutionError("Codex returned an empty final message.");
-      }
-
-      const threadId = parseThreadId(stdout) ?? options.threadId;
-
-      return {
-        text,
-        stderr,
-        jsonl: stdout,
-        usage: parseUsage(stdout),
-        ...(threadId ? { threadId } : {})
-      };
-    } catch (error) {
-      if (error instanceof CodexExecutionError) {
-        throw error;
-      }
-      throw new CodexExecutionError(error instanceof Error ? error.message : String(error));
-    } finally {
-      await rm(tempDir, { recursive: true, force: true });
-    }
+    throw lastError ?? new CodexExecutionError("codex exec failed after retry.");
   }
 }
 
@@ -161,6 +219,10 @@ function buildExecArgs(options: CodexExecOptions, workingDir: string, outputPath
     "exec",
     "--skip-git-repo-check",
     "--json",
+    "--disable",
+    "plugins",
+    "--disable",
+    "shell_snapshot",
     "--sandbox",
     "read-only",
     "--color",
@@ -198,6 +260,10 @@ function buildResumeArgs(options: CodexExecOptions, outputPath: string): string[
     "resume",
     "--skip-git-repo-check",
     "--json",
+    "--disable",
+    "plugins",
+    "--disable",
+    "shell_snapshot",
     "-m",
     options.model,
     "-o",
