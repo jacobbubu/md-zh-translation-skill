@@ -357,7 +357,7 @@ test("translateMarkdownArticle canonicalizes expanded URL spans before chunk-lev
   assert.match(result.markdown, /See \[guide\]\(https:\/\/example\.com\/guide\)\.\n$/);
 });
 
-test("translateMarkdownArticle carries local inline markup placeholders into chunk-level style polish", async () => {
+test("translateMarkdownArticle keeps translatable strong emphasis visible at chunk-level style polish", async () => {
   const source = [
     "# Title",
     "",
@@ -379,9 +379,8 @@ test("translateMarkdownArticle carries local inline markup placeholders into chu
 
       if (prompt.includes("只做“风格与可读性润色”")) {
         assert.match(prompt, /@@MDZH_INLINE_CODE_\d{4,}@@/);
-        assert.match(prompt, /@@MDZH_STRONG_EMPHASIS_\d{4,}@@/);
         assert.doesNotMatch(prompt, /`~\/\.bashrc`/);
-        assert.doesNotMatch(prompt, /\*\*Deny\*\*/);
+        assert.match(prompt, /\*\*Deny\*\*/);
         return createExecResult(extractPromptSection(prompt, "【当前译文】") ?? "");
       }
 

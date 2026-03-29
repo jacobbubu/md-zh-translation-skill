@@ -157,7 +157,7 @@ test("restoreMarkdownSpans still rejects code blocks that lost their placeholder
   );
 });
 
-test("protectSegmentFormattingSpans protects inline code and inline strong emphasis inside prose", () => {
+test("protectSegmentFormattingSpans protects inline code without hiding translatable strong emphasis", () => {
   const source = [
     "> Why is this blocked? `~/.bashrc` is sensitive.",
     "",
@@ -170,7 +170,7 @@ test("protectSegmentFormattingSpans protects inline code and inline strong empha
   const protectedMarkdown = protectSegmentFormattingSpans(source, 7000);
 
   assert.match(protectedMarkdown.protectedBody, /@@MDZH_INLINE_CODE_7000@@/);
-  assert.match(protectedMarkdown.protectedBody, /@@MDZH_STRONG_EMPHASIS_7001@@/);
+  assert.match(protectedMarkdown.protectedBody, /\*\*Deny\*\*/);
   assert.match(protectedMarkdown.protectedBody, /\*\*Expected behavior:\*\*/);
   assert.equal(restoreMarkdownSpans(protectedMarkdown.protectedBody, protectedMarkdown.spans), source);
 });
@@ -197,7 +197,7 @@ test("protectSegmentFormattingSpans protects inline markdown links around protec
   );
 });
 
-test("reprotectMarkdownSpans folds wrapped local inline placeholders back into canonical form", () => {
+test("reprotectMarkdownSpans folds wrapped local inline code placeholders back into canonical form", () => {
   const source = [
     "> Why is this blocked? `~/.bashrc` is sensitive.",
     "",
@@ -206,9 +206,10 @@ test("reprotectMarkdownSpans folds wrapped local inline placeholders back into c
   ].join("\n");
 
   const protectedMarkdown = protectSegmentFormattingSpans(source, 7100);
-  const wrapped = protectedMarkdown.protectedBody
-    .replace("@@MDZH_INLINE_CODE_7100@@", "`@@MDZH_INLINE_CODE_7100@@`")
-    .replace("@@MDZH_STRONG_EMPHASIS_7101@@", "**@@MDZH_STRONG_EMPHASIS_7101@@**");
+  const wrapped = protectedMarkdown.protectedBody.replace(
+    "@@MDZH_INLINE_CODE_7100@@",
+    "`@@MDZH_INLINE_CODE_7100@@`"
+  );
 
   const reprotected = reprotectMarkdownSpans(wrapped, protectedMarkdown.spans);
   assert.equal(reprotected, protectedMarkdown.protectedBody);

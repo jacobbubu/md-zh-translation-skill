@@ -92,7 +92,6 @@ export function protectSegmentFormattingSpans(body: string, startIndex = 1): Pro
 
   let protectedBody = mapOutsideInlineCode(body, (text) => protectInlineMarkdownLinks(text, register));
   protectedBody = protectInlineCodeSegments(protectedBody, register);
-  protectedBody = protectInlineStrongEmphasis(protectedBody, register);
 
   return { protectedBody, spans };
 }
