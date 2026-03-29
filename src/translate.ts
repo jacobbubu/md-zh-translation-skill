@@ -433,7 +433,7 @@ async function translateProtectedSegment(
     }
   );
   threadId = draftResult.threadId;
-  let currentTranslation = draftResult.text;
+  let currentTranslation = reprotectMarkdownSpans(draftResult.text, combinedSpans);
 
   let auditState = await runGateAudit(protectedSource, currentTranslation, plan, context, chunkPromptContext, chunkLabel, threadId);
   let gateAudit = auditState.audit;
@@ -462,7 +462,7 @@ async function translateProtectedSegment(
       }
     );
     threadId = repairResult.threadId ?? threadId;
-    currentTranslation = repairResult.text;
+    currentTranslation = reprotectMarkdownSpans(repairResult.text, combinedSpans);
 
     auditState = await runGateAudit(protectedSource, currentTranslation, plan, context, chunkPromptContext, chunkLabel, threadId);
     gateAudit = auditState.audit;

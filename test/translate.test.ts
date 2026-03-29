@@ -115,6 +115,27 @@ class SessionReuseExecutor implements CodexExecutor {
   }
 }
 
+class WrappedInlineCodeExecutor implements CodexExecutor {
+  readonly prompts: string[] = [];
+
+  async execute(prompt: string, options: CodexExecOptions): Promise<CodexExecResult> {
+    this.prompts.push(prompt);
+
+    if (options.outputSchema || prompt.includes('"hard_checks"') || prompt.includes("只返回 JSON")) {
+      const currentTranslation = extractPromptSection(prompt, "【当前译文】") ?? "";
+      assert.match(currentTranslation, /@@MDZH_INLINE_CODE_\d{4,}@@/);
+      assert.doesNotMatch(currentTranslation, /`@@MDZH_INLINE_CODE_\d{4,}@@`/);
+      return createExecResult(JSON.stringify(createAudit(true)));
+    }
+
+    if (prompt.includes("只做“风格与可读性润色”")) {
+      return createExecResult(extractPromptSection(prompt, "【当前译文】") ?? "");
+    }
+
+    return createExecResult("With sandbox: 访问 `@@MDZH_INLINE_CODE_0001@@` 会被阻止。\n");
+  }
+}
+
 function extractPromptSection(prompt: string, label: string): string | null {
   const start = prompt.indexOf(`${label}\n`);
   if (start < 0) {
@@ -404,6 +425,18 @@ test("translateMarkdownArticle keeps translatable strong emphasis visible at chu
 
   assert.match(result.markdown, /> 为什么这会被拦截？ `~\/\.bashrc` 属于敏感文件。/);
   assert.match(result.markdown, /本次测试请选择 \*\*Deny\*\*\。?/);
+});
+
+test("translateMarkdownArticle canonicalizes wrapped inline code placeholders before segment audit", async () => {
+  const source = "With sandbox: access to `~/.ssh` is blocked.\n";
+  const executor = new WrappedInlineCodeExecutor();
+
+  const result = await translateMarkdownArticle(source, {
+    executor,
+    formatter: async (markdown) => markdown
+  });
+
+  assert.equal(result.markdown, "With sandbox: 访问 `~/.ssh` 会被阻止。\n");
 });
 
 test("translateMarkdownArticle carries local inline markdown link placeholders into chunk-level style polish", async () => {
