@@ -1,4 +1,9 @@
-import { buildGateAuditPrompt, buildInitialPrompt, buildRepairPrompt, buildStylePolishPrompt } from "./internal/prompts/scheme-h.js";
+import {
+  buildBundledGateAuditPrompt,
+  buildInitialPrompt,
+  buildRepairPrompt,
+  buildStylePolishPrompt
+} from "./internal/prompts/scheme-h.js";
 import { DefaultCodexExecutor, type CodexExecutor } from "./codex-exec.js";
 import { FormattingError, HardGateError } from "./errors.js";
 import { formatTranslatedBody, reconstructMarkdown } from "./format.js";
@@ -30,6 +35,14 @@ type AuditCheckKey =
 export type GateAudit = {
   hard_checks: Record<AuditCheckKey, { pass: boolean; problem: string }>;
   must_fix: string[];
+};
+
+type IndexedGateAudit = GateAudit & {
+  segment_index: number;
+};
+
+type BundledGateAudit = {
+  segments: IndexedGateAudit[];
 };
 
 export type TranslateProgress =
@@ -91,6 +104,27 @@ const GATE_AUDIT_SCHEMA = {
   }
 } as const;
 
+const BUNDLED_GATE_AUDIT_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["segments"],
+  properties: {
+    segments: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["segment_index", "hard_checks", "must_fix"],
+        properties: {
+          segment_index: { type: "integer", minimum: 1 },
+          hard_checks: GATE_AUDIT_SCHEMA.properties.hard_checks,
+          must_fix: GATE_AUDIT_SCHEMA.properties.must_fix
+        }
+      }
+    }
+  }
+} as const;
+
 function auditItemSchema() {
   return {
     type: "object",
@@ -121,19 +155,12 @@ function extractJsonObject(text: string): string {
   return trimmed.slice(start, end + 1);
 }
 
-export function parseGateAudit(text: string): GateAudit {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(extractJsonObject(text));
-  } catch (error) {
-    throw new HardGateError(error instanceof Error ? error.message : String(error));
-  }
-
-  if (!parsed || typeof parsed !== "object") {
+function parseGateAuditValue(value: unknown): GateAudit {
+  if (!value || typeof value !== "object") {
     throw new HardGateError("Gate audit JSON is not an object.");
   }
 
-  const data = parsed as Record<string, unknown>;
+  const data = value as Record<string, unknown>;
   const hardChecks = data.hard_checks;
   const mustFix = data.must_fix;
   const keys: AuditCheckKey[] = [
@@ -170,8 +197,71 @@ export function parseGateAudit(text: string): GateAudit {
   };
 }
 
+export function parseGateAudit(text: string): GateAudit {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(extractJsonObject(text));
+  } catch (error) {
+    throw new HardGateError(error instanceof Error ? error.message : String(error));
+  }
+
+  return parseGateAuditValue(parsed);
+}
+
+function parseBundledGateAudit(text: string, expectedSegmentIndices: readonly number[]): BundledGateAudit {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(extractJsonObject(text));
+  } catch (error) {
+    throw new HardGateError(error instanceof Error ? error.message : String(error));
+  }
+
+  if (!parsed || typeof parsed !== "object") {
+    throw new HardGateError("Bundled gate audit JSON is not an object.");
+  }
+
+  const data = parsed as Record<string, unknown>;
+  if (!Array.isArray(data.segments)) {
+    throw new HardGateError("Bundled gate audit JSON is missing segments.");
+  }
+
+  const audits = data.segments.map((item, index) => {
+    if (!item || typeof item !== "object") {
+      throw new HardGateError(`Bundled gate audit segment[${index}] is not an object.`);
+    }
+
+    const segmentIndex = Number((item as Record<string, unknown>).segment_index);
+    if (!Number.isInteger(segmentIndex) || segmentIndex < 1) {
+      throw new HardGateError(`Bundled gate audit segment[${index}] has an invalid segment_index.`);
+    }
+
+    const audit = parseGateAuditValue(item);
+    return {
+      segment_index: segmentIndex,
+      ...audit
+    } satisfies IndexedGateAudit;
+  });
+
+  const sortedActual = audits.map((audit) => audit.segment_index).sort((left, right) => left - right);
+  const sortedExpected = [...expectedSegmentIndices].sort((left, right) => left - right);
+  if (
+    sortedActual.length !== sortedExpected.length ||
+    sortedActual.some((value, index) => value !== sortedExpected[index])
+  ) {
+    throw new HardGateError(
+      `Bundled gate audit segment_index set mismatch: expected [${sortedExpected.join(", ")}], got [${sortedActual.join(", ")}].`
+    );
+  }
+
+  return { segments: audits };
+}
+
 function isHardPass(audit: GateAudit): boolean {
   return Object.values(audit.hard_checks).every((item) => item.pass);
+}
+
+function isBundledHardPass(audit: BundledGateAudit): boolean {
+  return audit.segments.every((segment) => isHardPass(segment));
 }
 
 function validateStructuralGateChecks(audit: GateAudit): void {
@@ -282,13 +372,14 @@ type ChunkTranslationResult = {
   gateAudit: GateAudit;
 };
 
-type SegmentTranslationResult = {
+type DraftedSegmentState = {
+  segment: ProtectedChunkSegment;
+  promptContext: ChunkPromptContext;
   protectedSource: string;
   protectedBody: string;
   restoredBody: string;
-  repairCyclesUsed: number;
-  gateAudit: GateAudit;
   spans: ProtectedSpan[];
+  threadId?: string;
 };
 
 async function translateProtectedChunk(
@@ -299,20 +390,14 @@ async function translateProtectedChunk(
   const chunkLabel = formatChunkLabel(chunk, plan);
   const chunkPromptContext = buildChunkPromptContext(chunk, plan, context.sourcePathHint, context.establishedTerms);
   const segments = splitProtectedChunkSegments(chunk.source, context.spanIndex);
-  const rebuiltProtectedSegments: string[] = [];
-  const rebuiltProtectedSourceSegments: string[] = [];
-  const rebuiltRestoredSegments: string[] = [];
-  const accumulatedChunkSpans: ProtectedSpan[] = [];
-  const segmentAudits: GateAudit[] = [];
+  const draftedSegments: DraftedSegmentState[] = [];
+  const fixedSegments: ProtectedChunkSegment[] = [];
   let repairCyclesUsed = 0;
   let nextLocalSpanIndex = context.spanIndex.size + 1;
 
   for (const segment of segments) {
     if (segment.kind === "fixed") {
-      rebuiltProtectedSegments.push(segment.source + segment.separatorAfter);
-      rebuiltProtectedSourceSegments.push(segment.source + segment.separatorAfter);
-      rebuiltRestoredSegments.push(restoreMarkdownSpans(segment.source, segment.spans) + segment.separatorAfter);
-      accumulatedChunkSpans.push(...segment.spans);
+      fixedSegments.push(segment);
       continue;
     }
 
@@ -333,23 +418,85 @@ async function translateProtectedChunk(
       segmentLabel,
       nextLocalSpanIndex
     );
-    nextLocalSpanIndex += segmentResult.spans.filter((span) => span.kind === "inline_code" || span.kind === "inline_markdown_link").length;
-    rebuiltProtectedSourceSegments.push(segmentResult.protectedSource + segment.separatorAfter);
-    rebuiltProtectedSegments.push(segmentResult.protectedBody + segment.separatorAfter);
-    rebuiltRestoredSegments.push(segmentResult.restoredBody + segment.separatorAfter);
-    accumulatedChunkSpans.push(...segmentResult.spans);
-    segmentAudits.push(segmentResult.gateAudit);
-    repairCyclesUsed += segmentResult.repairCyclesUsed;
+    nextLocalSpanIndex += segmentResult.spans.filter((span) =>
+      span.kind === "inline_code" ||
+      span.kind === "inline_markdown_link"
+    ).length;
+    draftedSegments.push(segmentResult);
   }
 
-  const hardPassProtectedSource = rebuiltProtectedSourceSegments.join("");
-  const hardPassProtectedChunk = rebuiltProtectedSegments.join("");
-  const hardPassBody = rebuiltRestoredSegments.join("");
+  let bundledAudit = await runBundledGateAudit(
+    draftedSegments,
+    plan,
+    context,
+    chunkPromptContext,
+    chunkLabel
+  );
+
+  while (
+    !isBundledHardPass(bundledAudit) &&
+    repairCyclesUsed < MAX_REPAIR_CYCLES &&
+    bundledAudit.segments.some((audit) => audit.must_fix.length > 0)
+  ) {
+    repairCyclesUsed += 1;
+    const failedSegmentCount = bundledAudit.segments.filter((audit) => !isHardPass(audit)).length;
+    report(
+      context.options,
+      "repair",
+      `Chunk ${chunkPromptContext.chunkIndex}/${plan.chunks.length}${chunkLabel}: repair cycle ${repairCyclesUsed} of ${MAX_REPAIR_CYCLES} for ${failedSegmentCount} failed segment(s).`
+    );
+
+    for (const segmentAudit of bundledAudit.segments) {
+      if (isHardPass(segmentAudit) || segmentAudit.must_fix.length === 0) {
+        continue;
+      }
+
+      const draftedSegment = draftedSegments.find(
+        (item) => item.segment.index + 1 === segmentAudit.segment_index
+      );
+      if (!draftedSegment) {
+        throw new HardGateError(
+          `Chunk ${chunkPromptContext.chunkIndex}/${plan.chunks.length}${chunkLabel}: unknown segment ${segmentAudit.segment_index} in bundled audit.`
+        );
+      }
+
+      await repairDraftedSegment(
+        draftedSegment,
+        segmentAudit.must_fix,
+        plan,
+        context,
+        chunkLabel
+      );
+    }
+
+    bundledAudit = await runBundledGateAudit(
+      draftedSegments,
+      plan,
+      context,
+      chunkPromptContext,
+      chunkLabel
+    );
+  }
+
+  if (!isBundledHardPass(bundledAudit)) {
+    const remaining = bundledAudit.segments
+      .filter((audit) => !isHardPass(audit))
+      .map((audit) => `segment ${audit.segment_index}: ${audit.must_fix.join(" | ") || "hard gate failed"}`)
+      .join(" || ");
+    throw new HardGateError(
+      `Chunk ${chunkPromptContext.chunkIndex}/${plan.chunks.length}${chunkLabel} failed after ${repairCyclesUsed} repair cycle(s): ${remaining}`
+    );
+  }
+
+  const hardPassProtectedSource = rebuildChunkFromSegmentStates(segments, draftedSegments, "protectedSource");
+  const hardPassProtectedChunk = rebuildChunkFromSegmentStates(segments, draftedSegments, "protectedBody");
+  const hardPassBody = rebuildChunkFromSegmentStates(segments, draftedSegments, "restoredBody");
+  const accumulatedChunkSpans = collectAccumulatedChunkSpans(segments, draftedSegments);
   const chunkSpans = collectChunkSpans(hardPassProtectedChunk, context.spanIndex, accumulatedChunkSpans);
   let restoredChunkBody = hardPassBody;
   let styleApplied = false;
 
-  if (segmentAudits.length > 0) {
+  if (bundledAudit.segments.length > 0) {
     const chunkStylePromptContext: ChunkPromptContext = {
       ...chunkPromptContext,
       segmentHeadings: extractSegmentHeadingHints(chunk.source),
@@ -391,7 +538,7 @@ async function translateProtectedChunk(
     body: restoredChunkBody,
     repairCyclesUsed,
     styleApplied,
-    gateAudit: mergeGateAudits(segmentAudits)
+    gateAudit: mergeGateAudits(bundledAudit.segments)
   };
 }
 
@@ -410,7 +557,7 @@ async function translateProtectedSegment(
   chunkPromptContext: ChunkPromptContext,
   chunkLabel: string,
   localSpanStartIndex: number
-): Promise<SegmentTranslationResult> {
+): Promise<DraftedSegmentState> {
   let threadId: string | undefined;
   const localFormatting = protectSegmentFormattingSpans(segment.source, localSpanStartIndex);
   const protectedSource = localFormatting.protectedBody;
@@ -433,135 +580,161 @@ async function translateProtectedSegment(
     }
   );
   threadId = draftResult.threadId;
-  let currentTranslation = reprotectMarkdownSpans(draftResult.text, combinedSpans);
-
-  let auditState = await runGateAudit(protectedSource, currentTranslation, plan, context, chunkPromptContext, chunkLabel, threadId);
-  let gateAudit = auditState.audit;
-  threadId = auditState.threadId;
-  let repairCyclesUsed = 0;
-
-  while (!isHardPass(gateAudit) && repairCyclesUsed < MAX_REPAIR_CYCLES && gateAudit.must_fix.length > 0) {
-    repairCyclesUsed += 1;
-    report(
-      context.options,
-      "repair",
-      `Chunk ${chunkPromptContext.chunkIndex}/${plan.chunks.length}${chunkLabel}: repair cycle ${repairCyclesUsed} of ${MAX_REPAIR_CYCLES}.`
-    );
-    const repairResult = await context.executor.execute(
-      withChunkContext(
-        buildRepairPrompt(protectedSource, currentTranslation, gateAudit.must_fix),
-        chunkPromptContext
-      ),
-      {
-        cwd: context.cwd,
-        model: context.model,
-        reasoningEffort: REPAIR_REASONING_EFFORT,
-        ...(threadId ? { threadId } : { reuseSession: true }),
-        onStderr: (stderrChunk) =>
-          reportChunkProgress(context.options, "repair", chunkPromptContext.chunkIndex - 1, plan, chunkLabel, stderrChunk)
-      }
-    );
-    threadId = repairResult.threadId ?? threadId;
-    currentTranslation = reprotectMarkdownSpans(repairResult.text, combinedSpans);
-
-    auditState = await runGateAudit(protectedSource, currentTranslation, plan, context, chunkPromptContext, chunkLabel, threadId);
-    gateAudit = auditState.audit;
-    threadId = auditState.threadId;
-  }
-
-  if (!isHardPass(gateAudit)) {
-    const remaining =
-      gateAudit.must_fix.length > 0
-        ? gateAudit.must_fix.join(" | ")
-        : "Gate audit still failed after the repair loop.";
-    throw new HardGateError(
-      `Chunk ${chunkPromptContext.chunkIndex}/${plan.chunks.length}${chunkLabel} failed after ${repairCyclesUsed} repair cycle(s): ${remaining}`
-    );
-  }
-
-  const canonicalProtectedBody = reprotectMarkdownSpans(currentTranslation, combinedSpans);
+  const canonicalProtectedBody = reprotectMarkdownSpans(draftResult.text, combinedSpans);
   const restoredBody = restoreMarkdownSpans(canonicalProtectedBody, combinedSpans);
 
   return {
+    segment,
+    promptContext: chunkPromptContext,
     protectedSource,
     protectedBody: canonicalProtectedBody,
     restoredBody,
-    repairCyclesUsed,
-    gateAudit,
-    spans: combinedSpans
+    spans: combinedSpans,
+    ...(threadId ? { threadId } : {})
   };
 }
 
-type GateAuditRunResult = {
-  audit: GateAudit;
-  threadId?: string;
-};
+async function repairDraftedSegment(
+  draftedSegment: DraftedSegmentState,
+  mustFix: readonly string[],
+  plan: MarkdownChunkPlan,
+  context: ChunkTranslationContext,
+  chunkLabel: string
+): Promise<void> {
+  report(
+    context.options,
+    "repair",
+    `Chunk ${draftedSegment.promptContext.chunkIndex}/${plan.chunks.length}${chunkLabel}, segment ${draftedSegment.segment.index + 1}: repairing failed segment.`
+  );
+  const repairResult = await context.executor.execute(
+    withChunkContext(
+      buildRepairPrompt(draftedSegment.protectedSource, draftedSegment.protectedBody, mustFix),
+      draftedSegment.promptContext
+    ),
+    {
+      cwd: context.cwd,
+      model: context.model,
+      reasoningEffort: REPAIR_REASONING_EFFORT,
+      ...(draftedSegment.threadId ? { threadId: draftedSegment.threadId } : { reuseSession: true }),
+      onStderr: (stderrChunk) =>
+        reportChunkProgress(
+          context.options,
+          "repair",
+          draftedSegment.promptContext.chunkIndex - 1,
+          plan,
+          `${chunkLabel}, segment ${draftedSegment.segment.index + 1}`,
+          stderrChunk
+        )
+    }
+  );
 
-async function runGateAudit(
-  source: string,
-  translation: string,
+  if (repairResult.threadId) {
+    draftedSegment.threadId = repairResult.threadId;
+  }
+  draftedSegment.protectedBody = reprotectMarkdownSpans(repairResult.text, draftedSegment.spans);
+  draftedSegment.restoredBody = restoreMarkdownSpans(draftedSegment.protectedBody, draftedSegment.spans);
+}
+
+async function runBundledGateAudit(
+  draftedSegments: readonly DraftedSegmentState[],
   plan: MarkdownChunkPlan,
   context: ChunkTranslationContext,
   chunkPromptContext: ChunkPromptContext,
-  chunkLabel: string,
-  threadId?: string
-): Promise<GateAuditRunResult> {
+  chunkLabel: string
+): Promise<BundledGateAudit> {
+  const segmentIndices = draftedSegments.map((segment) => segment.segment.index + 1);
+  if (segmentIndices.length === 0) {
+    return { segments: [] };
+  }
+
   report(
     context.options,
     "audit",
-    `Chunk ${chunkPromptContext.chunkIndex}/${plan.chunks.length}${chunkLabel}: running hard gate audit.`
+    `Chunk ${chunkPromptContext.chunkIndex}/${plan.chunks.length}${chunkLabel}: running hard gate audit for ${segmentIndices.length} segment(s).`
   );
 
-  const prompt = withChunkContext(buildGateAuditPrompt(source, translation), chunkPromptContext);
+  const prompt = withChunkContextAt(
+    buildBundledGateAuditPrompt(formatBundledAuditSegments(draftedSegments)),
+    chunkPromptContext,
+    "【分段审校输入】"
+  );
 
-  if (threadId) {
-    const resumedResult = await context.executor.execute(prompt, {
-      cwd: context.cwd,
-      model: context.model,
-      reasoningEffort: AUDIT_REASONING_EFFORT,
-      threadId,
-      onStderr: (stderrChunk) =>
-        reportChunkProgress(context.options, "audit", chunkPromptContext.chunkIndex - 1, plan, chunkLabel, stderrChunk)
-    });
-
-    let resumedAudit: GateAudit | null = null;
-    try {
-      resumedAudit = parseGateAudit(resumedResult.text);
-    } catch (error) {
-      if (!(error instanceof HardGateError)) {
-        throw error;
-      }
-      report(
-        context.options,
-        "audit",
-        `Chunk ${chunkPromptContext.chunkIndex}/${plan.chunks.length}${chunkLabel}: resumed audit did not return stable JSON; retrying with a structured fresh call.`
-      );
-    }
-
-    if (resumedAudit) {
-      validateStructuralGateChecks(resumedAudit);
-      return {
-        audit: resumedAudit,
-        ...(resumedResult.threadId ?? threadId ? { threadId: resumedResult.threadId ?? threadId } : {})
-      };
-    }
-  }
-
-  const structuredResult = await context.executor.execute(prompt, {
+  const auditResult = await context.executor.execute(prompt, {
     cwd: context.cwd,
     model: context.model,
     reasoningEffort: AUDIT_REASONING_EFFORT,
-    outputSchema: GATE_AUDIT_SCHEMA,
+    outputSchema: BUNDLED_GATE_AUDIT_SCHEMA,
     reuseSession: true,
     onStderr: (stderrChunk) =>
       reportChunkProgress(context.options, "audit", chunkPromptContext.chunkIndex - 1, plan, chunkLabel, stderrChunk)
   });
-  const structuredAudit = parseGateAudit(structuredResult.text);
-  validateStructuralGateChecks(structuredAudit);
-  return {
-    audit: structuredAudit,
-    ...(structuredResult.threadId ? { threadId: structuredResult.threadId } : {})
-  };
+
+  const bundledAudit = parseBundledGateAudit(auditResult.text, segmentIndices);
+  for (const segmentAudit of bundledAudit.segments) {
+    validateStructuralGateChecks(segmentAudit);
+  }
+  return bundledAudit;
+}
+
+function rebuildChunkFromSegmentStates(
+  segments: readonly ProtectedChunkSegment[],
+  draftedSegments: readonly DraftedSegmentState[],
+  key: "protectedSource" | "protectedBody" | "restoredBody"
+): string {
+  return segments
+    .map((segment) => {
+      if (segment.kind === "fixed") {
+        const content = key === "restoredBody"
+          ? restoreMarkdownSpans(segment.source, segment.spans)
+          : segment.source;
+        return `${content}${segment.separatorAfter}`;
+      }
+
+      const drafted = draftedSegments.find((item) => item.segment.index === segment.index);
+      if (!drafted) {
+        throw new HardGateError(`Missing drafted segment ${segment.index + 1} while rebuilding chunk.`);
+      }
+
+      return `${drafted[key]}${segment.separatorAfter}`;
+    })
+    .join("");
+}
+
+function collectAccumulatedChunkSpans(
+  segments: readonly ProtectedChunkSegment[],
+  draftedSegments: readonly DraftedSegmentState[]
+): ProtectedSpan[] {
+  const spans: ProtectedSpan[] = [];
+
+  for (const segment of segments) {
+    if (segment.kind === "fixed") {
+      spans.push(...segment.spans);
+      continue;
+    }
+
+    const drafted = draftedSegments.find((item) => item.segment.index === segment.index);
+    if (!drafted) {
+      throw new HardGateError(`Missing drafted segment ${segment.index + 1} while collecting spans.`);
+    }
+    spans.push(...drafted.spans);
+  }
+
+  return spans;
+}
+
+function formatBundledAuditSegments(draftedSegments: readonly DraftedSegmentState[]): string {
+  return draftedSegments
+    .map((segment) =>
+      [
+        `【segment ${segment.segment.index + 1}】`,
+        "【英文原文】",
+        segment.protectedSource,
+        "",
+        "【当前译文】",
+        segment.protectedBody
+      ].join("\n")
+    )
+    .join("\n\n");
 }
 
 const MIN_SEGMENT_HEADING_SPLIT_CHARACTERS = 2600;
@@ -875,6 +1048,10 @@ function buildChunkPromptContext(
 }
 
 function withChunkContext(prompt: string, context: ChunkPromptContext): string {
+  return withChunkContextAt(prompt, context, "【英文原文】");
+}
+
+function withChunkContextAt(prompt: string, context: ChunkPromptContext, marker: string): string {
   const headingPath =
     context.headingPath.length > 0 ? context.headingPath.join(" > ") : "无明确标题路径";
   const documentTitle = context.documentTitle ?? "无标题";
@@ -901,7 +1078,7 @@ function withChunkContext(prompt: string, context: ChunkPromptContext): string {
       ? `\n\n【当前分段附加规则】\n${context.specialNotes.join("\n")}`
       : "";
 
-  return prompt.replace("【英文原文】", `${contextLines}${specialNotesBlock}\n\n【英文原文】`);
+  return prompt.replace(marker, `${contextLines}${specialNotesBlock}\n\n${marker}`);
 }
 
 function formatChunkLabel(chunk: MarkdownChunk, plan: MarkdownChunkPlan): string {

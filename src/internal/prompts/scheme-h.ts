@@ -88,6 +88,54 @@ ${MARKDOWN_RULES}
 {{translation}}
 `.trim();
 
+export const BUNDLED_GATE_AUDIT_PROMPT = `
+请检查下面按 segment 编号提供的英文原文与当前译文，只做“硬性项审校”，不要润色，不要改写，不要输出修订稿。
+
+只返回 JSON，对应格式如下：
+{
+  "segments": [
+    {
+      "segment_index": 1,
+      "hard_checks": {
+        "paragraph_match": { "pass": true, "problem": "" },
+        "first_mention_bilingual": { "pass": true, "problem": "" },
+        "numbers_units_logic": { "pass": true, "problem": "" },
+        "chinese_punctuation": { "pass": true, "problem": "" },
+        "unit_conversion_boundary": { "pass": true, "problem": "" },
+        "protected_span_integrity": { "pass": true, "problem": "" }
+      },
+      "must_fix": [
+        "逐条列出必须修复的问题，描述要具体、可执行"
+      ]
+    }
+  ]
+}
+
+审校口径与单段审校完全一致，但必须按 segment 分别返回结果：
+1. paragraph_match：该 segment 的段落数和段落顺序是否严格对应原文。
+2. first_mention_bilingual：该 segment 中的人名、机构名、公司名、产品名、论文/期刊/会议名、专有项目名以及真正关键的专业术语第一次出现时是否完成中英文对照；标题、各级标题、列表项和正文中的第一次出现都要检查。这里的关键术语不仅包括明显的领域术语，也包括在本文中反复出现、承载核心发现或后文持续围绕其展开的科学名词。遇到州名、地区名、风暴名、并列术语或列表枚举时，要逐项检查。同时要判定对照范围是否过宽；如果把整条标题、导语句、小标题或列表项原句整句附上英文，或者给 Earth、reptiles、paleontologist 这类通用名词、职业称谓、类群名、常见科学词硬加英文，也应判为不通过。若同一核心概念存在多个英文变体，要检查是否在首次出现时就建立了稳定的双语对应，不能到后文某个变体出现时才第一次补英文。
+   如果上文上下文里已经给出“前文已完成首现锚定的专名/术语”清单，则清单内条目及其明显简称一律视为已经在全文前文完成首现双语锚定；即使它们在当前分块标题、各级标题、列表项或正文里是本块第一次出现，也不得再按“首现缺少中英文对照”判错。
+3. numbers_units_logic：数字、年份、单位、比较关系、逻辑关系是否没有明显错漏。
+4. chinese_punctuation：是否符合中文标点习惯；如果保留完整英文段落，该英文段落内部可保留英文标点，不单独判错。中文句内若保留英文缩写并补中文解释，括号必须是全角，例如“CNN（美国有线电视新闻网）”。
+5. unit_conversion_boundary：长度、重量、华氏温度、以英寸表示的累计降水量是否按规则补常见换算，其他单位是否没有被擅自换算。
+6. protected_span_integrity：所有占位符是否逐字保留、没有丢失、没有改写、没有增删、没有被污染进别的文本。
+
+输出要求：
+- 只返回 JSON。
+- 每个 segment_index 只返回一个对象。
+- problem 要简短具体。
+- must_fix 只写必须修的硬性问题，不写风格建议。
+- must_fix 必须原子化，一条只写一个具体问题。
+- 每条 must_fix 都要写清位置、问题和修复目标。
+- 如果某个 hard_check 判为 false，对应问题必须在该 segment 的 must_fix 中完整覆盖，不得遗漏。
+- 如果 protected_span_integrity 不通过，必须明确写出具体污染位置或被破坏的占位符，但不要输出修订稿。
+
+${MARKDOWN_RULES}
+
+【分段审校输入】
+{{segments}}
+`.trim();
+
 export const REPAIR_PROMPT = `
 请根据英文原文、当前译文和“must_fix”问题清单，只修复这些具体问题，不做额外润色，不重写全文风格。
 
@@ -146,6 +194,10 @@ export function buildInitialPrompt(source: string): string {
 
 export function buildGateAuditPrompt(source: string, translation: string): string {
   return GATE_AUDIT_PROMPT.replaceAll("{{source}}", source).replaceAll("{{translation}}", translation);
+}
+
+export function buildBundledGateAuditPrompt(segments: string): string {
+  return BUNDLED_GATE_AUDIT_PROMPT.replaceAll("{{segments}}", segments);
 }
 
 export function buildRepairPrompt(source: string, translation: string, mustFix: readonly string[]): string {
