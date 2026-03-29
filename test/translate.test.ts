@@ -466,6 +466,31 @@ test("translateMarkdownArticle passes segment heading hints into prompts for hea
   );
 });
 
+test("translateMarkdownArticle adds attribution guidance for caption-like segments", async () => {
+  const source = [
+    "# Title",
+    "",
+    "## Sandbox",
+    "",
+    "*Claude Code Sandbox Illustration / By Anthropic*",
+    "",
+    "Body paragraph.",
+    ""
+  ].join("\n");
+
+  const executor = new PromptAwareExecutor();
+  await translateMarkdownArticle(source, {
+    executor,
+    formatter: async (markdown) => markdown
+  });
+
+  const prompt = executor.prompts.find((item) => item.includes("Claude Code Sandbox Illustration / By Anthropic"));
+  assert.ok(prompt);
+  assert.match(prompt, /【当前分段附加规则】/);
+  assert.match(prompt, /图注、署名、来源、配图说明或出品归属类文本/);
+  assert.match(prompt, /不要为了满足首现双语而强行创造中文主译/);
+});
+
 test("translateMarkdownArticle includes established terms from prior chunks in later chunk prompts", async () => {
   const source = [
     "# Title",

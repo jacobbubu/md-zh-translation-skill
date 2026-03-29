@@ -310,7 +310,8 @@ async function translateProtectedChunk(
 
     const segmentPromptContext: ChunkPromptContext = {
       ...chunkPromptContext,
-      segmentHeadings: extractSegmentHeadingHints(segment.source)
+      segmentHeadings: extractSegmentHeadingHints(segment.source),
+      specialNotes: extractSegmentSpecialNotes(segment.source)
     };
     const segmentLabel =
       segments.length > 1
@@ -332,7 +333,8 @@ async function translateProtectedChunk(
   if (segmentAudits.length > 0) {
     const chunkStylePromptContext: ChunkPromptContext = {
       ...chunkPromptContext,
-      segmentHeadings: extractSegmentHeadingHints(chunk.source)
+      segmentHeadings: extractSegmentHeadingHints(chunk.source),
+      specialNotes: extractSegmentSpecialNotes(chunk.source)
     };
 
     report(
@@ -735,6 +737,39 @@ function extractSegmentHeadingHints(source: string): string[] {
   return hints;
 }
 
+function extractSegmentSpecialNotes(source: string): string[] {
+  const notes: string[] = [];
+
+  if (containsAttributionLikeBlock(source)) {
+    notes.push(
+      "当前分段包含图注、署名、来源、配图说明或出品归属类文本。对这类归属说明里的公司名、机构名、品牌名、作者名或媒体名，如果原文本身以英文原名、署名格式或 credit/byline 形式呈现，不要为了满足首现双语而强行创造中文主译。",
+      "这类归属说明优先保留原文归属格式，可做最小必要的中文化，但不要把 `Anthropic（Anthropic）` 这类同文重复括注当作正确修复目标，也不要因为缺少中文主译就判为必须修复。"
+    );
+  }
+
+  return notes;
+}
+
+function containsAttributionLikeBlock(source: string): boolean {
+  return splitRawBlocks(source).some((block) => isAttributionLikeBlock(block.content));
+}
+
+function isAttributionLikeBlock(content: string): boolean {
+  const trimmed = content.trim();
+  if (trimmed.length === 0 || trimmed.includes("\n")) {
+    return false;
+  }
+
+  const normalized = trimmed.replace(/^\*+|\*+$/g, "").trim();
+  if (normalized.length === 0) {
+    return false;
+  }
+
+  return /(?:\bfeatured image\b|\billustration\b|\bcredit\b|\bcourtesy\b|\/\s*by\b|\bby\b|来源|供图|出品|署名|配图|图注|插图|照片|制图)/i.test(
+    normalized
+  );
+}
+
 type ChunkPromptContext = {
   documentTitle: string | null;
   headingPath: string[];
@@ -743,6 +778,7 @@ type ChunkPromptContext = {
   sourcePathHint: string;
   segmentHeadings: string[];
   establishedTerms: string[];
+  specialNotes: string[];
 };
 
 function buildChunkPromptContext(
@@ -758,7 +794,8 @@ function buildChunkPromptContext(
     chunkCount: plan.chunks.length,
     sourcePathHint,
     segmentHeadings: [],
-    establishedTerms: [...establishedTerms]
+    establishedTerms: [...establishedTerms],
+    specialNotes: []
   };
 }
 
@@ -784,8 +821,12 @@ function withChunkContext(prompt: string, context: ChunkPromptContext): string {
     "只有不在前文清单里、且确实是全文第一次出现的专名、产品名、项目名或关键术语，才需要补首次中英文对照。",
     "如果当前分段标题、加粗标题、列表项标题里包含冒号、括号限定语、枚举标签或英文补充说明，翻译时必须完整保留这些信息，不要只保留其中一部分。"
   ].join("\n");
+  const specialNotesBlock =
+    context.specialNotes.length > 0
+      ? `\n\n【当前分段附加规则】\n${context.specialNotes.join("\n")}`
+      : "";
 
-  return prompt.replace("【英文原文】", `${contextLines}\n\n【英文原文】`);
+  return prompt.replace("【英文原文】", `${contextLines}${specialNotesBlock}\n\n【英文原文】`);
 }
 
 function formatChunkLabel(chunk: MarkdownChunk, plan: MarkdownChunkPlan): string {
