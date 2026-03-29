@@ -1,6 +1,6 @@
 {
   "name": "md-zh-translation-skill",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "CLI skill for translating English Markdown articles into polished Chinese Markdown with a hidden gated pipeline.",
   "type": "module",
   "bin": {
