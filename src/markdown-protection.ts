@@ -210,13 +210,21 @@ export function restoreMarkdownSpans(protectedBody: string, spans: ProtectedSpan
   let output = protectedBody;
 
   for (const span of spans) {
-    const matches = output.match(new RegExp(span.id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "g")) ?? [];
+    const matches = output.match(new RegExp(escapeRegex(span.id), "g")) ?? [];
+    if (matches.length === 1) {
+      output = output.replace(span.id, span.raw);
+      continue;
+    }
+
+    if (matches.length === 0 && canAcceptExpandedProtectedSpan(output, span)) {
+      continue;
+    }
+
     if (matches.length !== 1) {
       throw new HardGateError(
         `Protected span integrity failed for ${span.id}: expected 1 placeholder occurrence, found ${matches.length}.`
       );
     }
-    output = output.replace(span.id, span.raw);
   }
 
   const leftovers = output.match(/@@MDZH_[A-Z_]+_\d{4}@@/g);
@@ -225,4 +233,22 @@ export function restoreMarkdownSpans(protectedBody: string, spans: ProtectedSpan
   }
 
   return output;
+}
+
+function canAcceptExpandedProtectedSpan(output: string, span: ProtectedSpan): boolean {
+  switch (span.kind) {
+    case "link_destination":
+    case "image_destination":
+      return new RegExp(`\\]\\(${escapeRegex(span.raw)}\\)`).test(output);
+    case "autolink":
+      return new RegExp(`<${escapeRegex(span.raw)}>`).test(output);
+    case "html_attribute":
+      return new RegExp(`\\b(?:href|src|poster)=([\"'])${escapeRegex(span.raw)}\\1`, "i").test(output);
+    default:
+      return false;
+  }
+}
+
+function escapeRegex(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }

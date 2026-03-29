@@ -6,6 +6,7 @@ import {
   protectMarkdownSpans,
   restoreMarkdownSpans
 } from "../src/markdown-protection.js";
+import { HardGateError } from "../src/errors.js";
 
 test("extractFrontmatter preserves a valid YAML frontmatter block exactly", () => {
   const source = `---\ntitle: Hello World\ntags:\n  - ai\n---\n\n# Intro\n\nBody\n`;
@@ -92,4 +93,46 @@ test("protectMarkdownSpans does not rewrite inline code while still protecting U
 
   const restored = restoreMarkdownSpans(protectedMarkdown.protectedBody, protectedMarkdown.spans);
   assert.equal(restored, source);
+});
+
+test("restoreMarkdownSpans accepts raw URL-like spans that were expanded back to their original values", () => {
+  const source = [
+    "Read [the docs](https://example.com/docs) and <https://example.com/guide>.",
+    "",
+    '<a href="https://example.com/page">Example</a>',
+    ""
+  ].join("\n");
+
+  const protectedMarkdown = protectMarkdownSpans(source);
+  const expanded = protectedMarkdown.protectedBody
+    .replace("@@MDZH_LINK_DESTINATION_0001@@", "https://example.com/docs")
+    .replace("@@MDZH_AUTOLINK_0002@@", "https://example.com/guide")
+    .replace("@@MDZH_HTML_ATTRIBUTE_0003@@", "https://example.com/page");
+
+  const restored = restoreMarkdownSpans(expanded, protectedMarkdown.spans);
+  assert.equal(restored, source);
+});
+
+test("restoreMarkdownSpans still rejects code blocks that lost their placeholder", () => {
+  const source = [
+    "```ts",
+    "console.log('hello');",
+    "```",
+    ""
+  ].join("\n");
+
+  const protectedMarkdown = protectMarkdownSpans(source);
+  const expanded = protectedMarkdown.protectedBody.replace(
+    "@@MDZH_CODE_BLOCK_0001@@",
+    "```ts\nconsole.log('hello');\n```"
+  );
+
+  assert.throws(
+    () => restoreMarkdownSpans(expanded, protectedMarkdown.spans),
+    (error: unknown) => {
+      assert.ok(error instanceof HardGateError);
+      assert.match(error.message, /Protected span integrity failed/);
+      return true;
+    }
+  );
 });
