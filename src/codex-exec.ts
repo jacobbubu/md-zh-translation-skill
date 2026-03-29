@@ -27,6 +27,7 @@ export type CodexExecOptions = {
   onStderr?: (chunk: string) => void;
   reuseSession?: boolean;
   threadId?: string;
+  reasoningEffort?: "minimal" | "low" | "medium" | "high" | "xhigh";
 };
 
 export interface CodexExecutor {
@@ -172,6 +173,10 @@ function buildExecArgs(options: CodexExecOptions, workingDir: string, outputPath
     outputPath
   ];
 
+  if (options.reasoningEffort) {
+    args.push("-c", `model_reasoning_effort="${options.reasoningEffort}"`);
+  }
+
   if (!options.reuseSession) {
     args.splice(3, 0, "--ephemeral");
   }
@@ -188,7 +193,7 @@ function buildResumeArgs(options: CodexExecOptions, outputPath: string): string[
     throw new CodexExecutionError("Codex resume does not support outputSchema.");
   }
 
-  return [
+  const args = [
     "exec",
     "resume",
     "--skip-git-repo-check",
@@ -199,4 +204,10 @@ function buildResumeArgs(options: CodexExecOptions, outputPath: string): string[
     outputPath,
     options.threadId
   ];
+
+  if (options.reasoningEffort) {
+    args.splice(6, 0, "-c", `model_reasoning_effort="${options.reasoningEffort}"`);
+  }
+
+  return args;
 }

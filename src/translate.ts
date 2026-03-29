@@ -12,6 +12,10 @@ import {
 
 const DEFAULT_MODEL = "gpt-5.4-mini";
 const MAX_REPAIR_CYCLES = 2;
+const DRAFT_REASONING_EFFORT = "medium";
+const AUDIT_REASONING_EFFORT = "medium";
+const REPAIR_REASONING_EFFORT = "low";
+const STYLE_REASONING_EFFORT = "low";
 
 type AuditCheckKey =
   | "paragraph_match"
@@ -333,6 +337,7 @@ async function translateProtectedChunk(
       {
         cwd: context.cwd,
         model: context.model,
+        reasoningEffort: STYLE_REASONING_EFFORT,
         onStderr: (stderrChunk) =>
           reportChunkProgress(context.options, "style", chunkPromptContext.chunkIndex - 1, plan, chunkLabel, stderrChunk)
       }
@@ -388,6 +393,7 @@ async function translateProtectedSegment(
     {
       cwd: context.cwd,
       model: context.model,
+      reasoningEffort: DRAFT_REASONING_EFFORT,
       reuseSession: true,
       onStderr: (stderrChunk) =>
         reportChunkProgress(context.options, "draft", chunkPromptContext.chunkIndex - 1, plan, chunkLabel, stderrChunk)
@@ -416,6 +422,7 @@ async function translateProtectedSegment(
       {
         cwd: context.cwd,
         model: context.model,
+        reasoningEffort: REPAIR_REASONING_EFFORT,
         ...(threadId ? { threadId } : { reuseSession: true }),
         onStderr: (stderrChunk) =>
           reportChunkProgress(context.options, "repair", chunkPromptContext.chunkIndex - 1, plan, chunkLabel, stderrChunk)
@@ -475,6 +482,7 @@ async function runGateAudit(
     const resumedResult = await context.executor.execute(prompt, {
       cwd: context.cwd,
       model: context.model,
+      reasoningEffort: AUDIT_REASONING_EFFORT,
       threadId,
       onStderr: (stderrChunk) =>
         reportChunkProgress(context.options, "audit", chunkPromptContext.chunkIndex - 1, plan, chunkLabel, stderrChunk)
@@ -506,6 +514,7 @@ async function runGateAudit(
   const structuredResult = await context.executor.execute(prompt, {
     cwd: context.cwd,
     model: context.model,
+    reasoningEffort: AUDIT_REASONING_EFFORT,
     outputSchema: GATE_AUDIT_SCHEMA,
     reuseSession: true,
     onStderr: (stderrChunk) =>

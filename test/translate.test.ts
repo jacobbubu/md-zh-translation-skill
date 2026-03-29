@@ -318,9 +318,14 @@ test("translateMarkdownArticle reuses a Codex thread within a segment", async ()
   });
 
   assert.equal(calls[0]?.reuseSession, true);
+  assert.equal(calls[0]?.reasoningEffort, "medium");
   assert.equal(calls[1]?.threadId, "thread-1");
+  assert.equal(calls[1]?.reasoningEffort, "medium");
   assert.equal(calls[2]?.threadId, "thread-1");
+  assert.equal(calls[2]?.reasoningEffort, "low");
   assert.equal(calls[3]?.threadId, "thread-1");
+  assert.equal(calls[3]?.reasoningEffort, "medium");
+  assert.equal(calls[4]?.reasoningEffort, "low");
 });
 
 test("translateMarkdownArticle falls back to a structured fresh audit when resumed audit is not valid JSON", async () => {
@@ -334,9 +339,12 @@ test("translateMarkdownArticle falls back to a structured fresh audit when resum
 
   assert.equal(result.markdown, "# 标题（Title）\n\n正文");
   assert.equal(executor.calls[0]?.reuseSession, true);
+  assert.equal(executor.calls[0]?.reasoningEffort, "medium");
   assert.equal(executor.calls[1]?.threadId, "thread-1");
+  assert.equal(executor.calls[1]?.reasoningEffort, "medium");
   assert.ok(executor.calls[2]?.outputSchema);
   assert.equal(executor.calls[2]?.reuseSession, true);
+  assert.equal(executor.calls[2]?.reasoningEffort, "medium");
 });
 
 test("translateMarkdownArticle passes segment heading hints into prompts for heading-like blocks", async () => {
