@@ -328,6 +328,8 @@ export function reprotectMarkdownSpans(protectedBody: string, spans: ProtectedSp
   let output = protectedBody;
 
   for (const span of spans) {
+    output = canonicalizeWrappedPlaceholder(output, span);
+
     const matches = output.match(new RegExp(escapeRegex(span.id), "g")) ?? [];
     if (matches.length === 1) {
       continue;
@@ -349,6 +351,17 @@ export function reprotectMarkdownSpans(protectedBody: string, spans: ProtectedSp
   }
 
   return output;
+}
+
+function canonicalizeWrappedPlaceholder(output: string, span: ProtectedSpan): string {
+  switch (span.kind) {
+    case "inline_code":
+      return replaceWrappedPlaceholder(output, span.id, ["`"]) ?? output;
+    case "strong_emphasis":
+      return replaceWrappedPlaceholder(output, span.id, ["**", "__"]) ?? output;
+    default:
+      return output;
+  }
 }
 
 function reprotectExpandedProtectedSpan(output: string, span: ProtectedSpan): string | null {
@@ -386,6 +399,17 @@ function replaceFirstLiteral(source: string, search: string, replacement: string
     return null;
   }
   return `${source.slice(0, index)}${replacement}${source.slice(index + search.length)}`;
+}
+
+function replaceWrappedPlaceholder(source: string, placeholder: string, wrappers: string[]): string | null {
+  for (const wrapper of wrappers) {
+    const wrapped = `${wrapper}${placeholder}${wrapper}`;
+    const replaced = replaceFirstLiteral(source, wrapped, placeholder);
+    if (replaced !== null) {
+      return replaced;
+    }
+  }
+  return null;
 }
 
 function escapeRegex(value: string): string {

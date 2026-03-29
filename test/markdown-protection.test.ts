@@ -174,3 +174,21 @@ test("protectSegmentFormattingSpans protects inline code and inline strong empha
   assert.match(protectedMarkdown.protectedBody, /\*\*Expected behavior:\*\*/);
   assert.equal(restoreMarkdownSpans(protectedMarkdown.protectedBody, protectedMarkdown.spans), source);
 });
+
+test("reprotectMarkdownSpans folds wrapped local inline placeholders back into canonical form", () => {
+  const source = [
+    "> Why is this blocked? `~/.bashrc` is sensitive.",
+    "",
+    "Choose **Deny** for this test.",
+    ""
+  ].join("\n");
+
+  const protectedMarkdown = protectSegmentFormattingSpans(source, 7100);
+  const wrapped = protectedMarkdown.protectedBody
+    .replace("@@MDZH_INLINE_CODE_7100@@", "`@@MDZH_INLINE_CODE_7100@@`")
+    .replace("@@MDZH_STRONG_EMPHASIS_7101@@", "**@@MDZH_STRONG_EMPHASIS_7101@@**");
+
+  const reprotected = reprotectMarkdownSpans(wrapped, protectedMarkdown.spans);
+  assert.equal(reprotected, protectedMarkdown.protectedBody);
+  assert.equal(restoreMarkdownSpans(wrapped, protectedMarkdown.spans), source);
+});
