@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import {
   extractFrontmatter,
   protectMarkdownSpans,
+  protectSegmentFormattingSpans,
   reprotectMarkdownSpans,
   restoreMarkdownSpans
 } from "../src/markdown-protection.js";
@@ -154,4 +155,22 @@ test("restoreMarkdownSpans still rejects code blocks that lost their placeholder
       return true;
     }
   );
+});
+
+test("protectSegmentFormattingSpans protects inline code and inline strong emphasis inside prose", () => {
+  const source = [
+    "> Why is this blocked? `~/.bashrc` is sensitive.",
+    "",
+    "Choose **Deny** for this test.",
+    "",
+    "**Expected behavior:**",
+    ""
+  ].join("\n");
+
+  const protectedMarkdown = protectSegmentFormattingSpans(source, 7000);
+
+  assert.match(protectedMarkdown.protectedBody, /@@MDZH_INLINE_CODE_7000@@/);
+  assert.match(protectedMarkdown.protectedBody, /@@MDZH_STRONG_EMPHASIS_7001@@/);
+  assert.match(protectedMarkdown.protectedBody, /\*\*Expected behavior:\*\*/);
+  assert.equal(restoreMarkdownSpans(protectedMarkdown.protectedBody, protectedMarkdown.spans), source);
 });

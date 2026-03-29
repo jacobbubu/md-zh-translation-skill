@@ -344,6 +344,56 @@ test("translateMarkdownArticle canonicalizes expanded URL spans before chunk-lev
   assert.match(result.markdown, /See \[guide\]\(https:\/\/example\.com\/guide\)\.\n$/);
 });
 
+test("translateMarkdownArticle carries local inline markup placeholders into chunk-level style polish", async () => {
+  const source = [
+    "# Title",
+    "",
+    "> Why is this blocked? `~/.bashrc` is sensitive.",
+    "",
+    "Choose **Deny** for this test.",
+    ""
+  ].join("\n");
+
+  class InlineMarkupExecutor implements CodexExecutor {
+    readonly prompts: string[] = [];
+
+    async execute(prompt: string, options: CodexExecOptions): Promise<CodexExecResult> {
+      this.prompts.push(prompt);
+
+      if (options.outputSchema || prompt.includes('"hard_checks"') || prompt.includes("只返回 JSON")) {
+        return createExecResult(JSON.stringify(createAudit(true)));
+      }
+
+      if (prompt.includes("只做“风格与可读性润色”")) {
+        assert.match(prompt, /@@MDZH_INLINE_CODE_\d{4,}@@/);
+        assert.match(prompt, /@@MDZH_STRONG_EMPHASIS_\d{4,}@@/);
+        assert.doesNotMatch(prompt, /`~\/\.bashrc`/);
+        assert.doesNotMatch(prompt, /\*\*Deny\*\*/);
+        return createExecResult(extractPromptSection(prompt, "【当前译文】") ?? "");
+      }
+
+      const protectedSource = extractPromptSection(prompt, "【英文原文】") ?? "";
+      return createExecResult(
+        protectedSource
+          .replace("# Title", "# 标题")
+          .replace("Why is this blocked?", "为什么这会被拦截？")
+          .replace("is sensitive.", "属于敏感文件。")
+          .replace("Choose", "本次测试请选择")
+          .replace("for this test.", "。")
+      );
+    }
+  }
+
+  const executor = new InlineMarkupExecutor();
+  const result = await translateMarkdownArticle(source, {
+    executor,
+    formatter: async (markdown) => markdown
+  });
+
+  assert.match(result.markdown, /> 为什么这会被拦截？ `~\/\.bashrc` 属于敏感文件。/);
+  assert.match(result.markdown, /本次测试请选择 \*\*Deny\*\*\。?/);
+});
+
 test("translateMarkdownArticle keeps standalone code blocks out of translatable segment prompts", async () => {
   const source = [
     "# Title",

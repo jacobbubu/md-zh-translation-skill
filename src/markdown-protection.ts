@@ -11,7 +11,9 @@ export type ProtectedKind =
   | "image_destination"
   | "autolink"
   | "html_attribute"
-  | "html_block";
+  | "html_block"
+  | "inline_code"
+  | "strong_emphasis";
 
 export type ProtectedSpan = {
   id: string;
@@ -74,6 +76,21 @@ export function protectMarkdownSpans(body: string): ProtectedMarkdown {
     next = protectHtmlAttributes(next, register);
     return next;
   });
+
+  return { protectedBody, spans };
+}
+
+export function protectSegmentFormattingSpans(body: string, startIndex = 1): ProtectedMarkdown {
+  const spans: ProtectedSpan[] = [];
+
+  const register = (kind: ProtectedKind, raw: string): string => {
+    const id = createPlaceholder(kind, startIndex + spans.length);
+    spans.push({ id, kind, raw });
+    return id;
+  };
+
+  let protectedBody = protectInlineCodeSegments(body, register);
+  protectedBody = protectInlineStrongEmphasis(protectedBody, register);
 
   return { protectedBody, spans };
 }
@@ -166,6 +183,82 @@ function mapOutsideInlineCode(input: string, transform: (text: string) => string
   return output;
 }
 
+function protectInlineCodeSegments(
+  input: string,
+  register: (kind: ProtectedKind, raw: string) => string
+): string {
+  let output = "";
+  let index = 0;
+
+  while (index < input.length) {
+    if (input[index] !== "`") {
+      output += input[index];
+      index += 1;
+      continue;
+    }
+
+    let tickCount = 1;
+    while (input[index + tickCount] === "`") {
+      tickCount += 1;
+    }
+
+    const fence = "`".repeat(tickCount);
+    const start = index;
+    index += tickCount;
+
+    let closingIndex = -1;
+    while (index < input.length) {
+      if (input.slice(index, index + tickCount) === fence) {
+        closingIndex = index;
+        break;
+      }
+      index += 1;
+    }
+
+    if (closingIndex < 0) {
+      output += input.slice(start, start + tickCount);
+      index = start + tickCount;
+      continue;
+    }
+
+    const raw = input.slice(start, closingIndex + tickCount);
+    output += register("inline_code", raw);
+    index = closingIndex + tickCount;
+  }
+
+  return output;
+}
+
+function protectInlineStrongEmphasis(
+  input: string,
+  register: (kind: ProtectedKind, raw: string) => string
+): string {
+  return input
+    .split(/\r?\n/)
+    .map((line) => protectInlineStrongEmphasisInLine(line, register))
+    .join("\n");
+}
+
+function protectInlineStrongEmphasisInLine(
+  line: string,
+  register: (kind: ProtectedKind, raw: string) => string
+): string {
+  const pattern = /(\*\*[^*\n][^*\n]{0,80}\*\*|__[^_\n][^_\n]{0,80}__)/g;
+  return line.replace(pattern, (raw) => {
+    const trimmedLine = line.trim();
+    if (trimmedLine === raw.trim()) {
+      return raw;
+    }
+
+    const content = raw.slice(2, -2).trim();
+    if (!/[A-Za-z]/.test(content)) {
+      return raw;
+    }
+
+    return register("strong_emphasis", raw);
+  });
+}
+
 function protectLinkDestinations(
   input: string,
   register: (kind: ProtectedKind, raw: string) => string
@@ -223,7 +316,7 @@ export function restoreMarkdownSpans(protectedBody: string, spans: ProtectedSpan
     }
   }
 
-  const leftovers = output.match(/@@MDZH_[A-Z_]+_\d{4}@@/g);
+  const leftovers = output.match(/@@MDZH_[A-Z_]+_\d{4,}@@/g);
   if (leftovers && leftovers.length > 0) {
     throw new HardGateError(`Protected span integrity failed: unreplaced placeholders remained (${leftovers.join(", ")}).`);
   }
@@ -278,6 +371,9 @@ function reprotectExpandedProtectedSpan(output: string, span: ProtectedSpan): st
           }
         }
       }
+      return null;
+    case "inline_code":
+    case "strong_emphasis":
       return null;
     default:
       return null;
