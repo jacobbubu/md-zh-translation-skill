@@ -385,6 +385,61 @@ test("translateMarkdownArticle passes segment heading hints into prompts for hea
   );
 });
 
+test("translateMarkdownArticle includes established terms from prior chunks in later chunk prompts", async () => {
+  const source = [
+    "# Title",
+    "",
+    "## One",
+    "",
+    `${"Claude Code helps with coding. ".repeat(240)}`,
+    "",
+    "## Two",
+    "",
+    "Claude should not be treated as a first mention here.",
+    ""
+  ].join("\n");
+
+  const executor = new PromptAwareExecutor();
+  await translateMarkdownArticle(source, {
+    executor,
+    formatter: async (markdown) => markdown
+  });
+
+  const secondChunkPrompt = executor.prompts.find((prompt) => prompt.includes("当前分块：第 2 /"));
+  assert.ok(secondChunkPrompt);
+  assert.match(secondChunkPrompt, /前文已完成首现锚定的专名\/术语：/);
+  assert.match(secondChunkPrompt, /Claude Code/);
+  assert.match(secondChunkPrompt, /一律视为全文非首现/);
+});
+
+test("translateMarkdownArticle does not carry generic prior headings into established terms", async () => {
+  const source = [
+    "# Title",
+    "",
+    "## Launch Checklist",
+    "",
+    `${"Claude Code helps with coding. ".repeat(240)}`,
+    "",
+    "## Final Notes",
+    "",
+    "Claude Code should keep its earlier bilingual anchor here.",
+    ""
+  ].join("\n");
+
+  const executor = new PromptAwareExecutor();
+  await translateMarkdownArticle(source, {
+    executor,
+    formatter: async (markdown) => markdown
+  });
+
+  const secondChunkPrompt = executor.prompts.find((prompt) => prompt.includes("当前分块：第 2 /"));
+  assert.ok(secondChunkPrompt);
+  const establishedTermsLine = secondChunkPrompt.match(/前文已完成首现锚定的专名\/术语：([^\n]+)/);
+  assert.ok(establishedTermsLine);
+  assert.match(establishedTermsLine[1] ?? "", /Claude Code/);
+  assert.doesNotMatch(establishedTermsLine[1] ?? "", /Launch Checklist/);
+});
+
 test("translateMarkdownArticle fails when the hard-pass translation already broke a protected span", async () => {
   const source = [
     "# Docs",

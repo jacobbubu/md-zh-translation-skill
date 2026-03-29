@@ -197,6 +197,7 @@ export async function translateMarkdownArticle(source: string, options: Translat
   const gateAudits: GateAudit[] = [];
   let repairCyclesUsed = 0;
   let styleApplied = false;
+  let establishedTerms: string[] = [];
 
   for (const chunk of chunkPlan.chunks) {
     const chunkResult = await translateProtectedChunk(chunk, chunkPlan, {
@@ -205,13 +206,18 @@ export async function translateMarkdownArticle(source: string, options: Translat
       model,
       options,
       sourcePathHint,
-      spanIndex
+      spanIndex,
+      establishedTerms
     });
 
     restoredChunks.push(chunkResult.body + chunk.separatorAfter);
     gateAudits.push(chunkResult.gateAudit);
     repairCyclesUsed += chunkResult.repairCyclesUsed;
     styleApplied = styleApplied || chunkResult.styleApplied;
+    establishedTerms = mergeEstablishedTerms(
+      establishedTerms,
+      collectEstablishedTerms(chunk.source, chunkResult.body)
+    );
   }
 
   report(options, "format", "Formatting translated Markdown.");
@@ -264,6 +270,7 @@ type ChunkTranslationContext = {
   sourcePathHint: string;
   options: TranslateOptions;
   spanIndex: ReadonlyMap<string, ProtectedSpan>;
+  establishedTerms: readonly string[];
 };
 
 type ChunkTranslationResult = {
@@ -286,7 +293,7 @@ async function translateProtectedChunk(
   context: ChunkTranslationContext
 ): Promise<ChunkTranslationResult> {
   const chunkLabel = formatChunkLabel(chunk, plan);
-  const chunkPromptContext = buildChunkPromptContext(chunk, plan, context.sourcePathHint);
+  const chunkPromptContext = buildChunkPromptContext(chunk, plan, context.sourcePathHint, context.establishedTerms);
   const segments = splitProtectedChunkSegments(chunk.source, context.spanIndex);
   const rebuiltProtectedSegments: string[] = [];
   const rebuiltRestoredSegments: string[] = [];
@@ -681,12 +688,14 @@ type ChunkPromptContext = {
   chunkCount: number;
   sourcePathHint: string;
   segmentHeadings: string[];
+  establishedTerms: string[];
 };
 
 function buildChunkPromptContext(
   chunk: MarkdownChunk,
   plan: MarkdownChunkPlan,
-  sourcePathHint: string
+  sourcePathHint: string,
+  establishedTerms: readonly string[]
 ): ChunkPromptContext {
   return {
     documentTitle: plan.documentTitle,
@@ -694,7 +703,8 @@ function buildChunkPromptContext(
     chunkIndex: chunk.index + 1,
     chunkCount: plan.chunks.length,
     sourcePathHint,
-    segmentHeadings: []
+    segmentHeadings: [],
+    establishedTerms: [...establishedTerms]
   };
 }
 
@@ -704,6 +714,8 @@ function withChunkContext(prompt: string, context: ChunkPromptContext): string {
   const documentTitle = context.documentTitle ?? "无标题";
   const segmentHeadings =
     context.segmentHeadings.length > 0 ? context.segmentHeadings.join(" | ") : "无显式标题";
+  const establishedTerms =
+    context.establishedTerms.length > 0 ? context.establishedTerms.join(" | ") : "无";
   const contextLines = [
     "【全文上下文】",
     `源文件提示：${context.sourcePathHint}`,
@@ -711,7 +723,11 @@ function withChunkContext(prompt: string, context: ChunkPromptContext): string {
     `当前分块：第 ${context.chunkIndex} / ${context.chunkCount} 块`,
     `当前章节路径：${headingPath}`,
     `当前分段标题：${segmentHeadings}`,
+    `前文已完成首现锚定的专名/术语：${establishedTerms}`,
     "说明：当前输入只覆盖全文的一部分。请保持术语、专名、语气和上下文的一致性，不要补写未出现在当前分块中的段落。",
+    "上面的清单表示：这些专名、产品名、项目名或关键术语已经在全文前文完成首现双语锚定。",
+    "对清单内条目及其明显简称，即使它们在当前分块标题、加粗标题、列表项标题或正文里是本块第一次出现，也一律视为全文非首现；翻译、审校和修复时不要再要求补首次中英文对照。",
+    "只有不在前文清单里、且确实是全文第一次出现的专名、产品名、项目名或关键术语，才需要补首次中英文对照。",
     "如果当前分段标题、加粗标题、列表项标题里包含冒号、括号限定语、枚举标签或英文补充说明，翻译时必须完整保留这些信息，不要只保留其中一部分。"
   ].join("\n");
 
@@ -721,6 +737,166 @@ function withChunkContext(prompt: string, context: ChunkPromptContext): string {
 function formatChunkLabel(chunk: MarkdownChunk, plan: MarkdownChunkPlan): string {
   const label = chunk.headingPath.at(-1) ?? plan.documentTitle;
   return label ? ` (${label})` : "";
+}
+
+const SINGLE_WORD_TERM_STOPWORDS = new Set([
+  "A",
+  "An",
+  "And",
+  "As",
+  "At",
+  "Author",
+  "Because",
+  "But",
+  "By",
+  "Default",
+  "Every",
+  "For",
+  "From",
+  "If",
+  "In",
+  "Into",
+  "It",
+  "Its",
+  "Let",
+  "Member",
+  "Neither",
+  "Network",
+  "New",
+  "Once",
+  "Or",
+  "Safe",
+  "Sandbox",
+  "So",
+  "That",
+  "The",
+  "These",
+  "This",
+  "Those",
+  "To",
+  "When",
+  "Without",
+  "You"
+]);
+
+function collectEstablishedTerms(sourceText: string, translatedText: string): string[] {
+  const counts = new Map<string, number>();
+  const anchorBoosts = new Map<string, number>();
+
+  for (const candidate of extractBilingualAnchorCandidates(translatedText)) {
+    counts.set(candidate, (counts.get(candidate) ?? 0) + 1);
+    anchorBoosts.set(candidate, (anchorBoosts.get(candidate) ?? 0) + 3);
+  }
+
+  for (const text of [sourceText, translatedText]) {
+    for (const candidate of extractTermCandidates(stripHeadingLikeBlocks(text))) {
+      counts.set(candidate, (counts.get(candidate) ?? 0) + 1);
+    }
+  }
+
+  return [...counts.entries()]
+    .filter(([term, count]) => shouldKeepEstablishedTerm(term, count, anchorBoosts.get(term) ?? 0))
+    .sort((left, right) => {
+      const leftScore = left[1] + (anchorBoosts.get(left[0]) ?? 0);
+      const rightScore = right[1] + (anchorBoosts.get(right[0]) ?? 0);
+      const scoreDelta = rightScore - leftScore;
+      if (scoreDelta !== 0) {
+        return scoreDelta;
+      }
+
+      return right[0].length - left[0].length;
+    })
+    .slice(0, 24)
+    .map(([term]) => term);
+}
+
+function extractTermCandidates(text: string): string[] {
+  const candidates: string[] = [];
+  const properNameRegex =
+    /\b(?:[A-Z]{2,}|[A-Z][A-Za-z0-9]+(?:[’'.-][A-Za-z0-9]+)*)(?:[ \t]+(?:[A-Z]{2,}|[A-Z][A-Za-z0-9]+(?:[’'.-][A-Za-z0-9]+)*)){0,4}\b/g;
+
+  for (const match of text.matchAll(properNameRegex)) {
+    const normalized = normalizeEstablishedTerm(match[0] ?? "");
+    if (normalized) {
+      candidates.push(normalized);
+    }
+  }
+
+  return candidates;
+}
+
+function extractBilingualAnchorCandidates(text: string): string[] {
+  const candidates: string[] = [];
+  const bilingualRegex = /[（(]([A-Za-z][A-Za-z0-9&/+'’.,: -]{1,80})[）)]/g;
+
+  for (const match of text.matchAll(bilingualRegex)) {
+    const normalized = normalizeEstablishedTerm(match[1] ?? "");
+    if (normalized) {
+      candidates.push(normalized);
+    }
+  }
+
+  return candidates;
+}
+
+function stripHeadingLikeBlocks(source: string): string {
+  return splitRawBlocks(source)
+    .filter((block) => !isHeadingLikeBlock(block.content))
+    .map((block) => block.content)
+    .join("\n\n");
+}
+
+function normalizeEstablishedTerm(value: string): string {
+  return value
+    .replace(/\s+/g, " ")
+    .replace(/^[\s"'“”‘’.,:;!?()[\]{}<>-]+|[\s"'“”‘’.,:;!?()[\]{}<>-]+$/g, "")
+    .trim();
+}
+
+function shouldKeepEstablishedTerm(term: string, count: number, anchorBoost: number): boolean {
+  if (!term || term.length < 2 || term.length > 80) {
+    return false;
+  }
+
+  if (term.includes("MDZH_") || term.includes("http://") || term.includes("https://") || term.includes("_")) {
+    return false;
+  }
+
+  const words = term.split(/\s+/);
+  if (words.length === 1) {
+    if (SINGLE_WORD_TERM_STOPWORDS.has(term)) {
+      return false;
+    }
+
+    return (
+      count + anchorBoost >= 3 ||
+      /^[A-Z]{2,}$/.test(term) ||
+      /[A-Z].*[a-z]|[a-z].*[A-Z]/.test(term)
+    );
+  }
+
+  return count + anchorBoost >= 3 || hasStrongEstablishedTermSignal(term);
+}
+
+function hasStrongEstablishedTermSignal(term: string): boolean {
+  return (
+    /[A-Z]{2,}/.test(term) ||
+    /[a-z].*[A-Z]|[A-Z].*[a-z]/.test(term) ||
+    /\d/.test(term) ||
+    /[&/+]/.test(term)
+  );
+}
+
+function mergeEstablishedTerms(previous: readonly string[], next: readonly string[]): string[] {
+  const merged = [...previous];
+
+  for (const term of next) {
+    if (!merged.includes(term)) {
+      merged.push(term);
+    }
+  }
+
+  return merged.slice(-24);
 }
 
 function reportChunkProgress(
