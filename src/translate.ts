@@ -1,5 +1,6 @@
 import {
   buildBundledGateAuditPrompt,
+  buildGateAuditPrompt,
   buildInitialPrompt,
   buildRepairPrompt,
   buildStylePolishPrompt
@@ -666,11 +667,82 @@ async function runBundledGateAudit(
       reportChunkProgress(context.options, "audit", chunkPromptContext.chunkIndex - 1, plan, chunkLabel, stderrChunk)
   });
 
-  const bundledAudit = parseBundledGateAudit(auditResult.text, segmentIndices);
+  let bundledAudit: BundledGateAudit;
+  try {
+    bundledAudit = parseBundledGateAudit(auditResult.text, segmentIndices);
+  } catch (error) {
+    if (
+      !(error instanceof HardGateError) ||
+      !error.message.includes("Bundled gate audit segment_index set mismatch")
+    ) {
+      throw error;
+    }
+
+    report(
+      context.options,
+      "audit",
+      `Chunk ${chunkPromptContext.chunkIndex}/${plan.chunks.length}${chunkLabel}: bundled audit returned incomplete segment results; falling back to per-segment audit.`
+    );
+    bundledAudit = await runFallbackSegmentAudits(
+      draftedSegments,
+      plan,
+      context,
+      chunkPromptContext,
+      chunkLabel
+    );
+  }
+
   for (const segmentAudit of bundledAudit.segments) {
     validateStructuralGateChecks(segmentAudit);
   }
   return bundledAudit;
+}
+
+async function runFallbackSegmentAudits(
+  draftedSegments: readonly DraftedSegmentState[],
+  plan: MarkdownChunkPlan,
+  context: ChunkTranslationContext,
+  chunkPromptContext: ChunkPromptContext,
+  chunkLabel: string
+): Promise<BundledGateAudit> {
+  const segments: IndexedGateAudit[] = [];
+
+  for (const draftedSegment of draftedSegments) {
+    const segmentLabel =
+      draftedSegments.length > 1
+        ? `${chunkLabel}, segment ${draftedSegment.segment.index + 1}/${draftedSegments.length}`
+        : chunkLabel;
+    const auditResult = await context.executor.execute(
+      withChunkContext(
+        buildGateAuditPrompt(draftedSegment.protectedSource, draftedSegment.protectedBody),
+        draftedSegment.promptContext
+      ),
+      {
+        cwd: context.cwd,
+        model: context.model,
+        reasoningEffort: AUDIT_REASONING_EFFORT,
+        outputSchema: GATE_AUDIT_SCHEMA,
+        reuseSession: true,
+        onStderr: (stderrChunk) =>
+          reportChunkProgress(
+            context.options,
+            "audit",
+            chunkPromptContext.chunkIndex - 1,
+            plan,
+            segmentLabel,
+            stderrChunk
+          )
+      }
+    );
+
+    const audit = parseGateAudit(auditResult.text);
+    segments.push({
+      segment_index: draftedSegment.segment.index + 1,
+      ...audit
+    });
+  }
+
+  return { segments };
 }
 
 function rebuildChunkFromSegmentStates(

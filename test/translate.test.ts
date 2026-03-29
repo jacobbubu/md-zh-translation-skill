@@ -625,6 +625,73 @@ test("translateMarkdownArticle runs chunk-level audit with structured output", a
   assert.equal(calls[2]?.reasoningEffort, "low");
 });
 
+test("translateMarkdownArticle falls back to per-segment audit when bundled audit omits segment results", async () => {
+  const source = [
+    "# Title",
+    "",
+    "## Need",
+    "",
+    "Filesystem Isolation keeps the agent away from sensitive paths.",
+    "",
+    "```sh",
+    "ls ~/.ssh",
+    "```",
+    "",
+    "Network Isolation constrains outbound access until it is explicitly approved.",
+    "",
+    "```sh",
+    "curl https://example.com",
+    "```",
+    "",
+    "Command Restrictions decide which commands may run automatically and which need review.",
+    ""
+  ].join("\n");
+
+  let bundledAuditSeen = false;
+  let singleAuditCount = 0;
+  const executor: CodexExecutor = {
+    async execute(prompt, options) {
+      if (options.outputSchema && prompt.includes("【分段审校输入】")) {
+        bundledAuditSeen = true;
+        return createExecResult(
+          JSON.stringify({
+            segments: [
+              {
+                segment_index: 1,
+                ...createAudit(true)
+              }
+            ]
+          })
+        );
+      }
+
+      if (options.outputSchema || prompt.includes("只返回 JSON")) {
+        singleAuditCount += 1;
+        return createExecResult(JSON.stringify(createAudit(true)));
+      }
+
+      const currentTranslation = extractPromptSection(prompt, "【当前译文】");
+      if (currentTranslation !== null) {
+        return createExecResult(currentTranslation);
+      }
+
+      const sourceSection = extractPromptSection(prompt, "【英文原文】");
+      return createExecResult(sourceSection ?? "");
+    }
+  };
+
+  const result = await translateMarkdownArticle(source, {
+    executor,
+    formatter: async (markdown) => markdown
+  });
+
+  assert.ok(bundledAuditSeen);
+  assert.ok(singleAuditCount >= 3);
+  assert.match(result.markdown, /Filesystem Isolation/);
+  assert.match(result.markdown, /Network Isolation/);
+  assert.match(result.markdown, /Command Restrictions/);
+});
+
 test("translateMarkdownArticle passes segment heading hints into prompts for heading-like blocks", async () => {
   const source = [
     "# Title",
