@@ -12,6 +12,7 @@ export type ProtectedKind =
   | "autolink"
   | "html_attribute"
   | "html_block"
+  | "inline_markdown_link"
   | "inline_code"
   | "strong_emphasis";
 
@@ -89,7 +90,8 @@ export function protectSegmentFormattingSpans(body: string, startIndex = 1): Pro
     return id;
   };
 
-  let protectedBody = protectInlineCodeSegments(body, register);
+  let protectedBody = mapOutsideInlineCode(body, (text) => protectInlineMarkdownLinks(text, register));
+  protectedBody = protectInlineCodeSegments(protectedBody, register);
   protectedBody = protectInlineStrongEmphasis(protectedBody, register);
 
   return { protectedBody, spans };
@@ -229,6 +231,16 @@ function protectInlineCodeSegments(
   return output;
 }
 
+function protectInlineMarkdownLinks(
+  input: string,
+  register: (kind: ProtectedKind, raw: string) => string
+): string {
+  return input.replace(
+    /!?\[[^\]\n]+\]\(@@MDZH_(?:LINK_DESTINATION|IMAGE_DESTINATION)_\d{4,}@@\)/g,
+    (raw) => register("inline_markdown_link", raw)
+  );
+}
+
 function protectInlineStrongEmphasis(
   input: string,
   register: (kind: ProtectedKind, raw: string) => string
@@ -335,8 +347,12 @@ export function reprotectMarkdownSpans(protectedBody: string, spans: ProtectedSp
       continue;
     }
 
+    if (matches.length === 0 && isNestedInsidePresentPlaceholder(output, span, spans)) {
+      continue;
+    }
+
     if (matches.length === 0) {
-      const reprotected = reprotectExpandedProtectedSpan(output, span);
+      const reprotected = reprotectExpandedProtectedSpan(output, span, spans);
       if (reprotected !== null) {
         output = reprotected;
         continue;
@@ -353,6 +369,12 @@ export function reprotectMarkdownSpans(protectedBody: string, spans: ProtectedSp
   return output;
 }
 
+function isNestedInsidePresentPlaceholder(output: string, span: ProtectedSpan, spans: readonly ProtectedSpan[]): boolean {
+  return spans.some(
+    (other) => other.id !== span.id && output.includes(other.id) && other.raw.includes(span.id)
+  );
+}
+
 function canonicalizeWrappedPlaceholder(output: string, span: ProtectedSpan): string {
   switch (span.kind) {
     case "inline_code":
@@ -364,7 +386,11 @@ function canonicalizeWrappedPlaceholder(output: string, span: ProtectedSpan): st
   }
 }
 
-function reprotectExpandedProtectedSpan(output: string, span: ProtectedSpan): string | null {
+function reprotectExpandedProtectedSpan(
+  output: string,
+  span: ProtectedSpan,
+  spans: readonly ProtectedSpan[]
+): string | null {
   switch (span.kind) {
     case "link_destination":
     case "image_destination":
@@ -385,6 +411,10 @@ function reprotectExpandedProtectedSpan(output: string, span: ProtectedSpan): st
         }
       }
       return null;
+    case "inline_markdown_link": {
+      const expandedRaw = expandNestedPlaceholderRaw(span.raw, spans);
+      return replaceFirstLiteral(output, expandedRaw, span.id);
+    }
     case "inline_code":
     case "strong_emphasis":
       return null;
@@ -410,6 +440,17 @@ function replaceWrappedPlaceholder(source: string, placeholder: string, wrappers
     }
   }
   return null;
+}
+
+function expandNestedPlaceholderRaw(raw: string, spans: readonly ProtectedSpan[]): string {
+  let expanded = raw;
+  for (const nested of spans) {
+    if (!expanded.includes(nested.id)) {
+      continue;
+    }
+    expanded = expanded.replaceAll(nested.id, nested.raw);
+  }
+  return expanded;
 }
 
 function escapeRegex(value: string): string {

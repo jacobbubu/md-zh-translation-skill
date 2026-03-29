@@ -414,7 +414,7 @@ async function translateProtectedSegment(
   let threadId: string | undefined;
   const localFormatting = protectSegmentFormattingSpans(segment.source, localSpanStartIndex);
   const protectedSource = localFormatting.protectedBody;
-  const combinedSpans = [...segment.spans, ...localFormatting.spans];
+  const combinedSpans = [...localFormatting.spans, ...segment.spans];
 
   report(
     context.options,

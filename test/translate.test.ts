@@ -235,11 +235,25 @@ test("translateMarkdownArticle falls back to the hard-pass translation when styl
     ""
   ].join("\n");
 
-  const { protectedBody } = protectMarkdownSpans(source);
   const passingAudit = JSON.stringify(createAudit(true));
-  const brokenStyle = protectedBody.replace("@@MDZH_LINK_DESTINATION_0001@@", "");
-  const executor = new StubExecutor([protectedBody, passingAudit, brokenStyle]);
   const progress: string[] = [];
+
+  class BrokenStyleExecutor implements CodexExecutor {
+    async execute(prompt: string, options: CodexExecOptions): Promise<CodexExecResult> {
+      if (options.outputSchema || prompt.includes('"hard_checks"') || prompt.includes("只返回 JSON")) {
+        return createExecResult(passingAudit);
+      }
+
+      const current = extractPromptSection(prompt, "【当前译文】") ?? extractPromptSection(prompt, "【英文原文】") ?? "";
+      if (prompt.includes("只做“风格与可读性润色”")) {
+        return createExecResult(current.replace(/@@MDZH_INLINE_MARKDOWN_LINK_\d{4,}@@/g, ""));
+      }
+
+      return createExecResult(current);
+    }
+  }
+
+  const executor = new BrokenStyleExecutor();
 
   const result = await translateMarkdownArticle(source, {
     executor,
@@ -314,8 +328,7 @@ test("translateMarkdownArticle canonicalizes expanded URL spans before chunk-lev
 
       if (prompt.includes("只做“风格与可读性润色”")) {
         assert.match(prompt, /@@MDZH_CODE_BLOCK_0001@@/);
-        assert.match(prompt, /@@MDZH_LINK_DESTINATION_0002@@/);
-        assert.match(prompt, /@@MDZH_LINK_DESTINATION_0003@@/);
+        assert.match(prompt, /@@MDZH_INLINE_MARKDOWN_LINK_\d{4,}@@/);
         assert.doesNotMatch(prompt, /\]\(https:\/\/example\.com\/docs\)/);
         assert.doesNotMatch(prompt, /\]\(https:\/\/example\.com\/guide\)/);
         return createExecResult(extractPromptSection(prompt, "【当前译文】") ?? "");
@@ -392,6 +405,50 @@ test("translateMarkdownArticle carries local inline markup placeholders into chu
 
   assert.match(result.markdown, /> 为什么这会被拦截？ `~\/\.bashrc` 属于敏感文件。/);
   assert.match(result.markdown, /本次测试请选择 \*\*Deny\*\*\。?/);
+});
+
+test("translateMarkdownArticle carries local inline markdown link placeholders into chunk-level style polish", async () => {
+  const source = [
+    "# Title",
+    "",
+    "This is enforced by Linux [bubblewrap ](https://example.com/bubblewrap) or [macOS](https://example.com/macos).",
+    ""
+  ].join("\n");
+
+  class InlineLinkExecutor implements CodexExecutor {
+    readonly prompts: string[] = [];
+
+    async execute(prompt: string, options: CodexExecOptions): Promise<CodexExecResult> {
+      this.prompts.push(prompt);
+
+      if (options.outputSchema || prompt.includes('"hard_checks"') || prompt.includes("只返回 JSON")) {
+        return createExecResult(JSON.stringify(createAudit(true)));
+      }
+
+      if (prompt.includes("只做“风格与可读性润色”")) {
+        assert.match(prompt, /@@MDZH_INLINE_MARKDOWN_LINK_\d{4,}@@/);
+        assert.doesNotMatch(prompt, /\[bubblewrap \]\(@@MDZH_LINK_DESTINATION_0067@@\)/);
+        assert.doesNotMatch(prompt, /\[macOS\]\(@@MDZH_LINK_DESTINATION_0068@@\)/);
+        return createExecResult(extractPromptSection(prompt, "【当前译文】") ?? "");
+      }
+
+      const protectedSource = extractPromptSection(prompt, "【英文原文】") ?? "";
+      return createExecResult(
+        protectedSource
+          .replace("# Title", "# 标题")
+          .replace("This is enforced by Linux", "这由 Linux 强制执行")
+      );
+    }
+  }
+
+  const executor = new InlineLinkExecutor();
+  const result = await translateMarkdownArticle(source, {
+    executor,
+    formatter: async (markdown) => markdown
+  });
+
+  assert.match(result.markdown, /\[bubblewrap \]\(https:\/\/example\.com\/bubblewrap\)/);
+  assert.match(result.markdown, /\[macOS\]\(https:\/\/example\.com\/macos\)/);
 });
 
 test("translateMarkdownArticle keeps standalone code blocks out of translatable segment prompts", async () => {

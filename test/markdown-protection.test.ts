@@ -175,6 +175,28 @@ test("protectSegmentFormattingSpans protects inline code and inline strong empha
   assert.equal(restoreMarkdownSpans(protectedMarkdown.protectedBody, protectedMarkdown.spans), source);
 });
 
+test("protectSegmentFormattingSpans protects inline markdown links around protected destinations", () => {
+  const source = [
+    "This is enforced by Linux [bubblewrap ](@@MDZH_LINK_DESTINATION_0067@@) or [macOS](@@MDZH_LINK_DESTINATION_0068@@).",
+    ""
+  ].join("\n");
+
+  const protectedMarkdown = protectSegmentFormattingSpans(source, 7200);
+  const nestedDestinationSpans = [
+    { id: "@@MDZH_LINK_DESTINATION_0067@@", kind: "link_destination" as const, raw: "https://example.com/bubblewrap" },
+    { id: "@@MDZH_LINK_DESTINATION_0068@@", kind: "link_destination" as const, raw: "https://example.com/macos" }
+  ];
+  const combinedSpans = [...protectedMarkdown.spans, ...nestedDestinationSpans];
+
+  assert.match(protectedMarkdown.protectedBody, /@@MDZH_INLINE_MARKDOWN_LINK_7200@@/);
+  assert.match(protectedMarkdown.protectedBody, /@@MDZH_INLINE_MARKDOWN_LINK_7201@@/);
+  assert.doesNotMatch(protectedMarkdown.protectedBody, /\[bubblewrap \]\(@@MDZH_LINK_DESTINATION_0067@@\)/);
+  assert.equal(
+    restoreMarkdownSpans(protectedMarkdown.protectedBody, combinedSpans),
+    "This is enforced by Linux [bubblewrap ](https://example.com/bubblewrap) or [macOS](https://example.com/macos).\n"
+  );
+});
+
 test("reprotectMarkdownSpans folds wrapped local inline placeholders back into canonical form", () => {
   const source = [
     "> Why is this blocked? `~/.bashrc` is sensitive.",
