@@ -106,6 +106,24 @@ test("runCli writes progress and output file paths to stderr", async () => {
   assert.equal((io as any).stdout, "");
 });
 
+test("runCli reports output write failures with the target path", async () => {
+  const io = createIo({
+    readFile: async () => "file input",
+    writeFile: async () => {
+      throw new Error("EACCES: permission denied");
+    }
+  });
+
+  const exitCode = await runCli(
+    ["--input", "input.md", "--output", "nested/output.md"],
+    io,
+    createDependencies()
+  );
+
+  assert.equal(exitCode, 3);
+  assert.match((io as any).stderr, /Failed to write output file nested\/output\.md: EACCES/);
+});
+
 test("runCli installs a Codex skill target", async () => {
   const tmp = await mkdtemp(path.join(os.tmpdir(), "md-zh-install-cli-"));
 

@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 
 import { realpathSync } from "node:fs";
-import { readFile, writeFile } from "node:fs/promises";
+import path from "node:path";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
 
@@ -164,7 +165,10 @@ function createDefaultIo(): CliIo {
   return {
     isStdinTTY: Boolean(process.stdin.isTTY),
     readFile: (filePath) => readFile(filePath, "utf8"),
-    writeFile: (filePath, content) => writeFile(filePath, content, "utf8"),
+    writeFile: async (filePath, content) => {
+      await mkdir(path.dirname(filePath), { recursive: true });
+      await writeFile(filePath, content, "utf8");
+    },
     readStdin: readProcessStdin,
     writeStdout: (content) => {
       process.stdout.write(content);
@@ -251,7 +255,12 @@ export async function runCli(
     });
 
     if (args.outputPath) {
-      await io.writeFile(args.outputPath, `${result.markdown.trimEnd()}\n`);
+      try {
+        await io.writeFile(args.outputPath, `${result.markdown.trimEnd()}\n`);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        throw new CliError(`Failed to write output file ${args.outputPath}: ${message}`, 3);
+      }
       io.writeStderr(`[md-zh-translate] Wrote translated Markdown to ${args.outputPath}\n`);
       return 0;
     }
