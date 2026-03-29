@@ -491,6 +491,30 @@ test("translateMarkdownArticle adds attribution guidance for caption-like segmen
   assert.match(prompt, /不要为了满足首现双语而强行创造中文主译/);
 });
 
+test("translateMarkdownArticle adds tool-name guidance for glossary-like list items", async () => {
+  const source = [
+    "# Title",
+    "",
+    "## Tools",
+    "",
+    "- kubectl - Kubernetes cluster access",
+    "- docker - Container runtime access",
+    ""
+  ].join("\n");
+
+  const executor = new PromptAwareExecutor();
+  await translateMarkdownArticle(source, {
+    executor,
+    formatter: async (markdown) => markdown
+  });
+
+  const prompt = executor.prompts.find((item) => item.includes("kubectl - Kubernetes cluster access"));
+  assert.ok(prompt);
+  assert.match(prompt, /【当前分段附加规则】/);
+  assert.match(prompt, /工具名、命令名、包名、CLI 名称或产品名的列表项说明/);
+  assert.match(prompt, /允许保留英文原名，并在后面直接接中文解释/);
+});
+
 test("translateMarkdownArticle includes established terms from prior chunks in later chunk prompts", async () => {
   const source = [
     "# Title",

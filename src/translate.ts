@@ -747,6 +747,13 @@ function extractSegmentSpecialNotes(source: string): string[] {
     );
   }
 
+  if (containsToolNameExplanationBlock(source)) {
+    notes.push(
+      "当前分段包含工具名、命令名、包名、CLI 名称或产品名的列表项说明。对这类以英文原名作为标签的说明条目，允许保留英文原名，并在后面直接接中文解释；不要为了满足首现双语而强行改写成“中文（英文）”主译格式。",
+      "对于 `kubectl - Kubernetes cluster access`、`docker - ...`、`npm install -g ...` 这类工具/命令/产品说明，只要英文原名保留且中文解释清楚，就可视为合格的首现锚定；不要把“英文名（中文解释）”误判为必须修复。"
+    );
+  }
+
   return notes;
 }
 
@@ -768,6 +775,28 @@ function isAttributionLikeBlock(content: string): boolean {
   return /(?:\bfeatured image\b|\billustration\b|\bcredit\b|\bcourtesy\b|\/\s*by\b|\bby\b|来源|供图|出品|署名|配图|图注|插图|照片|制图)/i.test(
     normalized
   );
+}
+
+function containsToolNameExplanationBlock(source: string): boolean {
+  return splitRawBlocks(source).some((block) => isToolNameExplanationBlock(block.content));
+}
+
+function isToolNameExplanationBlock(content: string): boolean {
+  return content.split(/\r?\n/).some((line) => isToolNameExplanationLine(line));
+}
+
+function isToolNameExplanationLine(line: string): boolean {
+  const trimmed = line.trim();
+  if (!trimmed.startsWith("- ")) {
+    return false;
+  }
+
+  const body = trimmed.slice(2).trim();
+  if (!/[A-Za-z]/.test(body)) {
+    return false;
+  }
+
+  return /^(?:`[^`]+`|[@A-Za-z0-9._/+:-]+)\s*(?:-|—|:)\s+.+$/.test(body);
 }
 
 type ChunkPromptContext = {
