@@ -211,10 +211,7 @@ test("translateMarkdownArticle preserves frontmatter and protected Markdown span
     ""
   ].join("\n");
 
-  const { body } = extractFrontmatter(source);
-  const { protectedBody } = protectMarkdownSpans(body);
-  const passingAudit = JSON.stringify(createAudit(true));
-  const executor = new StubExecutor([protectedBody, passingAudit, protectedBody]);
+  const executor = new PromptAwareExecutor();
 
   const result = await translateMarkdownArticle(source, {
     executor,
@@ -288,6 +285,33 @@ test("translateMarkdownArticle runs the hidden pipeline chunk by chunk for long 
   assert.equal(result.markdown, source);
   assert.ok(executor.prompts.length >= chunkPlan.chunks.length * 3);
   assert.ok(executor.prompts[0]?.includes("当前分块：第 1 /"));
+});
+
+test("translateMarkdownArticle keeps standalone code blocks out of translatable segment prompts", async () => {
+  const source = [
+    "# Title",
+    "",
+    "Intro before the command.",
+    "",
+    "```bash",
+    "/sandbox",
+    "```",
+    "",
+    "After the command.",
+    ""
+  ].join("\n");
+
+  const executor = new PromptAwareExecutor();
+  const result = await translateMarkdownArticle(source, {
+    executor,
+    formatter: async (markdown) => markdown
+  });
+
+  assert.equal(result.markdown, source);
+  const nonStylePrompts = executor.prompts.filter(
+    (prompt) => !prompt.includes("只做“风格与可读性润色”")
+  );
+  assert.equal(nonStylePrompts.some((prompt) => prompt.includes("@@MDZH_CODE_BLOCK_")), false);
 });
 
 test("translateMarkdownArticle reuses a Codex thread within a segment", async () => {

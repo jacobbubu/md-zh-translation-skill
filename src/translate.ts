@@ -541,7 +541,7 @@ function splitProtectedChunkSegments(
   source: string,
   spanIndex: ReadonlyMap<string, ProtectedSpan>
 ): ProtectedChunkSegment[] {
-  const blocks = splitRawBlocks(source);
+  const blocks = splitRawBlocks(source).flatMap((block) => splitRawBlockOnProtectedBoundaries(block, spanIndex));
   const segments: ProtectedChunkSegment[] = [];
   let pending: Array<{ content: string; separator: string }> = [];
 
@@ -567,6 +567,16 @@ function splitProtectedChunkSegments(
   };
 
   for (const block of blocks) {
+    const blockSpans = collectChunkSpans(block.content, spanIndex);
+    const blockIsProtectedOnly = isProtectedOnlySegment(block.content, blockSpans);
+
+    if (blockIsProtectedOnly) {
+      flushPending();
+      pending.push(block);
+      flushPending();
+      continue;
+    }
+
     if (
       isHeadingLikeBlock(block.content) &&
       pending.length > 0 &&
@@ -580,6 +590,48 @@ function splitProtectedChunkSegments(
   flushPending();
 
   return segments;
+}
+
+function splitRawBlockOnProtectedBoundaries(
+  block: { content: string; separator: string },
+  spanIndex: ReadonlyMap<string, ProtectedSpan>
+): Array<{ content: string; separator: string }> {
+  const lines = block.content.split(/(?<=\n)/);
+  const pieces: string[] = [];
+  let current = "";
+
+  const flushCurrent = () => {
+    if (current.length > 0) {
+      pieces.push(current);
+      current = "";
+    }
+  };
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    const span = trimmed ? spanIndex.get(trimmed) : undefined;
+    const isStandaloneProtectedLine =
+      !!span && (span.kind === "code_block" || span.kind === "html_block") && trimmed === line.trim();
+
+    if (isStandaloneProtectedLine) {
+      flushCurrent();
+      pieces.push(line);
+      continue;
+    }
+
+    current += line;
+  }
+
+  flushCurrent();
+
+  if (pieces.length <= 1) {
+    return [block];
+  }
+
+  return pieces.map((content, index) => ({
+    content,
+    separator: index === pieces.length - 1 ? block.separator : ""
+  }));
 }
 
 function isProtectedOnlySegment(source: string, spans: readonly ProtectedSpan[]): boolean {
