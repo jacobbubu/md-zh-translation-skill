@@ -709,6 +709,31 @@ test("translateMarkdownArticle does not carry generic prior headings into establ
   assert.doesNotMatch(establishedTermsLine[1] ?? "", /Launch Checklist/);
 });
 
+test("translateMarkdownArticle adds structure guidance for translatable emphasis and command flags", async () => {
+  const source = [
+    "# Title",
+    "",
+    "Claude Code **now has a sandbox mode** that changes the workflow.",
+    "",
+    "> If you use the --dangerously-skip-permissions flag, you remove safety guardrails.",
+    ""
+  ].join("\n");
+
+  const executor = new PromptAwareExecutor();
+  await translateMarkdownArticle(source, {
+    executor,
+    formatter: async (markdown) => markdown
+  });
+
+  const prompt = executor.prompts.find(
+    (item) => item.includes("**now has a sandbox mode**") || item.includes("--dangerously-skip-permissions")
+  );
+  assert.ok(prompt);
+  assert.match(prompt, /【当前分段附加规则】/);
+  assert.match(prompt, /当前分段包含可翻译的 Markdown 强调结构或命令\/flag 写法/);
+  assert.match(prompt, /--dangerously-skip-permissions/);
+});
+
 test("translateMarkdownArticle fails when the hard-pass translation already broke a protected span", async () => {
   const source = [
     "# Docs",

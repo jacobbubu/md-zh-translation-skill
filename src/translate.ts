@@ -781,6 +781,13 @@ function extractSegmentSpecialNotes(source: string): string[] {
     );
   }
 
+  if (containsTranslatableMarkdownStructure(source)) {
+    notes.push(
+      "当前分段包含可翻译的 Markdown 强调结构或命令/flag 写法。翻译时必须保留等价结构：原文中的 **加粗**、*斜体* 等强调，不得无故去掉；像 --dangerously-skip-permissions 这类命令参数或 flag，应保留原始写法，不要改成代码块、标题、列表标签或其他 Markdown 结构。",
+      "如果强调结构里的正文需要翻译，请翻译内容本身，但保留强调标记；如果命令、flag、配置键名或 CLI 参数本身是英文原名，请保留原名，只翻译周围解释。"
+    );
+  }
+
   return notes;
 }
 
@@ -824,6 +831,18 @@ function isToolNameExplanationLine(line: string): boolean {
   }
 
   return /^(?:`[^`]+`|[@A-Za-z0-9._/+:-]+)\s*(?:-|—|:)\s+.+$/.test(body);
+}
+
+function containsTranslatableMarkdownStructure(source: string): boolean {
+  return splitRawBlocks(source).some((block) => isTranslatableMarkdownStructureBlock(block.content));
+}
+
+function isTranslatableMarkdownStructureBlock(content: string): boolean {
+  if (content.trim().length === 0) {
+    return false;
+  }
+
+  return /(\*\*[^*\n]+?\*\*|__[^_\n]+?__|\*[^*\n]+?\*|_[^_\n]+?_)/.test(content) || /\B--[A-Za-z0-9][A-Za-z0-9-]*/.test(content);
 }
 
 type ChunkPromptContext = {

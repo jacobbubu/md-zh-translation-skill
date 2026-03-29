@@ -4,6 +4,7 @@ Markdown 结构要求：
 2. 不要改写 fenced code blocks、indented code blocks、inline code、URL、链接目标、图片 URL 和原始 HTML 标签。
 3. 链接或图片的可见文字如果是正文，可以翻译；目标地址必须保持不变。
 4. 不要把代码块、命令行片段或配置键值误译成中文。
+5. 如果原文正文使用了可翻译的 Markdown 强调结构（如 **加粗**、*斜体*）或命令/flag 写法（如 --flag），译文应保持等价结构；不要丢掉强调，也不要把普通命令/flag 误改成代码块、标题或其他 Markdown 结构。
 `.trim();
 
 export const INITIAL_TRANSLATION_PROMPT = `
