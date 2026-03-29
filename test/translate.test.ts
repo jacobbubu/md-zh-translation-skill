@@ -22,6 +22,35 @@ function createAudit(pass: boolean, mustFix: string[] = [], overrides: Partial<G
   };
 }
 
+function extractAuditSegmentIndices(prompt: string): number[] {
+  return [...prompt.matchAll(/【segment (\d+)】/g)].map((match) => Number(match[1]));
+}
+
+function wrapAuditForSegments(prompt: string, audit: GateAudit): string {
+  const segmentIndices = extractAuditSegmentIndices(prompt);
+  if (segmentIndices.length === 0) {
+    return JSON.stringify(audit);
+  }
+
+  return JSON.stringify({
+    segments: segmentIndices.map((segmentIndex) => ({
+      segment_index: segmentIndex,
+      ...audit
+    }))
+  });
+}
+
+function wrapPerSegmentAudits(prompt: string, audits: Array<{ segment_index: number; audit: GateAudit }>): string {
+  const segmentIndices = extractAuditSegmentIndices(prompt);
+  const auditMap = new Map(audits.map((entry) => [entry.segment_index, entry.audit]));
+  return JSON.stringify({
+    segments: segmentIndices.map((segmentIndex) => ({
+      segment_index: segmentIndex,
+      ...(auditMap.get(segmentIndex) ?? createAudit(true))
+    }))
+  });
+}
+
 class StubExecutor implements CodexExecutor {
   readonly prompts: string[] = [];
   readonly responses: Array<CodexExecResult>;
@@ -44,19 +73,31 @@ class StubExecutor implements CodexExecutor {
     this.prompts.push(prompt);
     const next = this.responses.shift();
     assert.ok(next, "Unexpected extra Codex call");
+    if (prompt.includes("【segment ")) {
+      try {
+        const parsed = JSON.parse(next.text) as Record<string, unknown>;
+        if (parsed.hard_checks && parsed.must_fix && !parsed.segments) {
+          return {
+            ...next,
+            text: wrapAuditForSegments(prompt, parsed as GateAudit)
+          };
+        }
+      } catch {
+        // Ignore non-JSON responses.
+      }
+    }
     return next;
   }
 }
 
 class PromptAwareExecutor implements CodexExecutor {
   readonly prompts: string[] = [];
-  private readonly passingAudit = JSON.stringify(createAudit(true));
 
   async execute(prompt: string, options: CodexExecOptions): Promise<CodexExecResult> {
     this.prompts.push(prompt);
 
     if (options.outputSchema || prompt.includes('"hard_checks"') || prompt.includes("只返回 JSON")) {
-      return createExecResult(this.passingAudit);
+      return createExecResult(wrapAuditForSegments(prompt, createAudit(true)));
     }
 
     const currentTranslation = extractPromptSection(prompt, "【当前译文】");
@@ -91,15 +132,11 @@ class SessionReuseExecutor implements CodexExecutor {
     this.calls.push(options);
 
     if (options.outputSchema) {
-      return createExecResult(JSON.stringify(createAudit(true)), "thread-1");
+      return createExecResult(wrapAuditForSegments(prompt, createAudit(true)), "thread-1");
     }
 
     if (prompt.includes("只返回 JSON")) {
-      if (options.threadId === "thread-1") {
-        return createExecResult("not-json", "thread-1");
-      }
-
-      return createExecResult(JSON.stringify(createAudit(true)), "thread-1");
+      return createExecResult(wrapAuditForSegments(prompt, createAudit(true)), "thread-1");
     }
 
     if (prompt.includes("【must_fix】")) {
@@ -235,13 +272,13 @@ test("translateMarkdownArticle falls back to the hard-pass translation when styl
     ""
   ].join("\n");
 
-  const passingAudit = JSON.stringify(createAudit(true));
+  const passingAudit = createAudit(true);
   const progress: string[] = [];
 
   class BrokenStyleExecutor implements CodexExecutor {
     async execute(prompt: string, options: CodexExecOptions): Promise<CodexExecResult> {
       if (options.outputSchema || prompt.includes('"hard_checks"') || prompt.includes("只返回 JSON")) {
-        return createExecResult(passingAudit);
+        return createExecResult(wrapAuditForSegments(prompt, passingAudit));
       }
 
       const current = extractPromptSection(prompt, "【当前译文】") ?? extractPromptSection(prompt, "【英文原文】") ?? "";
@@ -323,7 +360,7 @@ test("translateMarkdownArticle canonicalizes expanded URL spans before chunk-lev
       this.prompts.push(prompt);
 
       if (options.outputSchema || prompt.includes('"hard_checks"') || prompt.includes("只返回 JSON")) {
-        return createExecResult(JSON.stringify(createAudit(true)));
+        return createExecResult(wrapAuditForSegments(prompt, createAudit(true)));
       }
 
       if (prompt.includes("只做“风格与可读性润色”")) {
@@ -374,7 +411,7 @@ test("translateMarkdownArticle carries local inline markup placeholders into chu
       this.prompts.push(prompt);
 
       if (options.outputSchema || prompt.includes('"hard_checks"') || prompt.includes("只返回 JSON")) {
-        return createExecResult(JSON.stringify(createAudit(true)));
+        return createExecResult(wrapAuditForSegments(prompt, createAudit(true)));
       }
 
       if (prompt.includes("只做“风格与可读性润色”")) {
@@ -422,7 +459,7 @@ test("translateMarkdownArticle carries local inline markdown link placeholders i
       this.prompts.push(prompt);
 
       if (options.outputSchema || prompt.includes('"hard_checks"') || prompt.includes("只返回 JSON")) {
-        return createExecResult(JSON.stringify(createAudit(true)));
+        return createExecResult(wrapAuditForSegments(prompt, createAudit(true)));
       }
 
       if (prompt.includes("只做“风格与可读性润色”")) {
@@ -480,14 +517,20 @@ test("translateMarkdownArticle keeps standalone code blocks out of translatable 
 
 test("translateMarkdownArticle reuses a Codex thread within a segment", async () => {
   const source = "# Title\n\nBody";
-  const firstAudit = JSON.stringify(createAudit(false, ["标题首现术语缺少中英对照"]));
-  const secondAudit = JSON.stringify(createAudit(true));
   const calls: CodexExecOptions[] = [];
   const responses = [
     createExecResult("# 标题\n\n正文", "thread-1"),
-    createExecResult(firstAudit, "thread-1"),
+    createExecResult(
+      wrapPerSegmentAudits("【segment 1】", [
+        { segment_index: 1, audit: createAudit(false, ["标题首现术语缺少中英对照"]) }
+      ])
+    ),
     createExecResult("# 标题（Title）\n\n正文", "thread-1"),
-    createExecResult(secondAudit, "thread-1"),
+    createExecResult(
+      wrapPerSegmentAudits("【segment 1】", [
+        { segment_index: 1, audit: createAudit(true) }
+      ])
+    ),
     createExecResult("# 标题（Title）\n\n正文")
   ];
 
@@ -507,32 +550,47 @@ test("translateMarkdownArticle reuses a Codex thread within a segment", async ()
 
   assert.equal(calls[0]?.reuseSession, true);
   assert.equal(calls[0]?.reasoningEffort, "medium");
-  assert.equal(calls[1]?.threadId, "thread-1");
+  assert.ok(calls[1]?.outputSchema);
+  assert.equal(calls[1]?.reuseSession, true);
   assert.equal(calls[1]?.reasoningEffort, "medium");
   assert.equal(calls[2]?.threadId, "thread-1");
   assert.equal(calls[2]?.reasoningEffort, "low");
-  assert.equal(calls[3]?.threadId, "thread-1");
+  assert.ok(calls[3]?.outputSchema);
+  assert.equal(calls[3]?.reuseSession, true);
   assert.equal(calls[3]?.reasoningEffort, "medium");
   assert.equal(calls[4]?.reasoningEffort, "low");
 });
 
-test("translateMarkdownArticle falls back to a structured fresh audit when resumed audit is not valid JSON", async () => {
+test("translateMarkdownArticle runs chunk-level audit with structured output", async () => {
   const source = "# Title\n\nBody";
-  const executor = new SessionReuseExecutor();
+  const calls: CodexExecOptions[] = [];
+  const executor: CodexExecutor = {
+    async execute(prompt, options) {
+      calls.push(options);
+      if (options.outputSchema || prompt.includes("只返回 JSON")) {
+        return createExecResult(wrapAuditForSegments(prompt, createAudit(true)), "audit-thread");
+      }
+
+      if (prompt.includes("只做“风格与可读性润色”")) {
+        return createExecResult("# 标题\n\n正文");
+      }
+
+      return createExecResult("# 标题\n\n正文", "draft-thread");
+    }
+  };
 
   const result = await translateMarkdownArticle(source, {
     executor,
     formatter: async (markdown) => markdown
   });
 
-  assert.equal(result.markdown, "# 标题（Title）\n\n正文");
-  assert.equal(executor.calls[0]?.reuseSession, true);
-  assert.equal(executor.calls[0]?.reasoningEffort, "medium");
-  assert.equal(executor.calls[1]?.threadId, "thread-1");
-  assert.equal(executor.calls[1]?.reasoningEffort, "medium");
-  assert.ok(executor.calls[2]?.outputSchema);
-  assert.equal(executor.calls[2]?.reuseSession, true);
-  assert.equal(executor.calls[2]?.reasoningEffort, "medium");
+  assert.equal(result.markdown, "# 标题\n\n正文");
+  assert.equal(calls[0]?.reuseSession, true);
+  assert.equal(calls[0]?.reasoningEffort, "medium");
+  assert.ok(calls[1]?.outputSchema);
+  assert.equal(calls[1]?.reuseSession, true);
+  assert.equal(calls[1]?.reasoningEffort, "medium");
+  assert.equal(calls[2]?.reasoningEffort, "low");
 });
 
 test("translateMarkdownArticle passes segment heading hints into prompts for heading-like blocks", async () => {
