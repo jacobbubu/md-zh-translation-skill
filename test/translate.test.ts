@@ -799,6 +799,29 @@ test("translateMarkdownArticle passes segment heading hints into prompts for hea
   );
 });
 
+test("translateMarkdownArticle adds heading-specific bilingual guidance for heading segments", async () => {
+  const source = [
+    "# Title",
+    "",
+    "## How Sandbox Mode Changes Autonomous Coding",
+    "",
+    "Body paragraph.",
+    ""
+  ].join("\n");
+
+  const executor = new PromptAwareExecutor();
+  await translateMarkdownArticle(source, {
+    executor,
+    formatter: async (markdown) => markdown
+  });
+
+  const prompt = executor.prompts.find((item) => item.includes("How Sandbox Mode Changes Autonomous Coding"));
+  assert.ok(prompt);
+  assert.match(prompt, /【当前分段附加规则】/);
+  assert.match(prompt, /当前分段包含标题或加粗标题/);
+  assert.match(prompt, /必须直接在标题本身补齐中英文对照/);
+});
+
 test("translateMarkdownArticle adds attribution guidance for caption-like segments", async () => {
   const source = [
     "# Title",

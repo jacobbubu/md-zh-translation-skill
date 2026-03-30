@@ -1024,6 +1024,13 @@ function extractSegmentHeadingHints(source: string): string[] {
 function extractSegmentSpecialNotes(source: string): string[] {
   const notes: string[] = [];
 
+  if (containsHeadingLikeBlock(source)) {
+    notes.push(
+      "当前分段包含标题或加粗标题。若标题中的关键术语、产品名、项目名或专业概念是全文首次出现，必须直接在标题本身补齐中英文对照；不要把这类修复转移到正文其他句子里。",
+      "修复标题首现双语时，只补局部术语或专名本身，不要把整条标题原句附上英文，也不要只润色中文标题却遗漏必须补齐的英文锚点。"
+    );
+  }
+
   if (containsAttributionLikeBlock(source)) {
     notes.push(
       "当前分段包含图注、署名、来源、配图说明或出品归属类文本。对这类归属说明里的公司名、机构名、品牌名、作者名或媒体名，如果原文本身以英文原名、署名格式或 credit/byline 形式呈现，不要为了满足首现双语而强行创造中文主译。",
@@ -1050,6 +1057,10 @@ function extractSegmentSpecialNotes(source: string): string[] {
 
 function containsAttributionLikeBlock(source: string): boolean {
   return splitRawBlocks(source).some((block) => isAttributionLikeBlock(block.content));
+}
+
+function containsHeadingLikeBlock(source: string): boolean {
+  return splitRawBlocks(source).some((block) => isHeadingLikeBlock(block.content));
 }
 
 function isAttributionLikeBlock(content: string): boolean {
