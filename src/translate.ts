@@ -599,6 +599,7 @@ async function repairDraftedSegment(
   context: ChunkTranslationContext,
   chunkLabel: string
 ): Promise<void> {
+  const repairPromptContext = buildRepairPromptContext(draftedSegment.promptContext, mustFix);
   report(
     context.options,
     "repair",
@@ -607,7 +608,7 @@ async function repairDraftedSegment(
   const repairResult = await context.executor.execute(
     withChunkContext(
       buildRepairPrompt(draftedSegment.protectedSource, draftedSegment.protectedBody, mustFix),
-      draftedSegment.promptContext
+      repairPromptContext
     ),
     {
       cwd: context.cwd,
@@ -631,6 +632,27 @@ async function repairDraftedSegment(
   }
   draftedSegment.protectedBody = reprotectMarkdownSpans(repairResult.text, draftedSegment.spans);
   draftedSegment.restoredBody = restoreMarkdownSpans(draftedSegment.protectedBody, draftedSegment.spans);
+}
+
+function buildRepairPromptContext(
+  promptContext: ChunkPromptContext,
+  mustFix: readonly string[]
+): ChunkPromptContext {
+  const extraNotes = [...promptContext.specialNotes];
+  if (
+    promptContext.segmentHeadings.length > 0 &&
+    mustFix.some((item) => item.includes("标题"))
+  ) {
+    extraNotes.push(
+      `本次 must_fix 明确指向标题。必须直接修改以下标题文本本身：${promptContext.segmentHeadings.join(" | ")}。`,
+      "不要把标题里的首现双语修复转移到正文其他句子；标题缺什么，就在标题里补什么。"
+    );
+  }
+
+  return {
+    ...promptContext,
+    specialNotes: extraNotes
+  };
 }
 
 async function runBundledGateAudit(
