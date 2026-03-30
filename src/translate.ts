@@ -663,9 +663,13 @@ function buildRepairPromptContext(
   mustFix: readonly string[]
 ): ChunkPromptContext {
   const extraNotes = [...promptContext.specialNotes];
+  const targetsHeadingLikeAnchor = mustFix.some(
+    (item) => item.includes("标题") || item.includes("首次出现") || item.includes("中英对照")
+  );
   if (
     promptContext.segmentHeadings.length > 0 &&
-    mustFix.some((item) => item.includes("标题"))
+    promptContext.specialNotes.some((item) => item.includes("当前分段包含标题或加粗标题")) &&
+    targetsHeadingLikeAnchor
   ) {
     extraNotes.push(
       `本次 must_fix 明确指向标题。必须直接修改以下标题文本本身：${promptContext.segmentHeadings.join(" | ")}。`,
@@ -1024,7 +1028,7 @@ function isHeadingLikeBlock(content: string): boolean {
     return true;
   }
 
-  return /^\*\*[^*\n].+\*\*$/.test(trimmed);
+  return /^\*\*[^*\n].+\*\*$/.test(trimmed) || /^\*\*[^*\n]+\*\*\s*(?:—|-|:).+$/.test(trimmed);
 }
 
 function splitRawBlocks(source: string): Array<{ content: string; separator: string }> {
@@ -1100,6 +1104,12 @@ function extractSegmentHeadingHints(source: string): string[] {
     const boldMatch = trimmed.match(/^\*\*(.+)\*\*$/);
     if (boldMatch?.[1]) {
       hints.push(boldMatch[1].trim());
+      continue;
+    }
+
+    const boldLeadMatch = trimmed.match(/^\*\*([^*\n]+)\*\*\s*(?:—|-|:)\s*(.+)$/);
+    if (boldLeadMatch?.[1]) {
+      hints.push(boldLeadMatch[1].trim());
     }
   }
 

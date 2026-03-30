@@ -1198,6 +1198,63 @@ test("translateMarkdownArticle repeats slash-qualified heading repair guidance w
   assert.match(repairPrompt, /优先保留整组英文原名，再在整组后面补一个整体中文说明词/);
 });
 
+test("translateMarkdownArticle treats bold platform labels as heading-like repair targets", async () => {
+  const source = [
+    "# Title",
+    "",
+    "**Linux** — Works on most distributions",
+    "",
+    "- Ubuntu 20.04+",
+    "- Fedora 32+",
+    ""
+  ].join("\n");
+
+  const executor = new PromptAwareExecutor();
+  await translateMarkdownArticle(source, {
+    executor: {
+      async execute(prompt, options) {
+        executor.prompts.push(prompt);
+
+        if (options.outputSchema && prompt.includes("【分段审校输入】")) {
+          return createExecResult(
+            wrapPerSegmentAudits(prompt, [
+              {
+                segment_index: 1,
+                audit: createAudit(false, [
+                  "第2段“Linux（操作系统）”是首次出现的专名，需补成包含英文原名的中英对照首现锚定。"
+                ])
+              }
+            ])
+          );
+        }
+
+        if (options.outputSchema || prompt.includes("只返回 JSON")) {
+          return createExecResult(JSON.stringify(createAudit(true)));
+        }
+
+        const currentTranslation = extractPromptSection(prompt, "【当前译文】");
+        if (currentTranslation !== null) {
+          return createExecResult(currentTranslation);
+        }
+
+        const sourceSection = extractPromptSection(prompt, "【英文原文】");
+        return createExecResult(sourceSection ?? "");
+      }
+    },
+    formatter: async (markdown) => markdown
+  });
+
+  const repairPrompt = executor.prompts.find(
+    (item) =>
+      item.includes("【must_fix】") &&
+      item.includes("第2段“Linux（操作系统）”是首次出现的专名")
+  );
+  assert.ok(repairPrompt);
+  assert.match(repairPrompt, /本次 must_fix 明确指向标题/);
+  assert.match(repairPrompt, /必须直接修改以下标题文本本身：.*Linux/);
+  assert.match(repairPrompt, /如果标题里的目标是英文产品名、工具名、项目名、模型名或 CLI 名称/);
+});
+
 test("translateMarkdownArticle adds attribution guidance for caption-like segments", async () => {
   const source = [
     "# Title",
