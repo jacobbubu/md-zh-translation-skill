@@ -691,6 +691,16 @@ function buildRepairPromptContext(
     );
   }
 
+  if (
+    promptContext.specialNotes.some((item) => item.includes("当前分段包含列表前的说明句")) &&
+    mustFix.some((item) => item.includes("中文说明") || item.includes("英文缩写") || item.includes("首次出现"))
+  ) {
+    extraNotes.push(
+      "本次 must_fix 明确指向列表前的说明句、导语句或冒号引导句。必须直接修改对应引导句本身，不要把缺失的首现双语或中文说明转移到后面的列表项里。",
+      "如果 must_fix 指向引导句中的英文缩写、包名、命令名、产品名或术语，优先在同一句里补自然的中文说明，并保持这一句仍然是后续列表的引导句。"
+    );
+  }
+
   return {
     ...promptContext,
     specialNotes: extraNotes
@@ -1116,6 +1126,13 @@ function extractSegmentSpecialNotes(source: string): string[] {
     );
   }
 
+  if (containsListLeadInBlock(source)) {
+    notes.push(
+      "当前分段包含列表前的说明句、导语句或冒号引导句。若这类引导句本身首次出现术语、缩写、产品名、包名、命令名或其他关键专名，必须直接在该说明句本身补齐中英文对照或中文说明，不要把修复转移到后面的列表项里。",
+      "这类引导句通常以冒号结束，用来引出后续列表。修复时应保留原有引导结构，只在该句内部补最小必要的首现锚定，不要改写成列表项标题，也不要把解释拆到下一行列表中。"
+    );
+  }
+
   if (containsTranslatableMarkdownStructure(source)) {
     notes.push(
       "当前分段包含可翻译的 Markdown 强调结构或命令/flag 写法。翻译时必须保留等价结构：原文中的 **加粗**、*斜体* 等强调，不得无故去掉；像 --dangerously-skip-permissions 这类命令参数或 flag，应保留原始写法，不要改成代码块、标题、列表标签或其他 Markdown 结构。",
@@ -1156,6 +1173,30 @@ function containsToolNameExplanationBlock(source: string): boolean {
 
 function containsListLikeBlock(source: string): boolean {
   return splitRawBlocks(source).some((block) => isListLikeBlock(block.content));
+}
+
+function containsListLeadInBlock(source: string): boolean {
+  const blocks = splitRawBlocks(source);
+
+  for (let index = 0; index < blocks.length - 1; index += 1) {
+    const current = blocks[index]?.content.trim() ?? "";
+    const next = blocks[index + 1]?.content ?? "";
+
+    if (
+      current.length === 0 ||
+      isHeadingLikeBlock(current) ||
+      isListLikeBlock(current) ||
+      !/[:：]\s*$/.test(current)
+    ) {
+      continue;
+    }
+
+    if (isListLikeBlock(next)) {
+      return true;
+    }
+  }
+
+  return false;
 }
 
 function isToolNameExplanationBlock(content: string): boolean {

@@ -976,6 +976,66 @@ test("translateMarkdownArticle repeats list-item repair guidance when must_fix t
   }
 });
 
+test("translateMarkdownArticle repeats list-lead-in repair guidance when must_fix targets a colon-led intro sentence", async () => {
+  const source = [
+    "# Title",
+    "",
+    "## Section",
+    "",
+    "Compromised npm packages or dependencies that attempt to:",
+    "",
+    "- Read environment variables and credentials",
+    "- Exfiltrate source code to external servers",
+    ""
+  ].join("\n");
+
+  const executor = new PromptAwareExecutor();
+  await translateMarkdownArticle(source, {
+    executor: {
+      async execute(prompt, options) {
+        executor.prompts.push(prompt);
+
+        if (options.outputSchema && prompt.includes("【分段审校输入】")) {
+          return createExecResult(
+            wrapPerSegmentAudits(prompt, [
+              {
+                segment_index: 1,
+                audit: createAudit(false, [
+                  "在“被攻破的 npm 包或依赖项可能会尝试：”中，首次出现的 npm 需补中文说明，不能只保留英文缩写。"
+                ])
+              }
+            ])
+          );
+        }
+
+        if (options.outputSchema || prompt.includes("只返回 JSON")) {
+          return createExecResult(JSON.stringify(createAudit(true)));
+        }
+
+        const currentTranslation = extractPromptSection(prompt, "【当前译文】");
+        if (currentTranslation !== null) {
+          return createExecResult(currentTranslation);
+        }
+
+        const sourceSection = extractPromptSection(prompt, "【英文原文】");
+        return createExecResult(sourceSection ?? "");
+      }
+    },
+    formatter: async (markdown) => markdown
+  });
+
+  const repairPrompt = executor.prompts.find(
+    (item) =>
+      item.includes("【must_fix】") &&
+      item.includes("在“被攻破的 npm 包或依赖项可能会尝试：”中，首次出现的 npm 需补中文说明")
+  );
+  assert.ok(repairPrompt);
+  assert.match(repairPrompt, /当前分段包含列表前的说明句、导语句或冒号引导句/);
+  assert.match(repairPrompt, /本次 must_fix 明确指向列表前的说明句、导语句或冒号引导句/);
+  assert.match(repairPrompt, /必须直接修改对应引导句本身/);
+  assert.match(repairPrompt, /不要把缺失的首现双语或中文说明转移到后面的列表项里/);
+});
+
 test("translateMarkdownArticle repairs multiple must_fix items one at a time", async () => {
   const source = "# Title\n\nBody";
   const repairMustFixSections: string[] = [];
