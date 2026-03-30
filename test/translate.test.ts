@@ -1234,6 +1234,65 @@ test("translateMarkdownArticle repeats in-sentence repair guidance when must_fix
   assert.match(repairPrompt, /不要把修复转移到同一分段的前一句、后一句、标题、列表项或总结句里/);
 });
 
+test("translateMarkdownArticle repeats explicit English target guidance when must_fix names a quoted term", async () => {
+  const source = [
+    "# Title",
+    "",
+    "## Python Data Science Project Example",
+    "",
+    "**Key features:**",
+    "",
+    "- Notebook full access",
+    "- Python and pip commands allowed",
+    ""
+  ].join("\n");
+
+  const executor = new PromptAwareExecutor();
+  await translateMarkdownArticle(source, {
+    executor: {
+      async execute(prompt, options) {
+        executor.prompts.push(prompt);
+
+        if (options.outputSchema && prompt.includes("【分段审校输入】")) {
+          return createExecResult(
+            wrapPerSegmentAudits(prompt, [
+              {
+                segment_index: 1,
+                audit: createAudit(false, [
+                  "第4条项目符号：将“Python”补成首现中英对照，保留原句含义。"
+                ])
+              }
+            ])
+          );
+        }
+
+        if (options.outputSchema || prompt.includes("只返回 JSON")) {
+          return createExecResult(JSON.stringify(createAudit(true)));
+        }
+
+        const currentTranslation = extractPromptSection(prompt, "【当前译文】");
+        if (currentTranslation !== null) {
+          return createExecResult(currentTranslation);
+        }
+
+        const sourceSection = extractPromptSection(prompt, "【英文原文】");
+        return createExecResult(sourceSection ?? "");
+      }
+    },
+    formatter: async (markdown) => markdown
+  });
+
+  const repairPrompt = executor.prompts.find(
+    (item) =>
+      item.includes("【must_fix】") &&
+      item.includes("将“Python”补成首现中英对照")
+  );
+  assert.ok(repairPrompt);
+  assert.match(repairPrompt, /本次 must_fix 明确点名了这些英文目标：Python/);
+  assert.match(repairPrompt, /即使它看起来是常见技术词，也必须严格按 must_fix 要求修复/);
+  assert.match(repairPrompt, /必须在对应的标题、当前句、列表项或被点名位置本身保留这个英文原名/);
+});
+
 test("translateMarkdownArticle repairs multiple must_fix items one at a time", async () => {
   const source = "# Title\n\nBody";
   const repairMustFixSections: string[] = [];

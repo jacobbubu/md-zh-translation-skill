@@ -662,11 +662,33 @@ function splitMustFixBatches(mustFix: readonly string[], batchSize: number): str
   return batches;
 }
 
+function extractExplicitEnglishTargetsFromMustFix(mustFix: readonly string[]): string[] {
+  const targets = new Set<string>();
+
+  for (const item of mustFix) {
+    for (const match of item.matchAll(/[“"`']([A-Za-z][A-Za-z0-9./+&:_ -]{0,79})[”"`']/g)) {
+      const candidate = match[1]?.trim();
+      if (!candidate) {
+        continue;
+      }
+
+      if (!/[A-Za-z]/.test(candidate)) {
+        continue;
+      }
+
+      targets.add(candidate);
+    }
+  }
+
+  return [...targets];
+}
+
 function buildRepairPromptContext(
   promptContext: ChunkPromptContext,
   mustFix: readonly string[]
 ): ChunkPromptContext {
   const extraNotes = [...promptContext.specialNotes];
+  const explicitEnglishTargets = extractExplicitEnglishTargetsFromMustFix(mustFix);
   const targetsHeadingLikeAnchor = mustFix.some(
     (item) => item.includes("标题") || item.includes("首次出现") || item.includes("中英对照")
   );
@@ -726,6 +748,14 @@ function buildRepairPromptContext(
     extraNotes.push(
       "本次 must_fix 明确指向当前句或该句的正文说明。必须直接在这同一句本身补齐缺失的首现中英文对照或中文说明，不要把修复转移到同一分段的前一句、后一句、标题、列表项或总结句里。",
       "如果目标术语、缩写、包名、命令名、产品名或概念出现在这句正文里，应在保持原句论证关系和语气的前提下就地补自然的中文锚定，不要只修同段别处。"
+    );
+  }
+
+  if (explicitEnglishTargets.length > 0) {
+    extraNotes.push(
+      `本次 must_fix 明确点名了这些英文目标：${explicitEnglishTargets.join(" / ")}。`,
+      "只要 must_fix 已经点名某个英文词、命令名、语言名、包名、平台名或术语，即使它看起来是常见技术词，也必须严格按 must_fix 要求修复，不能因为“太常见”就省略首现锚定。",
+      "修复时必须在对应的标题、当前句、列表项或被点名位置本身保留这个英文原名，并补最小必要的中文说明；不要只译成中文，也不要把锚定转移到别处。"
     );
   }
 
