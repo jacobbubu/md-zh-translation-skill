@@ -684,6 +684,81 @@ test("translateMarkdownArticle reuses a Codex thread within a segment", async ()
   assert.equal(calls[4]?.reasoningEffort, "low");
 });
 
+test("translateMarkdownArticle routes post-draft stages to the configured post-draft model", async () => {
+  const source = "# Title\n\nBody";
+  const calls: Array<{ prompt: string; options: CodexExecOptions }> = [];
+  const previousPostDraftReasoning = process.env.POST_DRAFT_REASONING_EFFORT;
+  process.env.POST_DRAFT_REASONING_EFFORT = "medium";
+
+  try {
+    const executor: CodexExecutor = {
+      async execute(prompt, options) {
+        calls.push({ prompt, options });
+
+        if (options.outputSchema || prompt.includes("只返回 JSON")) {
+          if (prompt.includes("【当前译文】") && prompt.includes("正文（Body）")) {
+            return createExecResult(wrapAuditForSegments(prompt, createAudit(true)));
+          }
+
+          return createExecResult(
+            wrapAuditForSegments(prompt, createAudit(false, ["将“Body”补成首现中英对照。"]))
+          );
+        }
+
+        if (prompt.includes("【must_fix】")) {
+          return createExecResult("# 标题（Title）\n\n正文（Body）");
+        }
+
+        if (prompt.includes("只做“风格与可读性润色”")) {
+          return createExecResult("# 标题（Title）\n\n更自然的正文（Body）");
+        }
+
+        return createExecResult("# 标题\n\n正文");
+      }
+    };
+
+    await translateMarkdownArticle(source, {
+      executor,
+      formatter: async (markdown) => markdown,
+      model: "gpt-5.4-mini",
+      postDraftModel: "gpt-5.4"
+    });
+
+    const draftCall = calls.find(
+      (entry) =>
+        !entry.options.outputSchema &&
+        !entry.prompt.includes("【must_fix】") &&
+        !entry.prompt.includes("只做“风格与可读性润色”")
+    );
+    assert.ok(draftCall);
+    assert.equal(draftCall.options.model, "gpt-5.4-mini");
+    assert.equal(draftCall.options.reasoningEffort, "medium");
+
+    const auditCalls = calls.filter((entry) => entry.options.outputSchema || entry.prompt.includes("只返回 JSON"));
+    assert.ok(auditCalls.length >= 1);
+    for (const call of auditCalls) {
+      assert.equal(call.options.model, "gpt-5.4");
+      assert.equal(call.options.reasoningEffort, "medium");
+    }
+
+    const repairCall = calls.find((entry) => entry.prompt.includes("【must_fix】"));
+    assert.ok(repairCall);
+    assert.equal(repairCall.options.model, "gpt-5.4");
+    assert.equal(repairCall.options.reasoningEffort, "medium");
+
+    const styleCall = calls.find((entry) => entry.prompt.includes("只做“风格与可读性润色”"));
+    assert.ok(styleCall);
+    assert.equal(styleCall.options.model, "gpt-5.4");
+    assert.equal(styleCall.options.reasoningEffort, "medium");
+  } finally {
+    if (previousPostDraftReasoning == null) {
+      delete process.env.POST_DRAFT_REASONING_EFFORT;
+    } else {
+      process.env.POST_DRAFT_REASONING_EFFORT = previousPostDraftReasoning;
+    }
+  }
+});
+
 test("translateMarkdownArticle runs chunk-level audit with structured output", async () => {
   const source = "# Title\n\nBody";
   const calls: CodexExecOptions[] = [];
