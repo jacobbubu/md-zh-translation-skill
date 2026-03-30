@@ -871,6 +871,66 @@ test("translateMarkdownArticle repeats heading-only repair guidance when must_fi
   assert.match(repairPrompt, /不要把标题里的首现双语修复转移到正文其他句子/);
 });
 
+test("translateMarkdownArticle repeats list-item repair guidance when must_fix targets bullet items", async () => {
+  const source = [
+    "# Title",
+    "",
+    "## Section",
+    "",
+    "- Pre-approved destinations (npm registry, GitHub, your APIs)",
+    "- Auto-allowed commands (git, npm, basic file operations)",
+    ""
+  ].join("\n");
+
+  const executor = new PromptAwareExecutor();
+  await translateMarkdownArticle(source, {
+    executor: {
+      async execute(prompt, options) {
+        executor.prompts.push(prompt);
+
+        if (options.outputSchema && prompt.includes("【分段审校输入】")) {
+          return createExecResult(
+            wrapPerSegmentAudits(prompt, [
+              {
+                segment_index: 1,
+                audit: createAudit(false, [
+                  "在“预先批准的目标”条目中，`npm registry` 首次出现只保留了英文，需补上中文说明并保持中英文对应。",
+                  "在“自动允许的命令”条目中，`npm` 首次出现只保留了英文，需补上中文说明并保持中英文对应。"
+                ])
+              }
+            ])
+          );
+        }
+
+        if (options.outputSchema || prompt.includes("只返回 JSON")) {
+          return createExecResult(JSON.stringify(createAudit(true)));
+        }
+
+        const currentTranslation = extractPromptSection(prompt, "【当前译文】");
+        if (currentTranslation !== null) {
+          return createExecResult(currentTranslation);
+        }
+
+        const sourceSection = extractPromptSection(prompt, "【英文原文】");
+        return createExecResult(sourceSection ?? "");
+      }
+    },
+    formatter: async (markdown) => markdown
+  });
+
+  const repairPrompt = executor.prompts.find(
+    (item) =>
+      item.includes("【must_fix】") &&
+      item.includes("在“预先批准的目标”条目中") &&
+      item.includes("在“自动允许的命令”条目中")
+  );
+  assert.ok(repairPrompt);
+  assert.match(repairPrompt, /当前分段包含列表项或项目符号/);
+  assert.match(repairPrompt, /本次 must_fix 明确指向列表项或项目符号/);
+  assert.match(repairPrompt, /必须直接修改对应的列表项文本本身/);
+  assert.match(repairPrompt, /要逐条在各自的列表项里补齐/);
+});
+
 test("translateMarkdownArticle adds attribution guidance for caption-like segments", async () => {
   const source = [
     "# Title",

@@ -649,6 +649,16 @@ function buildRepairPromptContext(
     );
   }
 
+  if (
+    promptContext.specialNotes.some((item) => item.includes("当前分段包含列表项")) &&
+    mustFix.some((item) => item.includes("条目") || item.includes("项目符号") || item.includes("列表项"))
+  ) {
+    extraNotes.push(
+      "本次 must_fix 明确指向列表项或项目符号。必须直接修改对应的列表项文本本身，不要把缺失的首现双语转移到列表前后的说明段落里。",
+      "如果 must_fix 指向多个列表项，要逐条在各自的列表项里补齐；不要只在列表标题、段首总结句或其他项目符号里补一次。"
+    );
+  }
+
   return {
     ...promptContext,
     specialNotes: extraNotes
@@ -1067,6 +1077,13 @@ function extractSegmentSpecialNotes(source: string): string[] {
     );
   }
 
+  if (containsListLikeBlock(source)) {
+    notes.push(
+      "当前分段包含列表项或项目符号。若列表项中的术语、产品名、命令名或其他关键专名需要补首现双语，必须直接在对应列表项本身补齐，不要把修复转移到列表前后的正文说明里。",
+      "如果同一列表里有多个条目各自首次出现不同术语，要逐条补齐，不要只在列表标题、总结句或某一个项目符号里补一次。"
+    );
+  }
+
   if (containsTranslatableMarkdownStructure(source)) {
     notes.push(
       "当前分段包含可翻译的 Markdown 强调结构或命令/flag 写法。翻译时必须保留等价结构：原文中的 **加粗**、*斜体* 等强调，不得无故去掉；像 --dangerously-skip-permissions 这类命令参数或 flag，应保留原始写法，不要改成代码块、标题、列表标签或其他 Markdown 结构。",
@@ -1105,8 +1122,18 @@ function containsToolNameExplanationBlock(source: string): boolean {
   return splitRawBlocks(source).some((block) => isToolNameExplanationBlock(block.content));
 }
 
+function containsListLikeBlock(source: string): boolean {
+  return splitRawBlocks(source).some((block) => isListLikeBlock(block.content));
+}
+
 function isToolNameExplanationBlock(content: string): boolean {
   return content.split(/\r?\n/).some((line) => isToolNameExplanationLine(line));
+}
+
+function isListLikeBlock(content: string): boolean {
+  return content
+    .split(/\r?\n/)
+    .some((line) => /^(\s*)([-*+]|\d+\.)\s+/.test(line.trimStart()));
 }
 
 function isToolNameExplanationLine(line: string): boolean {
