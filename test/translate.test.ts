@@ -359,6 +359,54 @@ test("translateMarkdownArticle runs the hidden pipeline chunk by chunk for long 
   assert.ok(executor.prompts[0]?.includes("当前分块：第 1 /"));
 });
 
+test("translateMarkdownArticle allocates unique local markdown-link placeholders across chunks", async () => {
+  const source = [
+    "# Title",
+    "",
+    "## One",
+    "",
+    "This is [bubblewrap](https://example.com/bwrap).",
+    "",
+    "## Two",
+    "",
+    "This is [macOS](https://example.com/macos).",
+    ""
+  ].join("\n");
+
+  const draftPrompts: string[] = [];
+  const executor: CodexExecutor = {
+    async execute(prompt, options) {
+      if (!options.outputSchema && !prompt.includes("【must_fix】") && !prompt.includes("只做“风格与可读性润色”")) {
+        draftPrompts.push(prompt);
+      }
+
+      if (options.outputSchema || prompt.includes("只返回 JSON")) {
+        return createExecResult(wrapAuditForSegments(prompt, createAudit(true)));
+      }
+
+      const currentTranslation = extractPromptSection(prompt, "【当前译文】");
+      if (currentTranslation !== null) {
+        return createExecResult(currentTranslation);
+      }
+
+      const sourceSection = extractPromptSection(prompt, "【英文原文】");
+      return createExecResult(sourceSection ?? "");
+    }
+  };
+
+  await translateMarkdownArticle(source, {
+    executor,
+    formatter: async (markdown) => markdown
+  });
+
+  const placeholderIds = draftPrompts.flatMap((prompt) =>
+    [...prompt.matchAll(/@@MDZH_INLINE_MARKDOWN_LINK_\d{4,}@@/g)].map((match) => match[0])
+  );
+
+  assert.ok(placeholderIds.length >= 2);
+  assert.equal(new Set(placeholderIds).size, placeholderIds.length);
+});
+
 test("translateMarkdownArticle canonicalizes expanded URL spans before chunk-level style polish", async () => {
   const source = [
     "# Docs",

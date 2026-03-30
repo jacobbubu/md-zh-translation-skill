@@ -292,6 +292,7 @@ export async function translateMarkdownArticle(source: string, options: Translat
   let repairCyclesUsed = 0;
   let styleApplied = false;
   let establishedTerms: string[] = [];
+  let nextLocalSpanIndex = spanIndex.size + 1;
 
   for (const chunk of chunkPlan.chunks) {
     const chunkResult = await translateProtectedChunk(chunk, chunkPlan, {
@@ -301,13 +302,15 @@ export async function translateMarkdownArticle(source: string, options: Translat
       options,
       sourcePathHint,
       spanIndex,
-      establishedTerms
+      establishedTerms,
+      nextLocalSpanIndex
     });
 
     restoredChunks.push(chunkResult.body + chunk.separatorAfter);
     gateAudits.push(chunkResult.gateAudit);
     repairCyclesUsed += chunkResult.repairCyclesUsed;
     styleApplied = styleApplied || chunkResult.styleApplied;
+    nextLocalSpanIndex = chunkResult.nextLocalSpanIndex;
     establishedTerms = mergeEstablishedTerms(
       establishedTerms,
       collectEstablishedTerms(chunk.source, chunkResult.body)
@@ -365,6 +368,7 @@ type ChunkTranslationContext = {
   options: TranslateOptions;
   spanIndex: ReadonlyMap<string, ProtectedSpan>;
   establishedTerms: readonly string[];
+  nextLocalSpanIndex: number;
 };
 
 type ChunkTranslationResult = {
@@ -372,6 +376,7 @@ type ChunkTranslationResult = {
   repairCyclesUsed: number;
   styleApplied: boolean;
   gateAudit: GateAudit;
+  nextLocalSpanIndex: number;
 };
 
 type DraftedSegmentState = {
@@ -395,7 +400,7 @@ async function translateProtectedChunk(
   const draftedSegments: DraftedSegmentState[] = [];
   const fixedSegments: ProtectedChunkSegment[] = [];
   let repairCyclesUsed = 0;
-  let nextLocalSpanIndex = context.spanIndex.size + 1;
+  let nextLocalSpanIndex = context.nextLocalSpanIndex;
 
   for (const segment of segments) {
     if (segment.kind === "fixed") {
@@ -537,7 +542,8 @@ async function translateProtectedChunk(
     body: restoredChunkBody,
     repairCyclesUsed,
     styleApplied,
-    gateAudit: mergeGateAudits(bundledAudit.segments)
+    gateAudit: mergeGateAudits(bundledAudit.segments),
+    nextLocalSpanIndex
   };
 }
 
