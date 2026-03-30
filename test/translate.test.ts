@@ -463,6 +463,53 @@ test("translateMarkdownArticle canonicalizes expanded URL spans before chunk-lev
   assert.match(result.markdown, /See \[guide\]\(https:\/\/example\.com\/guide\)\.\n$/);
 });
 
+test("translateMarkdownArticle restores style-polish output that expands local inline markdown links", async () => {
+  const source = [
+    "# Docs",
+    "",
+    "Read [docs](https://example.com/docs) and [guide](https://example.com/guide).",
+    ""
+  ].join("\n");
+
+  class ExpandedStyleLinkExecutor implements CodexExecutor {
+    async execute(prompt: string, options: CodexExecOptions): Promise<CodexExecResult> {
+      if (options.outputSchema || prompt.includes('"hard_checks"') || prompt.includes("只返回 JSON")) {
+        return createExecResult(wrapAuditForSegments(prompt, createAudit(true)));
+      }
+
+      if (prompt.includes("只做“风格与可读性润色”")) {
+        const current = extractPromptSection(prompt, "【当前译文】") ?? "";
+        assert.match(current, /@@MDZH_INLINE_MARKDOWN_LINK_\d{4,}@@/);
+
+        return createExecResult(
+          current
+            .replace(
+              /@@MDZH_INLINE_MARKDOWN_LINK_\d{4,}@@/,
+              "[docs](https://example.com/docs)"
+            )
+            .replace(
+              /@@MDZH_INLINE_MARKDOWN_LINK_\d{4,}@@/,
+              "[guide](https://example.com/guide)"
+            )
+        );
+      }
+
+      const sourceSection = extractPromptSection(prompt, "【英文原文】");
+      return createExecResult(sourceSection ?? "");
+    }
+  }
+
+  const result = await translateMarkdownArticle(source, {
+    executor: new ExpandedStyleLinkExecutor(),
+    formatter: async (markdown) => markdown
+  });
+
+  assert.equal(
+    result.markdown,
+    "# Docs\n\nRead [docs](https://example.com/docs) and [guide](https://example.com/guide).\n"
+  );
+});
+
 test("translateMarkdownArticle keeps translatable strong emphasis and raw inline code visible at chunk-level style polish", async () => {
   const source = [
     "# Title",
@@ -917,7 +964,7 @@ test("translateMarkdownArticle repeats heading-only repair guidance when must_fi
   assert.match(repairPrompt, /本次 must_fix 明确指向标题/);
   assert.match(repairPrompt, /必须直接修改以下标题文本本身/);
   assert.match(repairPrompt, /不要把标题里的首现双语修复转移到正文其他句子/);
-  assert.match(repairPrompt, /如果标题里的目标是英文产品名、工具名、项目名、模型名或 CLI 名称/);
+  assert.match(repairPrompt, /如果标题里的目标是英文产品名、工具名、项目名、模型名、CLI 名称，或以英文表达的核心概念性标题术语/);
 });
 
 test("translateMarkdownArticle repeats list-item repair guidance when must_fix targets bullet items", async () => {
@@ -974,6 +1021,8 @@ test("translateMarkdownArticle repeats list-item repair guidance when must_fix t
     assert.match(repairPrompt, /本次 must_fix 明确指向列表项或项目符号/);
     assert.match(repairPrompt, /必须直接修改对应的列表项文本本身/);
     assert.match(repairPrompt, /要逐条在各自的列表项里补齐/);
+    assert.match(repairPrompt, /如果 must_fix 点名的是某个列表项里的核心英文概念、术语或英文短语/);
+    assert.match(repairPrompt, /不要只保留同一列表项括号里的另一个英文专名、品牌名、缩写或解释来冒充“已修复”/);
   }
 });
 
@@ -1252,7 +1301,68 @@ test("translateMarkdownArticle treats bold platform labels as heading-like repai
   assert.ok(repairPrompt);
   assert.match(repairPrompt, /本次 must_fix 明确指向标题/);
   assert.match(repairPrompt, /必须直接修改以下标题文本本身：.*Linux/);
-  assert.match(repairPrompt, /如果标题里的目标是英文产品名、工具名、项目名、模型名或 CLI 名称/);
+  assert.match(repairPrompt, /如果标题里的目标是英文产品名、工具名、项目名、模型名、CLI 名称，或以英文表达的核心概念性标题术语/);
+});
+
+test("translateMarkdownArticle keeps heading-anchor repairs on a bold heading after a lead-in sentence", async () => {
+  const source = [
+    "# Title",
+    "",
+    "In a quick summary, here is what autonomous coding agents need:",
+    "",
+    "**Filesystem Isolation**",
+    "",
+    "- Safe zone where Claude can work freely",
+    "- Restricted zones that require explicit permission",
+    ""
+  ].join("\n");
+
+  const executor = new PromptAwareExecutor();
+  await translateMarkdownArticle(source, {
+    executor: {
+      async execute(prompt, options) {
+        executor.prompts.push(prompt);
+
+        if (options.outputSchema && prompt.includes("【分段审校输入】")) {
+          return createExecResult(
+            wrapPerSegmentAudits(prompt, [
+              {
+                segment_index: 1,
+                audit: createAudit(false, [
+                  "第3段“**文件系统隔离**”未在首次出现处保留 `Filesystem Isolation` 的中英对照；需把双语锚定放回该标题本身。"
+                ])
+              }
+            ])
+          );
+        }
+
+        if (options.outputSchema || prompt.includes("只返回 JSON")) {
+          return createExecResult(JSON.stringify(createAudit(true)));
+        }
+
+        const currentTranslation = extractPromptSection(prompt, "【当前译文】");
+        if (currentTranslation !== null) {
+          return createExecResult(currentTranslation);
+        }
+
+        const sourceSection = extractPromptSection(prompt, "【英文原文】");
+        return createExecResult(sourceSection ?? "");
+      }
+    },
+    formatter: async (markdown) => markdown
+  });
+
+  const repairPrompt = executor.prompts.find(
+    (item) =>
+      item.includes("【must_fix】") &&
+      item.includes("第3段“**文件系统隔离**”未在首次出现处保留 `Filesystem Isolation` 的中英对照")
+  );
+  assert.ok(repairPrompt);
+  assert.match(repairPrompt, /本次 must_fix 明确指向标题/);
+  assert.match(repairPrompt, /当前分段包含列表前的说明句、导语句或冒号引导句/);
+  assert.match(repairPrompt, /冒号引导句或说明句 \+ 下一行加粗标题\/标题 \+ 后续列表/);
+  assert.match(repairPrompt, /必须直接在这个标题本身补齐锚定/);
+  assert.match(repairPrompt, /核心概念性英文标题/);
 });
 
 test("translateMarkdownArticle adds attribution guidance for caption-like segments", async () => {

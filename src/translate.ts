@@ -674,7 +674,7 @@ function buildRepairPromptContext(
     extraNotes.push(
       `本次 must_fix 明确指向标题。必须直接修改以下标题文本本身：${promptContext.segmentHeadings.join(" | ")}。`,
       "不要把标题里的首现双语修复转移到正文其他句子；标题缺什么，就在标题里补什么。",
-      "如果标题里的目标是英文产品名、工具名、项目名、模型名或 CLI 名称，而常见中文主译并不稳定，修复时优先保留英文原名，并在标题本身补最小必要的中文说明或类属锚定；不要只把标题其他部分翻成中文，却让这个英文专名继续裸露未锚定。"
+      "如果标题里的目标是英文产品名、工具名、项目名、模型名、CLI 名称，或以英文表达的核心概念性标题术语，而常见中文主译并不稳定，修复时优先保留英文原名，并在标题本身补最小必要的中文说明或类属锚定；不要只把标题其他部分翻成中文，却让这个英文专名或核心概念继续裸露未锚定。"
     );
 
     if (promptContext.segmentHeadings.some((heading) => /[/／]/.test(heading))) {
@@ -682,6 +682,13 @@ function buildRepairPromptContext(
         "如果标题里有用 / 连接的并列平台名、系统名、工具名或范围限定语，修复时必须在标题本身完整保留这组并列结构，不要删掉任何一侧，也不要把其中一侧挪到正文。",
         "这类并列标签若需要补首现双语，应在标题里为整组并列范围补自然的中文说明或锚定，不要只补其中一个英文项，也不要把说明转移到标题后面的段落。",
         "对 `A/B` 这类并列英文标签，优先保留整组英文原名，再在整组后面补一个整体中文说明词，例如“平台”“系统”“工具”或等价表达；不要把它改成英文重复括注，也不要拆成两处分别补。"
+      );
+    }
+
+    if (promptContext.specialNotes.some((item) => item.includes("当前分段包含列表前的说明句"))) {
+      extraNotes.push(
+        "如果当前分段的结构是“冒号引导句或说明句 + 下一行加粗标题/标题 + 后续列表”，而 must_fix 指向的是该标题中的首现双语缺失，必须直接在这个标题本身补齐锚定；不要把修复转移到前面的引导句，也不要只在后面的列表项里补一次。",
+        "对这类结构里的核心概念性英文标题，例如分类名、能力名、隔离/限制/保护等机制名称，修复目标应是标题本身的最小自然双语形式，例如“中文标题（English Term）”或等价表达；不要只保留中文标题。"
       );
     }
   }
@@ -692,7 +699,9 @@ function buildRepairPromptContext(
   ) {
     extraNotes.push(
       "本次 must_fix 明确指向列表项或项目符号。必须直接修改对应的列表项文本本身，不要把缺失的首现双语转移到列表前后的说明段落里。",
-      "如果 must_fix 指向多个列表项，要逐条在各自的列表项里补齐；不要只在列表标题、段首总结句或其他项目符号里补一次。"
+      "如果 must_fix 指向多个列表项，要逐条在各自的列表项里补齐；不要只在列表标题、段首总结句或其他项目符号里补一次。",
+      "如果 must_fix 点名的是某个列表项里的核心英文概念、术语或英文短语，就必须在该列表项本身保留这个英文原名并补自然中文锚定；不要只保留同一列表项括号里的另一个英文专名、品牌名、缩写或解释来冒充“已修复”。",
+      "对“概念名（解释）”“中文概念（英文原名）”或带括号说明的列表项，修复时要分清主锚定对象和括号说明：被 must_fix 点名的核心概念必须在这一条列表项里直接补齐，不能因为括号里还有别的英文词就省略它。"
     );
   }
 
@@ -1075,15 +1084,33 @@ function collectChunkSpans(
   extraSpans: readonly ProtectedSpan[] = []
 ): ProtectedSpan[] {
   const placeholderPattern = /@@MDZH_[A-Z_]+_\d{4,}@@/g;
-  const spanIds = [...new Set(source.match(placeholderPattern) ?? [])];
   const localSpanIndex = new Map(extraSpans.map((span) => [span.id, span]));
-  return spanIds.map((spanId) => {
+  const collected: ProtectedSpan[] = [];
+  const seen = new Set<string>();
+
+  const addSpan = (spanId: string) => {
+    if (seen.has(spanId)) {
+      return;
+    }
+
     const span = localSpanIndex.get(spanId) ?? spanIndex.get(spanId);
     if (!span) {
       throw new HardGateError(`Protected span integrity failed: unknown placeholder ${spanId}.`);
     }
-    return span;
-  });
+
+    seen.add(spanId);
+    collected.push(span);
+
+    for (const nestedSpanId of span.raw.match(placeholderPattern) ?? []) {
+      addSpan(nestedSpanId);
+    }
+  };
+
+  for (const spanId of [...new Set(source.match(placeholderPattern) ?? [])]) {
+    addSpan(spanId);
+  }
+
+  return collected;
 }
 
 function extractSegmentHeadingHints(source: string): string[] {
@@ -1202,6 +1229,7 @@ function containsListLeadInBlock(source: string): boolean {
   for (let index = 0; index < blocks.length - 1; index += 1) {
     const current = blocks[index]?.content.trim() ?? "";
     const next = blocks[index + 1]?.content ?? "";
+    const nextNext = blocks[index + 2]?.content ?? "";
 
     if (
       current.length === 0 ||
@@ -1213,6 +1241,10 @@ function containsListLeadInBlock(source: string): boolean {
     }
 
     if (isListLikeBlock(next)) {
+      return true;
+    }
+
+    if (isHeadingLikeBlock(next) && isListLikeBlock(nextNext)) {
       return true;
     }
   }
