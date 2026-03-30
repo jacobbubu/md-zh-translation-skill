@@ -450,6 +450,7 @@ async function translateProtectedChunk(
       `Chunk ${chunkPromptContext.chunkIndex}/${plan.chunks.length}${chunkLabel}: repair cycle ${repairCyclesUsed} of ${MAX_REPAIR_CYCLES} for ${failedSegmentCount} failed segment(s).`
     );
 
+    const repairedSegmentIndices = new Set<number>();
     for (const segmentAudit of bundledAudit.segments) {
       if (isHardPass(segmentAudit) || segmentAudit.must_fix.length === 0) {
         continue;
@@ -471,10 +472,13 @@ async function translateProtectedChunk(
         context,
         chunkLabel
       );
+      repairedSegmentIndices.add(draftedSegment.segment.index + 1);
     }
 
     bundledAudit = await runPostRepairGateAudit(
       draftedSegments,
+      bundledAudit,
+      repairedSegmentIndices,
       plan,
       context,
       chunkPromptContext,
@@ -798,6 +802,8 @@ async function runBundledGateAudit(
 
 async function runPostRepairGateAudit(
   draftedSegments: readonly DraftedSegmentState[],
+  previousAudit: BundledGateAudit,
+  repairedSegmentIndices: ReadonlySet<number>,
   plan: MarkdownChunkPlan,
   context: ChunkTranslationContext,
   chunkPromptContext: ChunkPromptContext,
@@ -808,7 +814,32 @@ async function runPostRepairGateAudit(
     "audit",
     `Chunk ${chunkPromptContext.chunkIndex}/${plan.chunks.length}${chunkLabel}: re-running per-segment hard gate audit after repair.`
   );
-  return runFallbackSegmentAudits(draftedSegments, plan, context, chunkPromptContext, chunkLabel);
+
+  const repairedSegments = draftedSegments.filter((segment) =>
+    repairedSegmentIndices.has(segment.segment.index + 1)
+  );
+
+  if (repairedSegments.length === 0) {
+    return previousAudit;
+  }
+
+  const updatedAudit = await runFallbackSegmentAudits(
+    repairedSegments,
+    plan,
+    context,
+    chunkPromptContext,
+    chunkLabel
+  );
+
+  const updatedByIndex = new Map(
+    updatedAudit.segments.map((segmentAudit) => [segmentAudit.segment_index, segmentAudit])
+  );
+
+  return {
+    segments: previousAudit.segments.map(
+      (segmentAudit) => updatedByIndex.get(segmentAudit.segment_index) ?? segmentAudit
+    )
+  };
 }
 
 async function runFallbackSegmentAudits(

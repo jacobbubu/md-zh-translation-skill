@@ -856,6 +856,98 @@ test("translateMarkdownArticle switches to per-segment audits after a repair cyc
   assert.ok(fallbackAuditCount >= 1);
 });
 
+test("translateMarkdownArticle does not re-audit unchanged segments after later repair cycles", async () => {
+  const source = [
+    "# Title",
+    "",
+    "## Need",
+    "",
+    "Filesystem Isolation keeps the agent away from sensitive paths.",
+    "",
+    "```sh",
+    "ls ~/.ssh",
+    "```",
+    "",
+    "Network Isolation constrains outbound access until it is explicitly approved.",
+    "",
+    "```sh",
+    "curl https://example.com",
+    "```",
+    "",
+    "Command Restrictions decide which commands may run automatically and which need review.",
+    ""
+  ].join("\n");
+
+  let bundledAuditCount = 0;
+  let fallbackAuditCount = 0;
+  let secondFallbackSawSegmentOne = false;
+
+  const executor: CodexExecutor = {
+    async execute(prompt, options) {
+      if (prompt.includes("只做“风格与可读性润色”")) {
+        const currentTranslation = extractPromptSection(prompt, "【当前译文】");
+        return createExecResult(currentTranslation ?? "");
+      }
+
+      if (prompt.includes("只做“定点修复”")) {
+        const currentTranslation = extractPromptSection(prompt, "【当前译文】");
+        return createExecResult(currentTranslation ?? "");
+      }
+
+      if (options.outputSchema && prompt.includes("【分段审校输入】")) {
+        bundledAuditCount += 1;
+        return createExecResult(
+          wrapPerSegmentAudits(prompt, [
+            { segment_index: 1, audit: createAudit(false, ["修复项一"]) },
+            { segment_index: 3, audit: createAudit(false, ["修复项二"]) }
+          ])
+        );
+      }
+
+      if (options.outputSchema || prompt.includes("只返回 JSON")) {
+        fallbackAuditCount += 1;
+
+        if (fallbackAuditCount === 1) {
+          assert.match(prompt, /【英文原文】[\s\S]*Filesystem Isolation/);
+          return createExecResult(JSON.stringify(createAudit(true)));
+        }
+
+        if (fallbackAuditCount === 2) {
+          assert.doesNotMatch(prompt, /【英文原文】[\s\S]*Filesystem Isolation/);
+          return createExecResult(JSON.stringify(createAudit(false, ["只剩 segment 3 的修复项"])));
+        }
+
+        if (prompt.includes("Filesystem Isolation")) {
+          secondFallbackSawSegmentOne = true;
+          return createExecResult(JSON.stringify(createAudit(false, ["不应再次审到 segment 1"])));
+        }
+
+        assert.doesNotMatch(prompt, /【英文原文】[\s\S]*Filesystem Isolation/);
+        return createExecResult(JSON.stringify(createAudit(true)));
+      }
+
+      const currentTranslation = extractPromptSection(prompt, "【当前译文】");
+      if (currentTranslation !== null) {
+        return createExecResult(currentTranslation);
+      }
+
+      const sourceSection = extractPromptSection(prompt, "【英文原文】");
+      return createExecResult(sourceSection ?? "");
+    }
+  };
+
+  const result = await translateMarkdownArticle(source, {
+    executor,
+    formatter: async (markdown) => markdown
+  });
+
+  assert.equal(bundledAuditCount, 1);
+  assert.equal(fallbackAuditCount, 3);
+  assert.equal(secondFallbackSawSegmentOne, false);
+  assert.match(result.markdown, /Filesystem Isolation/);
+  assert.match(result.markdown, /Command Restrictions/);
+});
+
 test("translateMarkdownArticle passes segment heading hints into prompts for heading-like blocks", async () => {
   const source = [
     "# Title",
