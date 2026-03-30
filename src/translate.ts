@@ -467,7 +467,7 @@ async function translateProtectedChunk(
       );
     }
 
-    bundledAudit = await runBundledGateAudit(
+    bundledAudit = await runPostRepairGateAudit(
       draftedSegments,
       plan,
       context,
@@ -696,6 +696,21 @@ async function runBundledGateAudit(
     validateStructuralGateChecks(segmentAudit);
   }
   return bundledAudit;
+}
+
+async function runPostRepairGateAudit(
+  draftedSegments: readonly DraftedSegmentState[],
+  plan: MarkdownChunkPlan,
+  context: ChunkTranslationContext,
+  chunkPromptContext: ChunkPromptContext,
+  chunkLabel: string
+): Promise<BundledGateAudit> {
+  report(
+    context.options,
+    "audit",
+    `Chunk ${chunkPromptContext.chunkIndex}/${plan.chunks.length}${chunkLabel}: re-running per-segment hard gate audit after repair.`
+  );
+  return runFallbackSegmentAudits(draftedSegments, plan, context, chunkPromptContext, chunkLabel);
 }
 
 async function runFallbackSegmentAudits(

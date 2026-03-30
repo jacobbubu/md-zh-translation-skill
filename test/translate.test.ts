@@ -558,11 +558,7 @@ test("translateMarkdownArticle reuses a Codex thread within a segment", async ()
       ])
     ),
     createExecResult("# 标题（Title）\n\n正文", "thread-1"),
-    createExecResult(
-      wrapPerSegmentAudits("【segment 1】", [
-        { segment_index: 1, audit: createAudit(true) }
-      ])
-    ),
+    createExecResult(JSON.stringify(createAudit(true))),
     createExecResult("# 标题（Title）\n\n正文")
   ];
 
@@ -690,6 +686,79 @@ test("translateMarkdownArticle falls back to per-segment audit when bundled audi
   assert.match(result.markdown, /Filesystem Isolation/);
   assert.match(result.markdown, /Network Isolation/);
   assert.match(result.markdown, /Command Restrictions/);
+});
+
+test("translateMarkdownArticle switches to per-segment audits after a repair cycle", async () => {
+  const source = [
+    "# Title",
+    "",
+    "## Need",
+    "",
+    "Kernel level enforcement reduces prompt spam.",
+    "",
+    "Socket level interception blocks unauthorized connections.",
+    "",
+    "Sandbox mode protects the system.",
+    ""
+  ].join("\n");
+
+  let bundledAuditCount = 0;
+  let fallbackAuditCount = 0;
+  let bundledAuditAfterRepair = false;
+  let sawRepair = false;
+
+  const executor: CodexExecutor = {
+    async execute(prompt, options) {
+      if (prompt.includes("只做“风格与可读性润色”")) {
+        const currentTranslation = extractPromptSection(prompt, "【当前译文】");
+        return createExecResult(currentTranslation ?? "");
+      }
+
+      if (prompt.includes("只做“定点修复”")) {
+        sawRepair = true;
+        const currentTranslation = extractPromptSection(prompt, "【当前译文】");
+        return createExecResult(currentTranslation ?? "");
+      }
+
+      if (options.outputSchema && prompt.includes("【分段审校输入】")) {
+        bundledAuditCount += 1;
+        if (sawRepair) {
+          bundledAuditAfterRepair = true;
+        }
+        if (bundledAuditCount === 1) {
+          return createExecResult(
+            wrapPerSegmentAudits(prompt, [
+              { segment_index: 1, audit: createAudit(false, ["修复项一"]) },
+              { segment_index: 3, audit: createAudit(false, ["修复项二"]) }
+            ])
+          );
+        }
+        return createExecResult(wrapAuditForSegments(prompt, createAudit(true)));
+      }
+
+      if (options.outputSchema || prompt.includes("只返回 JSON")) {
+        fallbackAuditCount += 1;
+        return createExecResult(JSON.stringify(createAudit(true)));
+      }
+
+      const currentTranslation = extractPromptSection(prompt, "【当前译文】");
+      if (currentTranslation !== null) {
+        return createExecResult(currentTranslation);
+      }
+
+      const sourceSection = extractPromptSection(prompt, "【英文原文】");
+      return createExecResult(sourceSection ?? "");
+    }
+  };
+
+  await translateMarkdownArticle(source, {
+    executor,
+    formatter: async (markdown) => markdown
+  });
+
+  assert.equal(bundledAuditCount, 1);
+  assert.equal(bundledAuditAfterRepair, false);
+  assert.ok(fallbackAuditCount >= 1);
 });
 
 test("translateMarkdownArticle passes segment heading hints into prompts for heading-like blocks", async () => {
