@@ -19,11 +19,10 @@ import {
 } from "./markdown-protection.js";
 
 const DEFAULT_MODEL = "gpt-5.4-mini";
+const DEFAULT_POST_DRAFT_MODEL = "gpt-5.4";
 const MAX_REPAIR_CYCLES = 2;
 const DRAFT_REASONING_EFFORT = "medium";
-const AUDIT_REASONING_EFFORT = "medium";
-const REPAIR_REASONING_EFFORT = "low";
-const STYLE_REASONING_EFFORT = "low";
+const POST_DRAFT_REASONING_EFFORT = "medium";
 
 type AuditCheckKey =
   | "paragraph_match"
@@ -57,6 +56,7 @@ export type TranslateOptions = {
   cwd?: string;
   sourcePathHint?: string;
   model?: string;
+  postDraftModel?: string;
   executor?: CodexExecutor;
   formatter?: typeof formatTranslatedBody;
   onProgress?: (message: string, stage: TranslateProgress) => void;
@@ -279,7 +279,9 @@ function report(options: TranslateOptions, stage: TranslateProgress, message: st
 export async function translateMarkdownArticle(source: string, options: TranslateOptions = {}): Promise<TranslateResult> {
   const executor = options.executor ?? new DefaultCodexExecutor();
   const formatter = options.formatter ?? formatTranslatedBody;
-  const model = options.model ?? (process.env.TRANSLATION_MODEL?.trim() || DEFAULT_MODEL);
+  const draftModel = options.model ?? (process.env.TRANSLATION_MODEL?.trim() || DEFAULT_MODEL);
+  const postDraftModel =
+    options.postDraftModel ?? (process.env.TRANSLATION_POST_DRAFT_MODEL?.trim() || DEFAULT_POST_DRAFT_MODEL);
   const cwd = options.cwd ?? process.cwd();
   const sourcePathHint = options.sourcePathHint ?? "article.md";
   const { frontmatter, body } = extractFrontmatter(source);
@@ -296,7 +298,8 @@ export async function translateMarkdownArticle(source: string, options: Translat
     const chunkResult = await translateProtectedChunk(chunk, chunkPlan, {
       cwd,
       executor,
-      model,
+      draftModel,
+      postDraftModel,
       options,
       sourcePathHint,
       spanIndex,
@@ -319,7 +322,7 @@ export async function translateMarkdownArticle(source: string, options: Translat
     const markdown = reconstructMarkdown(frontmatter, formattedBody);
     return {
       markdown,
-      model,
+      model: draftModel,
       repairCyclesUsed,
       styleApplied,
       gateAudit: mergeGateAudits(gateAudits),
@@ -358,7 +361,8 @@ function mergeGateAudits(audits: readonly GateAudit[]): GateAudit {
 
 type ChunkTranslationContext = {
   executor: CodexExecutor;
-  model: string;
+  draftModel: string;
+  postDraftModel: string;
   cwd: string;
   sourcePathHint: string;
   options: TranslateOptions;
@@ -510,8 +514,8 @@ async function translateProtectedChunk(
       withChunkContext(buildStylePolishPrompt(hardPassProtectedSource, hardPassProtectedChunk), chunkStylePromptContext),
       {
         cwd: context.cwd,
-        model: context.model,
-        reasoningEffort: STYLE_REASONING_EFFORT,
+        model: context.postDraftModel,
+        reasoningEffort: POST_DRAFT_REASONING_EFFORT,
         onStderr: (stderrChunk) =>
           reportChunkProgress(context.options, "style", chunkPromptContext.chunkIndex - 1, plan, chunkLabel, stderrChunk)
       }
@@ -564,13 +568,13 @@ async function translateProtectedSegment(
   report(
     context.options,
     "draft",
-    `Chunk ${chunkPromptContext.chunkIndex}/${plan.chunks.length}${chunkLabel}: starting translation with model ${context.model}.`
+    `Chunk ${chunkPromptContext.chunkIndex}/${plan.chunks.length}${chunkLabel}: starting translation with model ${context.draftModel}.`
   );
   const draftResult = await context.executor.execute(
     withChunkContext(buildInitialPrompt(protectedSource), chunkPromptContext),
     {
       cwd: context.cwd,
-      model: context.model,
+      model: context.draftModel,
       reasoningEffort: DRAFT_REASONING_EFFORT,
       reuseSession: true,
       onStderr: (stderrChunk) =>
@@ -611,8 +615,8 @@ async function repairDraftedSegment(
     ),
     {
       cwd: context.cwd,
-      model: context.model,
-      reasoningEffort: REPAIR_REASONING_EFFORT,
+      model: context.postDraftModel,
+      reasoningEffort: POST_DRAFT_REASONING_EFFORT,
       ...(draftedSegment.threadId ? { threadId: draftedSegment.threadId } : { reuseSession: true }),
       onStderr: (stderrChunk) =>
         reportChunkProgress(
@@ -659,8 +663,8 @@ async function runBundledGateAudit(
 
   const auditResult = await context.executor.execute(prompt, {
     cwd: context.cwd,
-    model: context.model,
-    reasoningEffort: AUDIT_REASONING_EFFORT,
+    model: context.postDraftModel,
+    reasoningEffort: POST_DRAFT_REASONING_EFFORT,
     outputSchema: BUNDLED_GATE_AUDIT_SCHEMA,
     reuseSession: true,
     onStderr: (stderrChunk) =>
@@ -719,8 +723,8 @@ async function runFallbackSegmentAudits(
       ),
       {
         cwd: context.cwd,
-        model: context.model,
-        reasoningEffort: AUDIT_REASONING_EFFORT,
+        model: context.postDraftModel,
+        reasoningEffort: POST_DRAFT_REASONING_EFFORT,
         outputSchema: GATE_AUDIT_SCHEMA,
         reuseSession: true,
         onStderr: (stderrChunk) =>

@@ -586,11 +586,11 @@ test("translateMarkdownArticle reuses a Codex thread within a segment", async ()
   assert.equal(calls[1]?.reuseSession, true);
   assert.equal(calls[1]?.reasoningEffort, "medium");
   assert.equal(calls[2]?.threadId, "thread-1");
-  assert.equal(calls[2]?.reasoningEffort, "low");
+  assert.equal(calls[2]?.reasoningEffort, "medium");
   assert.ok(calls[3]?.outputSchema);
   assert.equal(calls[3]?.reuseSession, true);
   assert.equal(calls[3]?.reasoningEffort, "medium");
-  assert.equal(calls[4]?.reasoningEffort, "low");
+  assert.equal(calls[4]?.reasoningEffort, "medium");
 });
 
 test("translateMarkdownArticle runs chunk-level audit with structured output", async () => {
@@ -622,7 +622,63 @@ test("translateMarkdownArticle runs chunk-level audit with structured output", a
   assert.ok(calls[1]?.outputSchema);
   assert.equal(calls[1]?.reuseSession, true);
   assert.equal(calls[1]?.reasoningEffort, "medium");
-  assert.equal(calls[2]?.reasoningEffort, "low");
+  assert.equal(calls[2]?.reasoningEffort, "medium");
+});
+
+test("translateMarkdownArticle routes post-draft stages to gpt-5.4", async () => {
+  const source = "# Title\n\nBody";
+  const calls: Array<{ prompt: string; model: string; reasoningEffort: string | undefined }> = [];
+  let auditCallCount = 0;
+
+  const executor: CodexExecutor = {
+    async execute(prompt, options) {
+      calls.push({
+        prompt,
+        model: options.model,
+        reasoningEffort: options.reasoningEffort
+      });
+
+      if (prompt.includes("【must_fix】")) {
+        return createExecResult("# 标题（Title）\n\n正文");
+      }
+
+      if (prompt.includes("只做“风格与可读性润色”")) {
+        return createExecResult("# 标题（Title）\n\n更自然的正文");
+      }
+
+      if (options.outputSchema || prompt.includes("只返回 JSON")) {
+        auditCallCount += 1;
+        const audit = auditCallCount === 1
+          ? createAudit(false, ["标题首现术语缺少中英对照"])
+          : createAudit(true);
+        return createExecResult(wrapAuditForSegments(prompt, audit));
+      }
+
+      return createExecResult("# 标题\n\n正文");
+    }
+  };
+
+  await translateMarkdownArticle(source, {
+    executor,
+    formatter: async (markdown) => markdown
+  });
+
+  const draftCall = calls.find((call) => !call.prompt.includes("只返回 JSON") && !call.prompt.includes("【must_fix】") && !call.prompt.includes("只做“风格与可读性润色”"));
+  const auditCalls = calls.filter((call) => call.prompt.includes("只返回 JSON") || call.prompt.includes('"hard_checks"'));
+  const repairCall = calls.find((call) => call.prompt.includes("【must_fix】"));
+  const styleCall = calls.find((call) => call.prompt.includes("只做“风格与可读性润色”"));
+
+  assert.equal(draftCall?.model, "gpt-5.4-mini");
+  assert.equal(draftCall?.reasoningEffort, "medium");
+  assert.ok(auditCalls.length >= 2);
+  for (const auditCall of auditCalls) {
+    assert.equal(auditCall.model, "gpt-5.4");
+    assert.equal(auditCall.reasoningEffort, "medium");
+  }
+  assert.equal(repairCall?.model, "gpt-5.4");
+  assert.equal(repairCall?.reasoningEffort, "medium");
+  assert.equal(styleCall?.model, "gpt-5.4");
+  assert.equal(styleCall?.reasoningEffort, "medium");
 });
 
 test("translateMarkdownArticle falls back to per-segment audit when bundled audit omits segment results", async () => {
