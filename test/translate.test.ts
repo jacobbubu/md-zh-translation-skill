@@ -917,6 +917,7 @@ test("translateMarkdownArticle repeats heading-only repair guidance when must_fi
   assert.match(repairPrompt, /本次 must_fix 明确指向标题/);
   assert.match(repairPrompt, /必须直接修改以下标题文本本身/);
   assert.match(repairPrompt, /不要把标题里的首现双语修复转移到正文其他句子/);
+  assert.match(repairPrompt, /如果标题里的目标是英文产品名、工具名、项目名、模型名或 CLI 名称/);
 });
 
 test("translateMarkdownArticle repeats list-item repair guidance when must_fix targets bullet items", async () => {

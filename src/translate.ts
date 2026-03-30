@@ -669,7 +669,8 @@ function buildRepairPromptContext(
   ) {
     extraNotes.push(
       `本次 must_fix 明确指向标题。必须直接修改以下标题文本本身：${promptContext.segmentHeadings.join(" | ")}。`,
-      "不要把标题里的首现双语修复转移到正文其他句子；标题缺什么，就在标题里补什么。"
+      "不要把标题里的首现双语修复转移到正文其他句子；标题缺什么，就在标题里补什么。",
+      "如果标题里的目标是英文产品名、工具名、项目名、模型名或 CLI 名称，而常见中文主译并不稳定，修复时优先保留英文原名，并在标题本身补最小必要的中文说明或类属锚定；不要只把标题其他部分翻成中文，却让这个英文专名继续裸露未锚定。"
     );
 
     if (promptContext.segmentHeadings.some((heading) => /[/／]/.test(heading))) {
