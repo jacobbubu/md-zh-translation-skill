@@ -1036,6 +1036,62 @@ test("translateMarkdownArticle repeats list-lead-in repair guidance when must_fi
   assert.match(repairPrompt, /不要把缺失的首现双语或中文说明转移到后面的列表项里/);
 });
 
+test("translateMarkdownArticle repeats in-sentence repair guidance when must_fix targets the current sentence", async () => {
+  const source = [
+    "# Title",
+    "",
+    "## Section",
+    "",
+    "But you need to understand what kind of access your Claude Code AI agents need so that you can understand why you need the sandboxes.",
+    ""
+  ].join("\n");
+
+  const executor = new PromptAwareExecutor();
+  await translateMarkdownArticle(source, {
+    executor: {
+      async execute(prompt, options) {
+        executor.prompts.push(prompt);
+
+        if (options.outputSchema && prompt.includes("【分段审校输入】")) {
+          return createExecResult(
+            wrapPerSegmentAudits(prompt, [
+              {
+                segment_index: 1,
+                audit: createAudit(false, [
+                  "当前句“But you need to understand what kind of access your Claude Code AI agents need so that you can understand why you need the sandboxes.”中，首次出现的“sandboxes”未补中英对照；需在该处补成中文+英文首现锚定。"
+                ])
+              }
+            ])
+          );
+        }
+
+        if (options.outputSchema || prompt.includes("只返回 JSON")) {
+          return createExecResult(JSON.stringify(createAudit(true)));
+        }
+
+        const currentTranslation = extractPromptSection(prompt, "【当前译文】");
+        if (currentTranslation !== null) {
+          return createExecResult(currentTranslation);
+        }
+
+        const sourceSection = extractPromptSection(prompt, "【英文原文】");
+        return createExecResult(sourceSection ?? "");
+      }
+    },
+    formatter: async (markdown) => markdown
+  });
+
+  const repairPrompt = executor.prompts.find(
+    (item) =>
+      item.includes("【must_fix】") &&
+      item.includes("当前句“But you need to understand what kind of access your Claude Code AI agents need")
+  );
+  assert.ok(repairPrompt);
+  assert.match(repairPrompt, /本次 must_fix 明确指向当前句或该句的正文说明/);
+  assert.match(repairPrompt, /必须直接在这同一句本身补齐缺失的首现中英文对照或中文说明/);
+  assert.match(repairPrompt, /不要把修复转移到同一分段的前一句、后一句、标题、列表项或总结句里/);
+});
+
 test("translateMarkdownArticle repairs multiple must_fix items one at a time", async () => {
   const source = "# Title\n\nBody";
   const repairMustFixSections: string[] = [];

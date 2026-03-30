@@ -701,6 +701,16 @@ function buildRepairPromptContext(
     );
   }
 
+  if (
+    mustFix.some((item) => item.includes("当前句") || item.includes("该句")) &&
+    mustFix.some((item) => item.includes("首次出现") || item.includes("中英对照") || item.includes("中文说明"))
+  ) {
+    extraNotes.push(
+      "本次 must_fix 明确指向当前句或该句的正文说明。必须直接在这同一句本身补齐缺失的首现中英文对照或中文说明，不要把修复转移到同一分段的前一句、后一句、标题、列表项或总结句里。",
+      "如果目标术语、缩写、包名、命令名、产品名或概念出现在这句正文里，应在保持原句论证关系和语气的前提下就地补自然的中文锚定，不要只修同段别处。"
+    );
+  }
+
   return {
     ...promptContext,
     specialNotes: extraNotes
