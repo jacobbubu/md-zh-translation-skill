@@ -20,6 +20,7 @@ import {
 
 const DEFAULT_MODEL = "gpt-5.4-mini";
 const MAX_REPAIR_CYCLES = 2;
+const MAX_MUST_FIX_PER_REPAIR_CALL = 1;
 const DRAFT_REASONING_EFFORT = "medium";
 const AUDIT_REASONING_EFFORT = "medium";
 const REPAIR_REASONING_EFFORT = "low";
@@ -599,39 +600,56 @@ async function repairDraftedSegment(
   context: ChunkTranslationContext,
   chunkLabel: string
 ): Promise<void> {
-  const repairPromptContext = buildRepairPromptContext(draftedSegment.promptContext, mustFix);
-  report(
-    context.options,
-    "repair",
-    `Chunk ${draftedSegment.promptContext.chunkIndex}/${plan.chunks.length}${chunkLabel}, segment ${draftedSegment.segment.index + 1}: repairing failed segment.`
-  );
-  const repairResult = await context.executor.execute(
-    withChunkContext(
-      buildRepairPrompt(draftedSegment.protectedSource, draftedSegment.protectedBody, mustFix),
-      repairPromptContext
-    ),
-    {
-      cwd: context.cwd,
-      model: context.model,
-      reasoningEffort: REPAIR_REASONING_EFFORT,
-      ...(draftedSegment.threadId ? { threadId: draftedSegment.threadId } : { reuseSession: true }),
-      onStderr: (stderrChunk) =>
-        reportChunkProgress(
-          context.options,
-          "repair",
-          draftedSegment.promptContext.chunkIndex - 1,
-          plan,
-          `${chunkLabel}, segment ${draftedSegment.segment.index + 1}`,
-          stderrChunk
-        )
-    }
-  );
+  const mustFixBatches = splitMustFixBatches(mustFix, MAX_MUST_FIX_PER_REPAIR_CALL);
 
-  if (repairResult.threadId) {
-    draftedSegment.threadId = repairResult.threadId;
+  for (const [batchIndex, mustFixBatch] of mustFixBatches.entries()) {
+    const repairPromptContext = buildRepairPromptContext(draftedSegment.promptContext, mustFixBatch);
+    const batchSuffix =
+      mustFixBatches.length > 1 ? `，修复批次 ${batchIndex + 1}/${mustFixBatches.length}` : "";
+    report(
+      context.options,
+      "repair",
+      `Chunk ${draftedSegment.promptContext.chunkIndex}/${plan.chunks.length}${chunkLabel}, segment ${draftedSegment.segment.index + 1}: repairing failed segment${batchSuffix}.`
+    );
+    const repairResult = await context.executor.execute(
+      withChunkContext(
+        buildRepairPrompt(draftedSegment.protectedSource, draftedSegment.protectedBody, mustFixBatch),
+        repairPromptContext
+      ),
+      {
+        cwd: context.cwd,
+        model: context.model,
+        reasoningEffort: REPAIR_REASONING_EFFORT,
+        ...(draftedSegment.threadId ? { threadId: draftedSegment.threadId } : { reuseSession: true }),
+        onStderr: (stderrChunk) =>
+          reportChunkProgress(
+            context.options,
+            "repair",
+            draftedSegment.promptContext.chunkIndex - 1,
+            plan,
+            `${chunkLabel}, segment ${draftedSegment.segment.index + 1}${batchSuffix}`,
+            stderrChunk
+          )
+      }
+    );
+
+    if (repairResult.threadId) {
+      draftedSegment.threadId = repairResult.threadId;
+    }
+    draftedSegment.protectedBody = reprotectMarkdownSpans(repairResult.text, draftedSegment.spans);
+    draftedSegment.restoredBody = restoreMarkdownSpans(draftedSegment.protectedBody, draftedSegment.spans);
   }
-  draftedSegment.protectedBody = reprotectMarkdownSpans(repairResult.text, draftedSegment.spans);
-  draftedSegment.restoredBody = restoreMarkdownSpans(draftedSegment.protectedBody, draftedSegment.spans);
+}
+
+function splitMustFixBatches(mustFix: readonly string[], batchSize: number): string[][] {
+  const normalizedBatchSize = Math.max(1, batchSize);
+  const batches: string[][] = [];
+
+  for (let index = 0; index < mustFix.length; index += normalizedBatchSize) {
+    batches.push(mustFix.slice(index, index + normalizedBatchSize));
+  }
+
+  return batches;
 }
 
 function buildRepairPromptContext(
@@ -647,6 +665,14 @@ function buildRepairPromptContext(
       `本次 must_fix 明确指向标题。必须直接修改以下标题文本本身：${promptContext.segmentHeadings.join(" | ")}。`,
       "不要把标题里的首现双语修复转移到正文其他句子；标题缺什么，就在标题里补什么。"
     );
+
+    if (promptContext.segmentHeadings.some((heading) => /[/／]/.test(heading))) {
+      extraNotes.push(
+        "如果标题里有用 / 连接的并列平台名、系统名、工具名或范围限定语，修复时必须在标题本身完整保留这组并列结构，不要删掉任何一侧，也不要把其中一侧挪到正文。",
+        "这类并列标签若需要补首现双语，应在标题里为整组并列范围补自然的中文说明或锚定，不要只补其中一个英文项，也不要把说明转移到标题后面的段落。",
+        "对 `A/B` 这类并列英文标签，优先保留整组英文原名，再在整组后面补一个整体中文说明词，例如“平台”“系统”“工具”或等价表达；不要把它改成英文重复括注，也不要拆成两处分别补。"
+      );
+    }
   }
 
   if (

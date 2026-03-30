@@ -918,17 +918,119 @@ test("translateMarkdownArticle repeats list-item repair guidance when must_fix t
     formatter: async (markdown) => markdown
   });
 
+  const repairPrompts = executor.prompts.filter((item) => item.includes("【must_fix】"));
+  assert.ok(repairPrompts.length >= 2);
+  for (const repairPrompt of repairPrompts) {
+    assert.match(repairPrompt, /当前分段包含列表项或项目符号/);
+    assert.match(repairPrompt, /本次 must_fix 明确指向列表项或项目符号/);
+    assert.match(repairPrompt, /必须直接修改对应的列表项文本本身/);
+    assert.match(repairPrompt, /要逐条在各自的列表项里补齐/);
+  }
+});
+
+test("translateMarkdownArticle repairs multiple must_fix items one at a time", async () => {
+  const source = "# Title\n\nBody";
+  const repairMustFixSections: string[] = [];
+  let auditCallCount = 0;
+
+  const executor: CodexExecutor = {
+    async execute(prompt, options) {
+      if (prompt.includes("【must_fix】")) {
+        const mustFixSection = extractPromptSection(prompt, "【must_fix】") ?? "";
+        repairMustFixSections.push(mustFixSection.trim());
+        return createExecResult("# 标题（Title）\n\n正文");
+      }
+
+      if (prompt.includes("只做“风格与可读性润色”")) {
+        return createExecResult("# 标题（Title）\n\n更自然的正文");
+      }
+
+      if (options.outputSchema && prompt.includes("【分段审校输入】")) {
+        auditCallCount += 1;
+        const audit = auditCallCount === 1
+          ? createAudit(false, ["修复项一", "修复项二", "修复项三"])
+          : createAudit(true);
+        return createExecResult(
+          wrapPerSegmentAudits(prompt, [{ segment_index: 1, audit }])
+        );
+      }
+
+      if (options.outputSchema || prompt.includes("只返回 JSON")) {
+        return createExecResult(JSON.stringify(createAudit(true)));
+      }
+
+      return createExecResult("# 标题\n\n正文");
+    }
+  };
+
+  await translateMarkdownArticle(source, {
+    executor,
+    formatter: async (markdown) => markdown
+  });
+
+  assert.deepEqual(repairMustFixSections, [
+    "- 修复项一",
+    "- 修复项二",
+    "- 修复项三"
+  ]);
+});
+
+test("translateMarkdownArticle repeats slash-qualified heading repair guidance when must_fix targets a heading", async () => {
+  const source = [
+    "# Title",
+    "",
+    "**Expected behavior (macOS/Linux):**",
+    "",
+    "Body paragraph.",
+    ""
+  ].join("\n");
+
+  const executor = new PromptAwareExecutor();
+  await translateMarkdownArticle(source, {
+    executor: {
+      async execute(prompt, options) {
+        executor.prompts.push(prompt);
+
+        if (options.outputSchema && prompt.includes("【分段审校输入】")) {
+          return createExecResult(
+            wrapPerSegmentAudits(prompt, [
+              {
+                segment_index: 1,
+                audit: createAudit(false, [
+                  "标题“Expected behavior (macOS/Linux)”中 macOS/Linux 首现缺少中文对照，需在标题内补齐对应说明。"
+                ])
+              }
+            ])
+          );
+        }
+
+        if (options.outputSchema || prompt.includes("只返回 JSON")) {
+          return createExecResult(JSON.stringify(createAudit(true)));
+        }
+
+        const currentTranslation = extractPromptSection(prompt, "【当前译文】");
+        if (currentTranslation !== null) {
+          return createExecResult(currentTranslation);
+        }
+
+        const sourceSection = extractPromptSection(prompt, "【英文原文】");
+        return createExecResult(sourceSection ?? "");
+      }
+    },
+    formatter: async (markdown) => markdown
+  });
+
   const repairPrompt = executor.prompts.find(
     (item) =>
       item.includes("【must_fix】") &&
-      item.includes("在“预先批准的目标”条目中") &&
-      item.includes("在“自动允许的命令”条目中")
+      item.includes("标题“Expected behavior (macOS/Linux)”中 macOS/Linux 首现缺少中文对照")
   );
   assert.ok(repairPrompt);
-  assert.match(repairPrompt, /当前分段包含列表项或项目符号/);
-  assert.match(repairPrompt, /本次 must_fix 明确指向列表项或项目符号/);
-  assert.match(repairPrompt, /必须直接修改对应的列表项文本本身/);
-  assert.match(repairPrompt, /要逐条在各自的列表项里补齐/);
+  assert.match(repairPrompt, /本次 must_fix 明确指向标题/);
+  assert.match(repairPrompt, /如果标题里有用 \/ 连接的并列平台名/);
+  assert.match(repairPrompt, /必须在标题本身完整保留这组并列结构/);
+  assert.match(repairPrompt, /应在标题里为整组并列范围补自然的中文说明或锚定/);
+  assert.match(repairPrompt, /优先保留整组英文原名，再在整组后面补一个整体中文说明词/);
 });
 
 test("translateMarkdownArticle adds attribution guidance for caption-like segments", async () => {
