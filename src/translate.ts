@@ -21,6 +21,7 @@ import {
 const DEFAULT_MODEL = "gpt-5.4-mini";
 const DEFAULT_POST_DRAFT_MODEL = "gpt-5.4";
 const MAX_REPAIR_CYCLES = 2;
+const MAX_MUST_FIX_PER_REPAIR_CALL = 1;
 const DRAFT_REASONING_EFFORT = "medium";
 const POST_DRAFT_REASONING_EFFORT = "medium";
 
@@ -603,38 +604,55 @@ async function repairDraftedSegment(
   context: ChunkTranslationContext,
   chunkLabel: string
 ): Promise<void> {
-  report(
-    context.options,
-    "repair",
-    `Chunk ${draftedSegment.promptContext.chunkIndex}/${plan.chunks.length}${chunkLabel}, segment ${draftedSegment.segment.index + 1}: repairing failed segment.`
-  );
-  const repairResult = await context.executor.execute(
-    withChunkContext(
-      buildRepairPrompt(draftedSegment.protectedSource, draftedSegment.protectedBody, mustFix),
-      draftedSegment.promptContext
-    ),
-    {
-      cwd: context.cwd,
-      model: context.postDraftModel,
-      reasoningEffort: POST_DRAFT_REASONING_EFFORT,
-      ...(draftedSegment.threadId ? { threadId: draftedSegment.threadId } : { reuseSession: true }),
-      onStderr: (stderrChunk) =>
-        reportChunkProgress(
-          context.options,
-          "repair",
-          draftedSegment.promptContext.chunkIndex - 1,
-          plan,
-          `${chunkLabel}, segment ${draftedSegment.segment.index + 1}`,
-          stderrChunk
-        )
-    }
-  );
+  const mustFixBatches = splitMustFixBatches(mustFix, MAX_MUST_FIX_PER_REPAIR_CALL);
 
-  if (repairResult.threadId) {
-    draftedSegment.threadId = repairResult.threadId;
+  for (const [batchIndex, mustFixBatch] of mustFixBatches.entries()) {
+    const batchSuffix =
+      mustFixBatches.length > 1 ? `，修复批次 ${batchIndex + 1}/${mustFixBatches.length}` : "";
+    report(
+      context.options,
+      "repair",
+      `Chunk ${draftedSegment.promptContext.chunkIndex}/${plan.chunks.length}${chunkLabel}, segment ${draftedSegment.segment.index + 1}: repairing failed segment${batchSuffix}.`
+    );
+    const repairResult = await context.executor.execute(
+      withChunkContext(
+        buildRepairPrompt(draftedSegment.protectedSource, draftedSegment.protectedBody, mustFixBatch),
+        draftedSegment.promptContext
+      ),
+      {
+        cwd: context.cwd,
+        model: context.postDraftModel,
+        reasoningEffort: POST_DRAFT_REASONING_EFFORT,
+        ...(draftedSegment.threadId ? { threadId: draftedSegment.threadId } : { reuseSession: true }),
+        onStderr: (stderrChunk) =>
+          reportChunkProgress(
+            context.options,
+            "repair",
+            draftedSegment.promptContext.chunkIndex - 1,
+            plan,
+            `${chunkLabel}, segment ${draftedSegment.segment.index + 1}${batchSuffix}`,
+            stderrChunk
+          )
+      }
+    );
+
+    if (repairResult.threadId) {
+      draftedSegment.threadId = repairResult.threadId;
+    }
+    draftedSegment.protectedBody = reprotectMarkdownSpans(repairResult.text, draftedSegment.spans);
+    draftedSegment.restoredBody = restoreMarkdownSpans(draftedSegment.protectedBody, draftedSegment.spans);
   }
-  draftedSegment.protectedBody = reprotectMarkdownSpans(repairResult.text, draftedSegment.spans);
-  draftedSegment.restoredBody = restoreMarkdownSpans(draftedSegment.protectedBody, draftedSegment.spans);
+}
+
+function splitMustFixBatches(mustFix: readonly string[], batchSize: number): string[][] {
+  const normalizedBatchSize = Math.max(1, batchSize);
+  const batches: string[][] = [];
+
+  for (let index = 0; index < mustFix.length; index += normalizedBatchSize) {
+    batches.push(mustFix.slice(index, index + normalizedBatchSize));
+  }
+
+  return batches;
 }
 
 async function runBundledGateAudit(

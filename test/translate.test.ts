@@ -681,6 +681,47 @@ test("translateMarkdownArticle routes post-draft stages to gpt-5.4", async () =>
   assert.equal(styleCall?.reasoningEffort, "medium");
 });
 
+test("translateMarkdownArticle batches multiple must_fix items into separate repair calls", async () => {
+  const source = "# Title\n\nBody";
+  const repairMustFixSections: string[] = [];
+  let auditCallCount = 0;
+
+  const executor: CodexExecutor = {
+    async execute(prompt, options) {
+      if (prompt.includes("【must_fix】")) {
+        const mustFixSection = extractPromptSection(prompt, "【must_fix】") ?? "";
+        repairMustFixSections.push(mustFixSection.trim());
+        return createExecResult("# 标题（Title）\n\n正文");
+      }
+
+      if (prompt.includes("只做“风格与可读性润色”")) {
+        return createExecResult("# 标题（Title）\n\n更自然的正文");
+      }
+
+      if (options.outputSchema || prompt.includes("只返回 JSON")) {
+        auditCallCount += 1;
+        const audit = auditCallCount === 1
+          ? createAudit(false, ["修复项一", "修复项二", "修复项三"])
+          : createAudit(true);
+        return createExecResult(wrapAuditForSegments(prompt, audit));
+      }
+
+      return createExecResult("# 标题\n\n正文");
+    }
+  };
+
+  await translateMarkdownArticle(source, {
+    executor,
+    formatter: async (markdown) => markdown
+  });
+
+  assert.deepEqual(repairMustFixSections, [
+    "- 修复项一",
+    "- 修复项二",
+    "- 修复项三"
+  ]);
+});
+
 test("translateMarkdownArticle falls back to per-segment audit when bundled audit omits segment results", async () => {
   const source = [
     "# Title",
