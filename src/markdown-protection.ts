@@ -383,7 +383,10 @@ function reprotectExpandedProtectedSpan(
   switch (span.kind) {
     case "link_destination":
     case "image_destination":
-      return replaceFirstLiteral(output, `](${span.raw})`, `](${span.id})`);
+      return (
+        replaceFirstLiteral(output, `](${span.raw})`, `](${span.id})`) ??
+        replaceFirstLiteral(output, span.raw, span.id)
+      );
     case "autolink":
       return replaceFirstLiteral(output, `<${span.raw}>`, `<${span.id}>`);
     case "html_attribute":

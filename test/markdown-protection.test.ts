@@ -133,6 +133,21 @@ test("reprotectMarkdownSpans folds expanded URL-like spans back into placeholder
   assert.equal(reprotected, protectedMarkdown.protectedBody);
 });
 
+test("reprotectMarkdownSpans folds expanded link destinations back even when destination formatting changes", () => {
+  const source =
+    "This is enforced by Linux [bubblewrap ](https://example.com/bubblewrap)or [macOS](https://example.com/macos)* Seatbel*t.\n";
+
+  const protectedMarkdown = protectMarkdownSpans(source);
+  const expanded =
+    "这由 Linux [bubblewrap（安全隔离组件）]( https://example.com/bubblewrap \"bubblewrap\" ) 或 [macOS（苹果操作系统）](https://example.com/macos ) *Seatbelt（安全框架）* 强制执行。\n";
+
+  const reprotected = reprotectMarkdownSpans(expanded, protectedMarkdown.spans);
+
+  assert.match(reprotected, /\[bubblewrap（安全隔离组件）]\( @@MDZH_LINK_DESTINATION_0001@@ "bubblewrap" \)/);
+  assert.match(reprotected, /\[macOS（苹果操作系统）]\(@@MDZH_LINK_DESTINATION_0002@@ \)/);
+  assert.equal(restoreMarkdownSpans(reprotected, protectedMarkdown.spans), expanded);
+});
+
 test("restoreMarkdownSpans still rejects code blocks that lost their placeholder", () => {
   const source = [
     "```ts",

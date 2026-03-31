@@ -753,6 +753,52 @@ test("translateMarkdownArticle canonicalizes expanded URL spans before chunk-lev
   assert.match(result.markdown, /See \[guide\]\(https:\/\/example\.com\/guide\)\.\n$/);
 });
 
+test("translateMarkdownArticle canonicalizes expanded URL spans before chunk-level style polish even when draft changes destination formatting", async () => {
+  const source = [
+    "## How Sandbox Mode Changes Autonomous Coding",
+    "",
+    "This is not Claude code by default, but it’s isolation enforced by Linux [bubblewrap ](https://example.com/bubblewrap)or [macOS](https://example.com/macos)* Seatbel*t — the same security primitives that protect containers and system services.",
+    ""
+  ].join("\n");
+
+  class DraftDestinationFormattingExecutor implements CodexExecutor {
+    readonly prompts: string[] = [];
+
+    async execute(prompt: string, options: CodexExecOptions): Promise<CodexExecResult> {
+      this.prompts.push(prompt);
+
+      if (options.outputSchema || prompt.includes('"hard_checks"') || prompt.includes("只返回 JSON")) {
+        return createExecResult(wrapAuditForSegments(prompt, createAudit(true)));
+      }
+
+      if (prompt.includes("只做“风格与可读性润色”")) {
+        assert.match(prompt, /\[bubblewrap（安全隔离组件）]\( @@MDZH_LINK_DESTINATION_\d{4,}@@ "bubblewrap" \)/);
+        assert.match(prompt, /\[macOS（苹果操作系统）]\(@@MDZH_LINK_DESTINATION_\d{4,}@@ \)/);
+        assert.doesNotMatch(prompt, /https:\/\/example\.com\/bubblewrap/);
+        assert.doesNotMatch(prompt, /https:\/\/example\.com\/macos/);
+        return createExecResult(extractPromptSection(prompt, "【当前译文】") ?? "");
+      }
+
+      return createExecResult(
+        [
+          "## 沙箱模式（Sandbox Mode）如何改变自主编码（Autonomous Coding）",
+          "",
+          "这并非 Claude Code 的默认行为，而是由 Linux [bubblewrap（安全隔离组件）]( https://example.com/bubblewrap \"bubblewrap\" ) 或 [macOS（苹果操作系统）](https://example.com/macos ) *Seatbelt（安全框架）* 强制执行的隔离机制——这正是用于保护容器和系统服务的同类安全基元。",
+          ""
+        ].join("\n")
+      );
+    }
+  }
+
+  const result = await translateMarkdownArticle(source, {
+    executor: new DraftDestinationFormattingExecutor(),
+    formatter: async (markdown) => markdown
+  });
+
+  assert.match(result.markdown, /\[bubblewrap（安全隔离组件）]\( https:\/\/example\.com\/bubblewrap "bubblewrap" \)/);
+  assert.match(result.markdown, /\[macOS（苹果操作系统）]\(https:\/\/example\.com\/macos \)/);
+});
+
 test("translateMarkdownArticle restores style-polish output that expands markdown links with protected destinations", async () => {
   const source = [
     "# Docs",
