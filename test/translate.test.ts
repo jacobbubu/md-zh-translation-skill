@@ -1459,6 +1459,63 @@ test("translateMarkdownArticle repeats explicit English target guidance when mus
   assert.match(repairPrompt, /必须在对应的标题、当前句、列表项或被点名位置本身保留这个英文原名/);
 });
 
+test("translateMarkdownArticle repeats blockquote-specific repair guidance when must_fix targets a quote segment", async () => {
+  const source = [
+    "# Title",
+    "",
+    "> System permissions, by design, don’t distinguish between these scenarios. The Sandbox works by differentiating between these two cases.",
+    "",
+    "## How Sandbox Mode Changes Autonomous Coding",
+    ""
+  ].join("\n");
+
+  const executor = new PromptAwareExecutor();
+  await translateMarkdownArticle(source, {
+    executor: {
+      async execute(prompt, options) {
+        executor.prompts.push(prompt);
+
+        if (options.outputSchema && prompt.includes("【分段审校输入】")) {
+          return createExecResult(
+            wrapPerSegmentAudits(prompt, [
+              {
+                segment_index: 1,
+                audit: createAudit(false, [
+                  "位置：引用段“沙箱通过将这两类情况区分开来发挥作用”。问题：核心术语 Sandbox 在全文本块首次出现时未完成中英文对照。修复目标：在该引用段中的首个“沙箱”处直接补齐自然的中英文对应。"
+                ])
+              }
+            ])
+          );
+        }
+
+        if (options.outputSchema || prompt.includes("只返回 JSON")) {
+          return createExecResult(JSON.stringify(createAudit(true)));
+        }
+
+        const currentTranslation = extractPromptSection(prompt, "【当前译文】");
+        if (currentTranslation !== null) {
+          return createExecResult(currentTranslation);
+        }
+
+        const sourceSection = extractPromptSection(prompt, "【英文原文】");
+        return createExecResult(sourceSection ?? "");
+      }
+    },
+    formatter: async (markdown) => markdown
+  });
+
+  const repairPrompt = executor.prompts.find(
+    (item) =>
+      item.includes("【must_fix】") &&
+      item.includes("位置：引用段“沙箱通过将这两类情况区分开来发挥作用”")
+  );
+  assert.ok(repairPrompt);
+  assert.match(repairPrompt, /当前分段包含引用段落或 `>` 引用句/);
+  assert.match(repairPrompt, /本次 must_fix 明确指向引用段中的句子/);
+  assert.match(repairPrompt, /必须直接在对应引用句本身补齐缺失的首现中英文对照或中文说明/);
+  assert.match(repairPrompt, /不要把英文锚点延后到后文标题或下一段第一次出现的位置/);
+});
+
 test("translateMarkdownArticle repairs multiple must_fix items one at a time", async () => {
   const source = "# Title\n\nBody";
   const repairMustFixSections: string[] = [];

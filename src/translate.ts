@@ -794,6 +794,17 @@ function buildRepairPromptContext(
     );
   }
 
+  if (
+    promptContext.specialNotes.some((item) => item.includes("当前分段包含引用段落")) &&
+    mustFix.some((item) => item.includes("引用段")) &&
+    mustFix.some((item) => item.includes("首次出现") || item.includes("中英文") || item.includes("中英对照"))
+  ) {
+    extraNotes.push(
+      "本次 must_fix 明确指向引用段中的句子。必须直接在对应引用句本身补齐缺失的首现中英文对照或中文说明，不要把锚定转移到引用外的标题、正文、列表项或后续小节里。",
+      "如果 must_fix 点名了引用段中的英文术语、机制名、产品名或概念，例如 Sandbox、Prompt injection、Supply chain attacks 等，修复时必须在该引用句里的对应中文词处就地补齐英文原名；不要把英文锚点延后到后文标题或下一段第一次出现的位置。"
+    );
+  }
+
   if (explicitEnglishTargets.length > 0) {
     extraNotes.push(
       `本次 must_fix 明确点名了这些英文目标：${explicitEnglishTargets.join(" / ")}。`,
@@ -1285,6 +1296,13 @@ function extractSegmentSpecialNotes(source: string): string[] {
     );
   }
 
+  if (containsBlockquoteBlock(source)) {
+    notes.push(
+      "当前分段包含引用段落或 `>` 引用句。若引用段中的术语、产品名、机制名或其他关键专名需要补首现中英文对照，必须直接在对应引用句本身补齐，不要把修复转移到引用前后的正文、标题或后续小节里。",
+      "修复引用句时，应保留引用结构和原句判断关系，只在引用句内部补最小必要的英文锚点或中文说明；不要把被点名的英文术语延后到后文标题、列表项或总结句。"
+    );
+  }
+
   if (containsTranslatableMarkdownStructure(source)) {
     notes.push(
       "当前分段包含可翻译的 Markdown 强调结构或命令/flag 写法。翻译时必须保留等价结构：原文中的 **加粗**、*斜体* 等强调，不得无故去掉；像 --dangerously-skip-permissions 这类命令参数或 flag，应保留原始写法，不要改成代码块、标题、列表标签或其他 Markdown 结构。",
@@ -1354,6 +1372,14 @@ function containsListLeadInBlock(source: string): boolean {
   }
 
   return false;
+}
+
+function containsBlockquoteBlock(source: string): boolean {
+  return splitRawBlocks(source).some((block) =>
+    block.content
+      .split(/\r?\n/)
+      .some((line) => line.trimStart().startsWith(">"))
+  );
 }
 
 function isToolNameExplanationBlock(content: string): boolean {
