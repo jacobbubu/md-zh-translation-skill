@@ -457,6 +457,49 @@ test("translateMarkdownArticle falls back to the hard-pass translation when styl
   );
 });
 
+test("translateMarkdownArticle falls back to the hard-pass translation when style polish says GitLab project info is missing", async () => {
+  const source = [
+    "# Docs",
+    "",
+    "Autonomous coding agents need file access.",
+    ""
+  ].join("\n");
+
+  const passingAudit = createAudit(true);
+  const progress: string[] = [];
+
+  class MissingProjectOnlyStyleExecutor implements CodexExecutor {
+    async execute(prompt: string, options: CodexExecOptions): Promise<CodexExecResult> {
+      if (options.outputSchema || prompt.includes('"hard_checks"') || prompt.includes("只返回 JSON")) {
+        return createExecResult(wrapAuditForSegments(prompt, passingAudit));
+      }
+
+      const current = extractPromptSection(prompt, "【当前译文】") ?? extractPromptSection(prompt, "【英文原文】") ?? "";
+      if (prompt.includes("只做“风格与可读性润色”")) {
+        return createExecResult(
+          "缺少 GitLab 项目信息，不能按仓库规则继续处理。请提供对应项目链接；如果当前确实无法创建或访问项目，请明确回复 `NO_REPO`。"
+        );
+      }
+
+      return createExecResult(current);
+    }
+  }
+
+  const result = await translateMarkdownArticle(source, {
+    executor: new MissingProjectOnlyStyleExecutor(),
+    formatter: async (markdown) => markdown,
+    onProgress: (message) => progress.push(message)
+  });
+
+  assert.equal(result.styleApplied, false);
+  assert.match(result.markdown, /Autonomous coding agents need file access/);
+  assert.ok(
+    progress.some((message) =>
+      message.includes("style polish returned task-management or refusal text")
+    )
+  );
+});
+
 test("translateMarkdownArticle strips added inline code from plain path list items", async () => {
   const source = [
     "## Credential Theft",

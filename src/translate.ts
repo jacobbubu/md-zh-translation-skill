@@ -585,13 +585,17 @@ function looksLikeMetaTaskResponse(text: string): boolean {
   const patterns = [
     /当前任务未提供.*issue/i,
     /缺少\s*GitLab\s*项目与\s*issue\s*信息/i,
+    /缺少\s*GitLab\s*项目(?:信息)?/i,
     /任务必须先绑定.*issue/i,
     /按仓库内.*AGENTS\.md.*规则/i,
     /请先提供.*issue/i,
     /提供对应的项目链接和 issue 编号/i,
     /请先提供.*项目链接/i,
+    /请提供对应项目链接/i,
     /无法访问\s*GitLab/i,
+    /无法创建或访问项目/i,
     /回复精确短语\s*`?NO_REPO`?/i,
+    /请明确回复\s*`?NO_REPO`?/i,
     /未提供所属\s*GitLab\s*项目/i,
     /Project override active/i
   ];
