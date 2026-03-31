@@ -328,6 +328,92 @@ test("translateMarkdownArticle falls back to the hard-pass translation when styl
   );
 });
 
+test("translateMarkdownArticle falls back to the hard-pass translation when style polish returns meta task text", async () => {
+  const source = [
+    "# Docs",
+    "",
+    "Prompt injection attacks can be blocked.",
+    ""
+  ].join("\n");
+
+  const passingAudit = createAudit(true);
+  const progress: string[] = [];
+
+  class MetaStyleExecutor implements CodexExecutor {
+    async execute(prompt: string, options: CodexExecOptions): Promise<CodexExecResult> {
+      if (options.outputSchema || prompt.includes('"hard_checks"') || prompt.includes("只返回 JSON")) {
+        return createExecResult(wrapAuditForSegments(prompt, passingAudit));
+      }
+
+      const current = extractPromptSection(prompt, "【当前译文】") ?? extractPromptSection(prompt, "【英文原文】") ?? "";
+      if (prompt.includes("只做“风格与可读性润色”")) {
+        return createExecResult(
+          "无法继续处理：当前任务未提供所属 GitLab 项目和 issue。\n\n请先提供项目链接和 issue 编号。"
+        );
+      }
+
+      return createExecResult(current);
+    }
+  }
+
+  const result = await translateMarkdownArticle(source, {
+    executor: new MetaStyleExecutor(),
+    formatter: async (markdown) => markdown,
+    onProgress: (message) => progress.push(message)
+  });
+
+  assert.equal(result.styleApplied, false);
+  assert.match(result.markdown, /Prompt injection attacks can be blocked/);
+  assert.ok(
+    progress.some((message) =>
+      message.includes("style polish returned task-management or refusal text")
+    )
+  );
+});
+
+test("translateMarkdownArticle falls back to the hard-pass translation when style polish returns AGENTS/NO_REPO guidance", async () => {
+  const source = [
+    "# Docs",
+    "",
+    "Supply chain attacks can be blocked.",
+    ""
+  ].join("\n");
+
+  const passingAudit = createAudit(true);
+  const progress: string[] = [];
+
+  class AgentsRuleStyleExecutor implements CodexExecutor {
+    async execute(prompt: string, options: CodexExecOptions): Promise<CodexExecResult> {
+      if (options.outputSchema || prompt.includes('"hard_checks"') || prompt.includes("只返回 JSON")) {
+        return createExecResult(wrapAuditForSegments(prompt, passingAudit));
+      }
+
+      const current = extractPromptSection(prompt, "【当前译文】") ?? extractPromptSection(prompt, "【英文原文】") ?? "";
+      if (prompt.includes("只做“风格与可读性润色”")) {
+        return createExecResult(
+          "当前无法继续处理这段润色，因为按仓库内 [AGENTS.md](/tmp/AGENTS.md) 规则，任务必须先绑定项目和 issue；而我现在无法访问 GitLab 来确认或创建记录。\n\n如果你要我直接在本地继续，请回复精确短语：`NO_REPO`。"
+        );
+      }
+
+      return createExecResult(current);
+    }
+  }
+
+  const result = await translateMarkdownArticle(source, {
+    executor: new AgentsRuleStyleExecutor(),
+    formatter: async (markdown) => markdown,
+    onProgress: (message) => progress.push(message)
+  });
+
+  assert.equal(result.styleApplied, false);
+  assert.match(result.markdown, /Supply chain attacks can be blocked/);
+  assert.ok(
+    progress.some((message) =>
+      message.includes("style polish returned task-management or refusal text")
+    )
+  );
+});
+
 test("translateMarkdownArticle runs the hidden pipeline chunk by chunk for long Markdown sections", async () => {
   const source = [
     "# Title",

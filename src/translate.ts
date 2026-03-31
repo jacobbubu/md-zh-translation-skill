@@ -541,7 +541,16 @@ async function translateProtectedChunk(
 
     try {
       restoredChunkBody = restoreMarkdownSpans(styleResult.text, chunkSpans);
-      styleApplied = true;
+      if (looksLikeMetaTaskResponse(restoredChunkBody)) {
+        report(
+          context.options,
+          "style",
+          `Chunk ${chunkPromptContext.chunkIndex}/${plan.chunks.length}${chunkLabel}: style polish returned task-management or refusal text; falling back to the hard-pass translation.`
+        );
+        restoredChunkBody = hardPassBody;
+      } else {
+        styleApplied = true;
+      }
     } catch (error) {
       if (!(error instanceof HardGateError)) {
         throw error;
@@ -561,6 +570,28 @@ async function translateProtectedChunk(
     gateAudit: mergeGateAudits(bundledAudit.segments),
     nextLocalSpanIndex
   };
+}
+
+function looksLikeMetaTaskResponse(text: string): boolean {
+  const trimmed = text.trim();
+  if (!trimmed) {
+    return false;
+  }
+
+  const patterns = [
+    /当前任务未提供.*issue/i,
+    /任务必须先绑定.*issue/i,
+    /按仓库内.*AGENTS\.md.*规则/i,
+    /请先提供.*issue/i,
+    /提供对应的项目链接和 issue 编号/i,
+    /请先提供.*项目链接/i,
+    /无法访问\s*GitLab/i,
+    /回复精确短语\s*`?NO_REPO`?/i,
+    /未提供所属\s*GitLab\s*项目/i,
+    /Project override active/i
+  ];
+
+  return patterns.some((pattern) => pattern.test(trimmed));
 }
 
 type ProtectedChunkSegment = {
