@@ -10,6 +10,7 @@ import {
   buildStylePolishPrompt
 } from "./internal/prompts/scheme-h.js";
 import { DefaultCodexExecutor, type CodexExecutor } from "./codex-exec.js";
+import { normalizeSegmentAnchorText } from "./anchor-normalization.js";
 import { FormattingError, HardGateError } from "./errors.js";
 import { formatTranslatedBody, reconstructMarkdown } from "./format.js";
 import { planMarkdownChunks, type MarkdownChunk, type MarkdownChunkPlan } from "./markdown-chunks.js";
@@ -1077,7 +1078,10 @@ async function translateProtectedSegment(
     }
   );
   threadId = draftResult.threadId;
-  const normalizedDraftText = stripAddedInlineCodeFromPlainPaths(protectedSource, draftResult.text);
+  const normalizedDraftText = normalizeSegmentAnchorText(
+    stripAddedInlineCodeFromPlainPaths(protectedSource, draftResult.text),
+    chunkPromptContext.stateSlice
+  );
   const canonicalProtectedBody = reprotectMarkdownSpans(normalizedDraftText, combinedSpans);
   const restoredBody = restoreMarkdownSpans(canonicalProtectedBody, combinedSpans);
   applySegmentDraft(context.state, segmentId, {
@@ -1146,9 +1150,9 @@ async function repairDraftedSegment(
     if (repairResult.threadId) {
       draftedSegment.threadId = repairResult.threadId;
     }
-    const normalizedRepairText = stripAddedInlineCodeFromPlainPaths(
-      draftedSegment.protectedSource,
-      repairResult.text
+    const normalizedRepairText = normalizeSegmentAnchorText(
+      stripAddedInlineCodeFromPlainPaths(draftedSegment.protectedSource, repairResult.text),
+      buildSegmentTaskSlice(context.state, context.chunkId, draftedSegment.segmentId)
     );
     draftedSegment.protectedBody = reprotectMarkdownSpans(normalizedRepairText, draftedSegment.spans);
     draftedSegment.restoredBody = restoreMarkdownSpans(draftedSegment.protectedBody, draftedSegment.spans);

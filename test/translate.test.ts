@@ -380,6 +380,51 @@ test("translateMarkdownArticle falls back to the hard-pass translation when styl
   );
 });
 
+test("translateMarkdownArticle normalizes bilingual anchor text before gate audit", async () => {
+  const source = "- Prompt injection attacks can hide malicious instructions.\n";
+
+  class NormalizingExecutor implements CodexExecutor {
+    readonly prompts: string[] = [];
+
+    async execute(prompt: string, options: CodexExecOptions): Promise<CodexExecResult> {
+      this.prompts.push(prompt);
+
+      if (isDocumentAnalysisPrompt(prompt)) {
+        return createExecResult(
+          createAnchorCatalog([
+            {
+              english: "Prompt injection attacks",
+              chineseHint: "提示注入攻击",
+              familyKey: "prompt-injection",
+              chunkId: "chunk-1",
+              segmentId: "chunk-1-segment-1"
+            }
+          ])
+        );
+      }
+
+      if (options.outputSchema || prompt.includes('"hard_checks"') || prompt.includes("只返回 JSON")) {
+        const currentTranslation = extractPromptSection(prompt, "【当前译文】") ?? "";
+        assert.match(currentTranslation, /提示注入攻击（Prompt injection attacks）/);
+        return createExecResult(wrapAuditForSegments(prompt, createAudit(true)));
+      }
+
+      if (prompt.includes("只做“风格与可读性润色”")) {
+        return createExecResult(extractPromptSection(prompt, "【当前译文】") ?? "");
+      }
+
+      return createExecResult("Prompt injection attacks（Prompt injection attacks） can hide malicious instructions.\n");
+    }
+  }
+
+  const result = await translateMarkdownArticle(source, {
+    executor: new NormalizingExecutor(),
+    formatter: async (markdown) => markdown
+  });
+
+  assert.match(result.markdown, /提示注入攻击（Prompt injection attacks）/);
+});
+
 test("translateMarkdownArticle falls back to the hard-pass translation when style polish returns meta task text", async () => {
   const source = [
     "# Docs",

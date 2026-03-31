@@ -144,3 +144,61 @@ test("translation state keeps repair tasks bound to the target segment only", ()
   assert.equal(segment.currentProtectedBody, "Body (fixed)");
   assert.equal(state.repairs[0]?.status, "applied");
 });
+
+test("translation state coalesces a shorter required anchor when a longer same-segment phrase already covers it", () => {
+  const state = createTranslationRunState({
+    sourcePathHint: "sample.md",
+    documentTitle: "Sample",
+    frontmatterPresent: false,
+    protectedSpans: [],
+    chunks: [
+      {
+        source: "- Claude can freely access the npm registry.",
+        separatorAfter: "",
+        headingPath: ["Sample"],
+        segments: [
+          {
+            kind: "translatable",
+            source: "- Claude can freely access the npm registry.",
+            separatorAfter: "",
+            spanIds: [],
+            headingHints: [],
+            specialNotes: []
+          }
+        ]
+      }
+    ]
+  });
+
+  const catalog: AnchorCatalog = {
+    anchors: [
+      {
+        english: "npm",
+        chineseHint: "npm",
+        familyKey: "npm",
+        firstOccurrence: {
+          chunkId: "chunk-1",
+          segmentId: "chunk-1-segment-1"
+        }
+      },
+      {
+        english: "npm registry",
+        chineseHint: "npm 注册表",
+        familyKey: "npm registry",
+        firstOccurrence: {
+          chunkId: "chunk-1",
+          segmentId: "chunk-1-segment-1"
+        }
+      }
+    ],
+    ignoredTerms: []
+  };
+
+  applyAnchorCatalog(state, catalog);
+
+  const slice = buildSegmentTaskSlice(state, "chunk-1", "chunk-1-segment-1");
+  assert.deepEqual(
+    slice.requiredAnchors.map((anchor) => anchor.english),
+    ["npm registry"]
+  );
+});

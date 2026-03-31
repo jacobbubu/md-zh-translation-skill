@@ -1,4 +1,5 @@
 import type { ProtectedSpan } from "./markdown-protection.js";
+import { coalesceRequiredAnchors } from "./anchor-normalization.js";
 
 export type AuditCheckKey =
   | "paragraph_match"
@@ -296,9 +297,11 @@ export function buildSegmentTaskSlice(
   const chunk = getChunkState(state, chunkId);
   const segment = getSegmentState(state, segmentId);
   const mentionedAnchors = state.anchors.filter((anchor) => anchor.mentionSegmentIds.includes(segmentId));
-  const requiredAnchors = mentionedAnchors
+  const requiredAnchors = coalesceRequiredAnchors(
+    mentionedAnchors
     .filter((anchor) => anchor.firstOccurrence.segmentId === segmentId)
-    .map(toPromptAnchor);
+    .map(toPromptAnchor)
+  );
   const repeatAnchors = mentionedAnchors
     .filter((anchor) => anchor.firstOccurrence.order < segment.order)
     .map(toPromptAnchor);
