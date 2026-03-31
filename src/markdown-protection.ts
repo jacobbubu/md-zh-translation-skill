@@ -82,17 +82,8 @@ export function protectMarkdownSpans(body: string): ProtectedMarkdown {
 }
 
 export function protectSegmentFormattingSpans(body: string, startIndex = 1): ProtectedMarkdown {
-  const spans: ProtectedSpan[] = [];
-
-  const register = (kind: ProtectedKind, raw: string): string => {
-    const id = createPlaceholder(kind, startIndex + spans.length);
-    spans.push({ id, kind, raw });
-    return id;
-  };
-
-  const protectedBody = mapOutsideInlineCode(body, (text) => protectInlineMarkdownLinks(text, register));
-
-  return { protectedBody, spans };
+  void startIndex;
+  return { protectedBody: body, spans: [] };
 }
 
 function protectFencedCodeBlocks(

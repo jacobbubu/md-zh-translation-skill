@@ -304,7 +304,7 @@ test("translateMarkdownArticle falls back to the hard-pass translation when styl
 
       const current = extractPromptSection(prompt, "【当前译文】") ?? extractPromptSection(prompt, "【英文原文】") ?? "";
       if (prompt.includes("只做“风格与可读性润色”")) {
-        return createExecResult(current.replace(/@@MDZH_INLINE_MARKDOWN_LINK_\d{4,}@@/g, ""));
+        return createExecResult(current.replace(/\[the docs\]\(@@MDZH_LINK_DESTINATION_\d{4,}@@\)/g, "the docs"));
       }
 
       return createExecResult(current);
@@ -485,12 +485,15 @@ test("translateMarkdownArticle allocates unique local markdown-link placeholders
     formatter: async (markdown) => markdown
   });
 
-  const placeholderIds = draftPrompts.flatMap((prompt) =>
-    [...prompt.matchAll(/@@MDZH_INLINE_MARKDOWN_LINK_\d{4,}@@/g)].map((match) => match[0])
+  assert.ok(
+    draftPrompts.every((prompt) => !/@@MDZH_INLINE_MARKDOWN_LINK_\d{4,}@@/.test(prompt))
   );
-
-  assert.ok(placeholderIds.length >= 2);
-  assert.equal(new Set(placeholderIds).size, placeholderIds.length);
+  assert.ok(
+    draftPrompts.some((prompt) => /\[bubblewrap\]\(@@MDZH_LINK_DESTINATION_\d{4,}@@\)/.test(prompt))
+  );
+  assert.ok(
+    draftPrompts.some((prompt) => /\[macOS\]\(@@MDZH_LINK_DESTINATION_\d{4,}@@\)/.test(prompt))
+  );
 });
 
 test("translateMarkdownArticle canonicalizes expanded URL spans before chunk-level style polish", async () => {
@@ -520,7 +523,8 @@ test("translateMarkdownArticle canonicalizes expanded URL spans before chunk-lev
 
       if (prompt.includes("只做“风格与可读性润色”")) {
         assert.match(prompt, /@@MDZH_CODE_BLOCK_0001@@/);
-        assert.match(prompt, /@@MDZH_INLINE_MARKDOWN_LINK_\d{4,}@@/);
+        assert.match(prompt, /\[docs\]\(@@MDZH_LINK_DESTINATION_\d{4,}@@\)/);
+        assert.match(prompt, /\[guide\]\(@@MDZH_LINK_DESTINATION_\d{4,}@@\)/);
         assert.doesNotMatch(prompt, /\]\(https:\/\/example\.com\/docs\)/);
         assert.doesNotMatch(prompt, /\]\(https:\/\/example\.com\/guide\)/);
         return createExecResult(extractPromptSection(prompt, "【当前译文】") ?? "");
@@ -549,7 +553,7 @@ test("translateMarkdownArticle canonicalizes expanded URL spans before chunk-lev
   assert.match(result.markdown, /See \[guide\]\(https:\/\/example\.com\/guide\)\.\n$/);
 });
 
-test("translateMarkdownArticle restores style-polish output that expands local inline markdown links", async () => {
+test("translateMarkdownArticle restores style-polish output that expands markdown links with protected destinations", async () => {
   const source = [
     "# Docs",
     "",
@@ -565,16 +569,17 @@ test("translateMarkdownArticle restores style-polish output that expands local i
 
       if (prompt.includes("只做“风格与可读性润色”")) {
         const current = extractPromptSection(prompt, "【当前译文】") ?? "";
-        assert.match(current, /@@MDZH_INLINE_MARKDOWN_LINK_\d{4,}@@/);
+        assert.match(current, /\[docs\]\(@@MDZH_LINK_DESTINATION_\d{4,}@@\)/);
+        assert.match(current, /\[guide\]\(@@MDZH_LINK_DESTINATION_\d{4,}@@\)/);
 
         return createExecResult(
           current
             .replace(
-              /@@MDZH_INLINE_MARKDOWN_LINK_\d{4,}@@/,
+              /\[docs\]\(@@MDZH_LINK_DESTINATION_\d{4,}@@\)/,
               "[docs](https://example.com/docs)"
             )
             .replace(
-              /@@MDZH_INLINE_MARKDOWN_LINK_\d{4,}@@/,
+              /\[guide\]\(@@MDZH_LINK_DESTINATION_\d{4,}@@\)/,
               "[guide](https://example.com/guide)"
             )
         );
@@ -657,7 +662,7 @@ test("translateMarkdownArticle passes raw inline code through before segment aud
   assert.equal(result.markdown, "With sandbox: 访问 `~/.ssh` 会被阻止。\n");
 });
 
-test("translateMarkdownArticle carries local inline markdown link placeholders into chunk-level style polish", async () => {
+test("translateMarkdownArticle keeps inline markdown links visible at chunk-level style polish", async () => {
   const source = [
     "# Title",
     "",
@@ -676,9 +681,9 @@ test("translateMarkdownArticle carries local inline markdown link placeholders i
       }
 
       if (prompt.includes("只做“风格与可读性润色”")) {
-        assert.match(prompt, /@@MDZH_INLINE_MARKDOWN_LINK_\d{4,}@@/);
-        assert.doesNotMatch(prompt, /\[bubblewrap \]\(@@MDZH_LINK_DESTINATION_0067@@\)/);
-        assert.doesNotMatch(prompt, /\[macOS\]\(@@MDZH_LINK_DESTINATION_0068@@\)/);
+        assert.match(prompt, /\[bubblewrap \]\(@@MDZH_LINK_DESTINATION_\d{4,}@@\)/);
+        assert.match(prompt, /\[macOS\]\(@@MDZH_LINK_DESTINATION_\d{4,}@@\)/);
+        assert.doesNotMatch(prompt, /@@MDZH_INLINE_MARKDOWN_LINK_\d{4,}@@/);
         return createExecResult(extractPromptSection(prompt, "【当前译文】") ?? "");
       }
 

@@ -175,7 +175,7 @@ test("protectSegmentFormattingSpans keeps inline code visible while still preser
   assert.equal(restoreMarkdownSpans(protectedMarkdown.protectedBody, protectedMarkdown.spans), source);
 });
 
-test("protectSegmentFormattingSpans protects inline markdown links around protected destinations", () => {
+test("protectSegmentFormattingSpans keeps inline markdown links visible around protected destinations", () => {
   const source = [
     "This is enforced by Linux [bubblewrap ](@@MDZH_LINK_DESTINATION_0067@@) or [macOS](@@MDZH_LINK_DESTINATION_0068@@).",
     ""
@@ -188,9 +188,9 @@ test("protectSegmentFormattingSpans protects inline markdown links around protec
   ];
   const combinedSpans = [...protectedMarkdown.spans, ...nestedDestinationSpans];
 
-  assert.match(protectedMarkdown.protectedBody, /@@MDZH_INLINE_MARKDOWN_LINK_7200@@/);
-  assert.match(protectedMarkdown.protectedBody, /@@MDZH_INLINE_MARKDOWN_LINK_7201@@/);
-  assert.doesNotMatch(protectedMarkdown.protectedBody, /\[bubblewrap \]\(@@MDZH_LINK_DESTINATION_0067@@\)/);
+  assert.equal(protectedMarkdown.spans.length, 0);
+  assert.doesNotMatch(protectedMarkdown.protectedBody, /@@MDZH_INLINE_MARKDOWN_LINK_7200@@/);
+  assert.match(protectedMarkdown.protectedBody, /\[bubblewrap \]\(@@MDZH_LINK_DESTINATION_0067@@\)/);
   assert.equal(
     restoreMarkdownSpans(protectedMarkdown.protectedBody, combinedSpans),
     "This is enforced by Linux [bubblewrap ](https://example.com/bubblewrap) or [macOS](https://example.com/macos).\n"
