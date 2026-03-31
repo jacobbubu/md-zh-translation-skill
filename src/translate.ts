@@ -540,7 +540,11 @@ async function translateProtectedChunk(
     );
 
     try {
-      restoredChunkBody = restoreMarkdownSpans(styleResult.text, chunkSpans);
+      const normalizedStyleText = stripAddedInlineCodeFromPlainPaths(
+        hardPassProtectedSource,
+        styleResult.text
+      );
+      restoredChunkBody = restoreMarkdownSpans(normalizedStyleText, chunkSpans);
       if (looksLikeMetaTaskResponse(restoredChunkBody)) {
         report(
           context.options,
@@ -595,6 +599,36 @@ function looksLikeMetaTaskResponse(text: string): boolean {
   return patterns.some((pattern) => pattern.test(trimmed));
 }
 
+function stripAddedInlineCodeFromPlainPaths(source: string, translated: string): string {
+  const sourceInlineCodeTokens = new Set<string>();
+  for (const match of source.matchAll(/`([^`\n]+)`/g)) {
+    const token = match[1]?.trim();
+    if (token) {
+      sourceInlineCodeTokens.add(token);
+    }
+  }
+
+  const sourceWithoutInlineCode = source.replace(/`[^`\n]+`/g, " ");
+  const plainPathTokens = new Set<string>();
+  const pathPattern =
+    /(^|[\s(（\[-])((?:~\/|\.{1,2}\/|\/(?!\/))[A-Za-z0-9._~/-]*[A-Za-z0-9_~/-])(?=$|[\s),，。；：！？\]）-])/gm;
+
+  for (const match of sourceWithoutInlineCode.matchAll(pathPattern)) {
+    const token = match[2]?.trim();
+    if (token && !sourceInlineCodeTokens.has(token)) {
+      plainPathTokens.add(token);
+    }
+  }
+
+  let normalized = translated;
+  for (const token of plainPathTokens) {
+    const escapedToken = token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    normalized = normalized.replace(new RegExp("`" + escapedToken + "`", "g"), token);
+  }
+
+  return normalized;
+}
+
 type ProtectedChunkSegment = {
   kind: "fixed" | "translatable";
   index: number;
@@ -633,7 +667,8 @@ async function translateProtectedSegment(
     }
   );
   threadId = draftResult.threadId;
-  const canonicalProtectedBody = reprotectMarkdownSpans(draftResult.text, combinedSpans);
+  const normalizedDraftText = stripAddedInlineCodeFromPlainPaths(protectedSource, draftResult.text);
+  const canonicalProtectedBody = reprotectMarkdownSpans(normalizedDraftText, combinedSpans);
   const restoredBody = restoreMarkdownSpans(canonicalProtectedBody, combinedSpans);
 
   return {
@@ -690,7 +725,11 @@ async function repairDraftedSegment(
     if (repairResult.threadId) {
       draftedSegment.threadId = repairResult.threadId;
     }
-    draftedSegment.protectedBody = reprotectMarkdownSpans(repairResult.text, draftedSegment.spans);
+    const normalizedRepairText = stripAddedInlineCodeFromPlainPaths(
+      draftedSegment.protectedSource,
+      repairResult.text
+    );
+    draftedSegment.protectedBody = reprotectMarkdownSpans(normalizedRepairText, draftedSegment.spans);
     draftedSegment.restoredBody = restoreMarkdownSpans(draftedSegment.protectedBody, draftedSegment.spans);
   }
 }

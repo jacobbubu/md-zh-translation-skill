@@ -457,6 +457,64 @@ test("translateMarkdownArticle falls back to the hard-pass translation when styl
   );
 });
 
+test("translateMarkdownArticle strips added inline code from plain path list items", async () => {
+  const source = [
+    "## Credential Theft",
+    "",
+    "Attempts to access:",
+    "",
+    "- ~/.ssh/ (SSH keys)",
+    "- ~/.aws/ (AWS credentials)",
+    "- ~/.config/ (API tokens)"
+  ].join("\n");
+
+  class PlainPathExecutor implements CodexExecutor {
+    async execute(prompt: string, options: CodexExecOptions): Promise<CodexExecResult> {
+      if (options.outputSchema || prompt.includes('"hard_checks"') || prompt.includes("只返回 JSON")) {
+        return createExecResult(wrapAuditForSegments(prompt, createAudit(true)));
+      }
+
+      if (prompt.includes("只做“风格与可读性润色”")) {
+        return createExecResult(
+          [
+            "## 凭据窃取（Credential Theft）",
+            "",
+            "尝试访问：",
+            "",
+            "- `~/.ssh/`（SSH keys）",
+            "- `~/.aws/`（AWS credentials）",
+            "- `~/.config/`（API tokens）"
+          ].join("\n")
+        );
+      }
+
+      return createExecResult(
+        [
+          "## 凭据窃取（Credential Theft）",
+          "",
+          "尝试访问：",
+          "",
+          "- `~/.ssh/`（SSH keys）",
+          "- `~/.aws/`（AWS credentials）",
+          "- `~/.config/`（API tokens）"
+        ].join("\n")
+      );
+    }
+  }
+
+  const result = await translateMarkdownArticle(source, {
+    executor: new PlainPathExecutor(),
+    formatter: async (markdown) => markdown
+  });
+
+  assert.match(result.markdown, /- ~\/\.ssh\/（SSH keys）/);
+  assert.match(result.markdown, /- ~\/\.aws\/（AWS credentials）/);
+  assert.match(result.markdown, /- ~\/\.config\/（API tokens）/);
+  assert.doesNotMatch(result.markdown, /`~\/\.ssh\/`/);
+  assert.doesNotMatch(result.markdown, /`~\/\.aws\/`/);
+  assert.doesNotMatch(result.markdown, /`~\/\.config\/`/);
+});
+
 test("translateMarkdownArticle runs the hidden pipeline chunk by chunk for long Markdown sections", async () => {
   const source = [
     "# Title",
