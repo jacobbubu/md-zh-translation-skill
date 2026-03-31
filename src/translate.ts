@@ -838,6 +838,21 @@ function buildRepairPromptContext(
     );
   }
 
+  if (
+    mustFix.some(
+      (item) =>
+        item.includes("双层括号") ||
+        item.includes("嵌套格式") ||
+        item.includes("单层括注") ||
+        item.includes("不嵌套")
+    )
+  ) {
+    extraNotes.push(
+      "本次 must_fix 明确指出当前写法出现了双层括号或嵌套括注。修复时如果原句、列表项或标题里本来就已经有一层括注说明，必须在这一层括注内部完成中英锚定，不要再额外套第二层括号。",
+      "对这类已有括注的首现锚定，优先改成单层括注里的并列说明，例如“（中文说明，English）”“（English，中文说明）”或等价的单层形式；不要生成“（中文（English））”或任何双层括号格式。"
+    );
+  }
+
   return {
     ...promptContext,
     specialNotes: extraNotes

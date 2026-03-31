@@ -1631,6 +1631,63 @@ test("translateMarkdownArticle repeats duplicate-English-anchor guidance when mu
   assert.match(repairPrompt, /只保留一次英文原名的写法/);
 });
 
+test("translateMarkdownArticle repeats single-layer-parentheses guidance when must_fix rejects nested brackets", async () => {
+  const source = [
+    "## Credential Theft",
+    "",
+    "Attempts to access:",
+    "",
+    "- ~/.ssh/ (SSH keys)",
+    "- ~/.aws/ (AWS credentials)",
+    "- ~/.config/ (API tokens)"
+  ].join("\n");
+
+  const executor = new PromptAwareExecutor();
+  await translateMarkdownArticle(source, {
+    executor: {
+      async execute(prompt, options) {
+        executor.prompts.push(prompt);
+
+        if (options.outputSchema && prompt.includes("【分段审校输入】")) {
+          return createExecResult(
+            wrapPerSegmentAudits(prompt, [
+              {
+                segment_index: 1,
+                audit: createAudit(false, [
+                  "位置：列表第 1 项“~/.ssh/”。问题：译文写成“（SSH 密钥（SSH keys））”，出现双层括号，不符合中文标点习惯。修复目标：改为单层、等价且不嵌套的括注形式。"
+                ])
+              }
+            ])
+          );
+        }
+
+        if (options.outputSchema || prompt.includes("只返回 JSON")) {
+          return createExecResult(JSON.stringify(createAudit(true)));
+        }
+
+        const currentTranslation = extractPromptSection(prompt, "【当前译文】");
+        if (currentTranslation !== null) {
+          return createExecResult(currentTranslation);
+        }
+
+        const sourceSection = extractPromptSection(prompt, "【英文原文】");
+        return createExecResult(sourceSection ?? "");
+      }
+    },
+    formatter: async (markdown) => markdown
+  });
+
+  const repairPrompt = executor.prompts.find(
+    (item) =>
+      item.includes("【must_fix】") &&
+      item.includes("（SSH 密钥（SSH keys））")
+  );
+  assert.ok(repairPrompt);
+  assert.match(repairPrompt, /双层括号或嵌套括注/);
+  assert.match(repairPrompt, /必须在这一层括注内部完成中英锚定/);
+  assert.match(repairPrompt, /不要生成“（中文（English））”/);
+});
+
 test("translateMarkdownArticle repairs multiple must_fix items one at a time", async () => {
   const source = "# Title\n\nBody";
   const repairMustFixSections: string[] = [];
