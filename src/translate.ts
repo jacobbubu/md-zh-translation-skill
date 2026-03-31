@@ -823,6 +823,21 @@ function buildRepairPromptContext(
     );
   }
 
+  if (
+    mustFix.some(
+      (item) =>
+        item.includes("重复回括") ||
+        item.includes("重复括注") ||
+        item.includes("重复回注") ||
+        item.includes("重复同一英文")
+    )
+  ) {
+    extraNotes.push(
+      "本次 must_fix 明确指出英文原名出现了重复回括或重复括注。修复时同一个英文原名在同一个首现锚点里只能保留一次，不要再生成“中文说明（同一英文原名）”或等价的重复回括格式。",
+      "如果要为英文原名补中文说明，优先使用自然的单次锚定形式，例如“English（中文说明）”“English + 中文说明”或其他只保留一次英文原名的写法；不要把同一个英文词先写进正文，又在括号里重复一次。"
+    );
+  }
+
   return {
     ...promptContext,
     specialNotes: extraNotes
