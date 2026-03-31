@@ -1688,6 +1688,63 @@ test("translateMarkdownArticle repeats single-layer-parentheses guidance when mu
   assert.match(repairPrompt, /不要生成“（中文（English））”/);
 });
 
+test("translateMarkdownArticle repeats plain-path guidance when must_fix rejects newly added inline code", async () => {
+  const source = [
+    "## Credential Theft",
+    "",
+    "Attempts to access:",
+    "",
+    "- ~/.ssh/ (SSH keys)",
+    "- ~/.aws/ (AWS credentials)",
+    "- ~/.config/ (API tokens)"
+  ].join("\n");
+
+  const executor = new PromptAwareExecutor();
+  await translateMarkdownArticle(source, {
+    executor: {
+      async execute(prompt, options) {
+        executor.prompts.push(prompt);
+
+        if (options.outputSchema && prompt.includes("【分段审校输入】")) {
+          return createExecResult(
+            wrapPerSegmentAudits(prompt, [
+              {
+                segment_index: 1,
+                audit: createAudit(false, [
+                  "位置：三个列表项中的路径 `~/.ssh/`、`~/.aws/`、`~/.config/`。问题：译文把原文普通文本路径改成了 inline code，改变了原有 Markdown 结构。修复目标：去掉这些路径外层新增的反引号，保持与原文一致的普通列表文本结构。"
+                ])
+              }
+            ])
+          );
+        }
+
+        if (options.outputSchema || prompt.includes("只返回 JSON")) {
+          return createExecResult(JSON.stringify(createAudit(true)));
+        }
+
+        const currentTranslation = extractPromptSection(prompt, "【当前译文】");
+        if (currentTranslation !== null) {
+          return createExecResult(currentTranslation);
+        }
+
+        const sourceSection = extractPromptSection(prompt, "【英文原文】");
+        return createExecResult(sourceSection ?? "");
+      }
+    },
+    formatter: async (markdown) => markdown
+  });
+
+  const repairPrompt = executor.prompts.find(
+    (item) =>
+      item.includes("【must_fix】") &&
+      item.includes("原文普通文本路径改成了 inline code")
+  );
+  assert.ok(repairPrompt);
+  assert.match(repairPrompt, /擅自把原文普通文本改成了 inline code/);
+  assert.match(repairPrompt, /如果原文中的路径、目录名、文件名、URL 片段或命令样式文本本来没有反引号/);
+  assert.match(repairPrompt, /不要把路径本身改成代码样式/);
+});
+
 test("translateMarkdownArticle repairs multiple must_fix items one at a time", async () => {
   const source = "# Title\n\nBody";
   const repairMustFixSections: string[] = [];

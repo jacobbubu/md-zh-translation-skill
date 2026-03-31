@@ -853,6 +853,20 @@ function buildRepairPromptContext(
     );
   }
 
+  if (
+    mustFix.some(
+      (item) =>
+        item.includes("inline code") ||
+        item.includes("反引号") ||
+        item.includes("Markdown 结构")
+    )
+  ) {
+    extraNotes.push(
+      "本次 must_fix 明确指出当前译文擅自把原文普通文本改成了 inline code。修复时如果原文中的路径、目录名、文件名、URL 片段或命令样式文本本来没有反引号，就必须保持普通文本结构，不要新增反引号或把它们包成 inline code。",
+      "对列表项里的 `~/.ssh/`、`~/.aws/`、`~/.config/` 这类路径，如果原文只是普通列表文本加括注说明，修复时应继续保持普通列表文本，只调整双语说明或中文解释；不要把路径本身改成代码样式。"
+    );
+  }
+
   return {
     ...promptContext,
     specialNotes: extraNotes
