@@ -7,6 +7,55 @@ Markdown 结构要求：
 5. 如果原文正文使用了可翻译的 Markdown 强调结构（如 **加粗**、*斜体*）或命令/flag 写法（如 --flag），译文应保持等价结构；不要丢掉强调，也不要把普通命令/flag 误改成代码块、标题或其他 Markdown 结构。
 `.trim();
 
+export const DOCUMENT_ANALYSIS_PROMPT = `
+你是一名科技与科普翻译编辑的前置分析器。请阅读下面的整篇 Markdown 文档分析输入，并只返回 JSON，不要返回散文说明。
+
+目标：
+1. 找出全文里需要建立“首次中英锚定”的候选专名、产品名、机构名、项目名和关键术语。
+2. 标出它们在全文中的首次出现位置（chunkId + segmentId）。
+3. 将同一概念家族的不同英文变体归并到同一个 familyKey。
+4. 对明显不需要强制双语锚定的通用词，放进 ignoredTerms。
+
+要求：
+1. 只返回 JSON。
+2. anchors 中每一项都必须包含：
+   - english
+   - chineseHint
+   - familyKey
+   - firstOccurrence.chunkId
+   - firstOccurrence.segmentId
+3. english 必须是原文里实际出现的英文形式，不要杜撰。
+4. chineseHint 只写最小必要的中文主译或中文说明，不要写整句。
+5. familyKey 用于归并同一概念家族，保持稳定、简短、可复用。
+6. 只有真正需要首现双语锚定的项才放进 anchors。像 Earth、reptiles、paleontologist 这类通用名词、职业称谓、类群名或常见科学词，通常应放进 ignoredTerms。
+7. 如果同一项在标题、引用、列表项和正文中都出现，首次出现位置必须精确落在最先出现的那个 chunkId / segmentId。
+8. 不要输出重复的 anchors。
+
+返回格式：
+{
+  "anchors": [
+    {
+      "english": "Prompt injection attacks",
+      "chineseHint": "提示注入攻击",
+      "familyKey": "prompt injection attacks",
+      "firstOccurrence": {
+        "chunkId": "chunk-3",
+        "segmentId": "chunk-3-segment-1"
+      }
+    }
+  ],
+  "ignoredTerms": [
+    {
+      "english": "Earth",
+      "reason": "通用名词"
+    }
+  ]
+}
+
+【文档分析输入】
+{{document}}
+`.trim();
+
 export const INITIAL_TRANSLATION_PROMPT = `
 你是一名科技与科普翻译编辑。请把下面的英文 Markdown 文章翻译成自然、准确、可读性高的中文 Markdown，但本次任务以“硬性项正确”为第一优先级。请严格遵守以下要求：
 
@@ -194,6 +243,10 @@ export const STYLE_POLISH_PROMPT = `
 
 export function buildInitialPrompt(source: string): string {
   return INITIAL_TRANSLATION_PROMPT.replaceAll("{{source}}", source);
+}
+
+export function buildDocumentAnalysisPrompt(document: string): string {
+  return DOCUMENT_ANALYSIS_PROMPT.replaceAll("{{document}}", document);
 }
 
 export function buildGateAuditPrompt(source: string, translation: string): string {
