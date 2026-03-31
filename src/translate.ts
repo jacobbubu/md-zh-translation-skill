@@ -795,6 +795,16 @@ function buildRepairPromptContext(
   }
 
   if (
+    mustFix.some((item) => /第\d+段/.test(item)) &&
+    mustFix.some((item) => item.includes("首次出现") || item.includes("中英文") || item.includes("中英对照"))
+  ) {
+    extraNotes.push(
+      "本次 must_fix 明确点名了某一具体段落。必须直接在被点名的那一段本身补齐缺失的首现中英文对照或中文说明，不要把锚定转移到同分段的其他段、标题、引用外说明、列表项或后续小节里。",
+      "如果 must_fix 已经写明“第N段”或直接摘录了该段原句，修复时应把该段视为唯一有效落点：被点名的英文术语、产品名、概念名或机制名，必须在这段对应中文词处就地补齐英文原名或中文说明。"
+    );
+  }
+
+  if (
     promptContext.specialNotes.some((item) => item.includes("当前分段包含引用段落")) &&
     mustFix.some((item) => item.includes("引用段")) &&
     mustFix.some((item) => item.includes("首次出现") || item.includes("中英文") || item.includes("中英对照"))

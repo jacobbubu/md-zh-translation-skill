@@ -1516,6 +1516,62 @@ test("translateMarkdownArticle repeats blockquote-specific repair guidance when 
   assert.match(repairPrompt, /不要把英文锚点延后到后文标题或下一段第一次出现的位置/);
 });
 
+test("translateMarkdownArticle repeats paragraph-specific repair guidance when must_fix targets a numbered paragraph", async () => {
+  const source = [
+    "# Title",
+    "",
+    "It removes all prompts but also eliminates all protection. Claude can access any file, run any command, and connect to any server.",
+    "",
+    "> I like to call this autonomous coding without guardrails.",
+    ""
+  ].join("\n");
+
+  const executor = new PromptAwareExecutor();
+  await translateMarkdownArticle(source, {
+    executor: {
+      async execute(prompt, options) {
+        executor.prompts.push(prompt);
+
+        if (options.outputSchema && prompt.includes("【分段审校输入】")) {
+          return createExecResult(
+            wrapPerSegmentAudits(prompt, [
+              {
+                segment_index: 1,
+                audit: createAudit(false, [
+                  "位置：第4段“Claude 可以访问任何文件、运行任何命令，并连接到任何服务器。”问题：产品名“Claude”在全文当前分块首次出现时未做中英文对照。修复目标：在该首次出现处补最小必要的中英文锚定，并与后文保持一致。"
+                ])
+              }
+            ])
+          );
+        }
+
+        if (options.outputSchema || prompt.includes("只返回 JSON")) {
+          return createExecResult(JSON.stringify(createAudit(true)));
+        }
+
+        const currentTranslation = extractPromptSection(prompt, "【当前译文】");
+        if (currentTranslation !== null) {
+          return createExecResult(currentTranslation);
+        }
+
+        const sourceSection = extractPromptSection(prompt, "【英文原文】");
+        return createExecResult(sourceSection ?? "");
+      }
+    },
+    formatter: async (markdown) => markdown
+  });
+
+  const repairPrompt = executor.prompts.find(
+    (item) =>
+      item.includes("【must_fix】") &&
+      item.includes("位置：第4段“Claude 可以访问任何文件、运行任何命令，并连接到任何服务器。”")
+  );
+  assert.ok(repairPrompt);
+  assert.match(repairPrompt, /本次 must_fix 明确点名了某一具体段落/);
+  assert.match(repairPrompt, /必须直接在被点名的那一段本身补齐缺失的首现中英文对照或中文说明/);
+  assert.match(repairPrompt, /修复时应把该段视为唯一有效落点/);
+});
+
 test("translateMarkdownArticle repairs multiple must_fix items one at a time", async () => {
   const source = "# Title\n\nBody";
   const repairMustFixSections: string[] = [];
