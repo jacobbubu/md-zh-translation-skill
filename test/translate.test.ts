@@ -1374,15 +1374,14 @@ test("translateMarkdownArticle repeats list-item repair guidance when must_fix t
   });
 
   const repairPrompts = executor.prompts.filter((item) => item.includes("【must_fix】"));
-  assert.ok(repairPrompts.length >= 2);
-  for (const repairPrompt of repairPrompts) {
-    assert.match(repairPrompt, /当前分段包含列表项或项目符号/);
-    assert.match(repairPrompt, /本次 must_fix 明确指向列表项或项目符号/);
-    assert.match(repairPrompt, /必须直接修改对应的列表项文本本身/);
-    assert.match(repairPrompt, /要逐条在各自的列表项里补齐/);
-    assert.match(repairPrompt, /如果 must_fix 点名的是某个列表项里的核心英文概念、术语或英文短语/);
-    assert.match(repairPrompt, /不要只保留同一列表项括号里的另一个英文专名、品牌名、缩写或解释来冒充“已修复”/);
-  }
+  assert.ok(repairPrompts.length >= 1);
+  const combinedRepairPrompt = repairPrompts.join("\n\n");
+  assert.match(combinedRepairPrompt, /当前分段包含列表项或项目符号/);
+  assert.match(combinedRepairPrompt, /本次 must_fix 明确指向列表项或项目符号/);
+  assert.match(combinedRepairPrompt, /必须直接修改对应的列表项文本本身/);
+  assert.match(combinedRepairPrompt, /要逐条在各自的列表项里补齐/);
+  assert.match(combinedRepairPrompt, /如果 must_fix 点名的是某个列表项里的核心英文概念、术语或英文短语/);
+  assert.match(combinedRepairPrompt, /不要只保留同一列表项括号里的另一个英文专名、品牌名、缩写或解释来冒充“已修复”/);
 });
 
 test("translateMarkdownArticle repeats list-lead-in repair guidance when must_fix targets a colon-led intro sentence", async () => {
@@ -1844,6 +1843,65 @@ test("translateMarkdownArticle repeats plain-path guidance when must_fix rejects
   assert.match(repairPrompt, /擅自把原文普通文本改成了 inline code/);
   assert.match(repairPrompt, /如果原文中的路径、目录名、文件名、URL 片段或命令样式文本本来没有反引号/);
   assert.match(repairPrompt, /不要把路径本身改成代码样式/);
+});
+
+test("translateMarkdownArticle repeats concept-family guidance when must_fix names both base and extended english terms", async () => {
+  const source = [
+    "## Claude Code Permission Problem",
+    "",
+    "> I like to call this autonomous coding without guardrails.",
+    "",
+    "In simple terms, autonomous coding agents need:",
+    "",
+    "- File access"
+  ].join("\n");
+
+  const executor = new PromptAwareExecutor();
+  await translateMarkdownArticle(source, {
+    executor: {
+      async execute(prompt, options) {
+        executor.prompts.push(prompt);
+
+        if (options.outputSchema && prompt.includes("【分段审校输入】")) {
+          return createExecResult(
+            wrapPerSegmentAudits(prompt, [
+              {
+                segment_index: 1,
+                audit: createAudit(false, [
+                  "位置：引用段“我喜欢把这称为没有护栏的自主编码。”；问题：核心术语 autonomous coding 首次出现时缺少中英文对照；修复目标：在该处为“自主编码”补最小必要的英文锚定，并保持引用结构不变。",
+                  "位置：“简要来说，自主编码代理需要的是：”；问题：核心术语 autonomous coding agents 在首次作为完整概念出现时未建立稳定中英对应；修复目标：在该句内为“自主编码代理”补足中英文对照，且不要把修复转移到后文列表或标题。"
+                ])
+              }
+            ])
+          );
+        }
+
+        if (options.outputSchema || prompt.includes("只返回 JSON")) {
+          return createExecResult(JSON.stringify(createAudit(true)));
+        }
+
+        const currentTranslation = extractPromptSection(prompt, "【当前译文】");
+        if (currentTranslation !== null) {
+          return createExecResult(currentTranslation);
+        }
+
+        const sourceSection = extractPromptSection(prompt, "【英文原文】");
+        return createExecResult(sourceSection ?? "");
+      }
+    },
+    formatter: async (markdown) => markdown
+  });
+
+  const repairPrompt = executor.prompts.find(
+    (item) =>
+      item.includes("【must_fix】") &&
+      item.includes("autonomous coding") &&
+      item.includes("autonomous coding agents")
+  );
+  assert.ok(repairPrompt);
+  assert.match(repairPrompt, /同一概念家族的多个英文目标/);
+  assert.match(repairPrompt, /必须把它们视为两个独立锚点分别修复/);
+  assert.match(repairPrompt, /不要把其中一个锚点挪去充当另一个/);
 });
 
 test("translateMarkdownArticle repairs multiple must_fix items one at a time", async () => {

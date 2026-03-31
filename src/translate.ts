@@ -738,8 +738,33 @@ function splitMustFixBatches(mustFix: readonly string[], batchSize: number): str
   const normalizedBatchSize = Math.max(1, batchSize);
   const batches: string[][] = [];
 
-  for (let index = 0; index < mustFix.length; index += normalizedBatchSize) {
-    batches.push(mustFix.slice(index, index + normalizedBatchSize));
+  let index = 0;
+  while (index < mustFix.length) {
+    const batch = [mustFix[index]!];
+    let batchTargets = extractExplicitEnglishTargetsFromMustFix(batch);
+    index += 1;
+
+    while (index < mustFix.length) {
+      const nextItem = mustFix[index]!;
+      const nextTargets = extractExplicitEnglishTargetsFromMustFix([nextItem]);
+      const withinBatchLimit = batch.length < normalizedBatchSize;
+      const relatedToBatch =
+        batchTargets.length > 0 &&
+        nextTargets.length > 0 &&
+        nextTargets.some((candidate) =>
+          batchTargets.some((existing) => belongToSameConceptFamily(existing, candidate))
+        );
+
+      if (!withinBatchLimit && !relatedToBatch) {
+        break;
+      }
+
+      batch.push(nextItem);
+      batchTargets = [...new Set([...batchTargets, ...nextTargets])];
+      index += 1;
+    }
+
+    batches.push(batch);
   }
 
   return batches;
@@ -761,9 +786,67 @@ function extractExplicitEnglishTargetsFromMustFix(mustFix: readonly string[]): s
 
       targets.add(candidate);
     }
+
+    for (const match of item.matchAll(
+      /(?:核心术语|英文目标|英文词|英文原名|产品名|工具名|项目名|模型名|CLI 名称|命令名|框架名|平台名|机制名|概念)\s+([A-Za-z][A-Za-z0-9./+&:_ -]{0,79}?)(?=\s*(?:首次|首现|在|需|应|未|缺少|没有|作为|并|，|。|；|：|$))/g
+    )) {
+      const candidate = match[1]?.trim();
+      if (!candidate) {
+        continue;
+      }
+
+      if (!/[A-Za-z]/.test(candidate)) {
+        continue;
+      }
+
+      targets.add(candidate);
+    }
   }
 
   return [...targets];
+}
+
+function extractConceptFamilyTargets(targets: readonly string[]): string[][] {
+  const normalized = [...new Set(targets.map((item) => item.trim()).filter(Boolean))];
+  const families: string[][] = [];
+  const seen = new Set<string>();
+
+  for (const base of normalized) {
+    if (seen.has(base)) {
+      continue;
+    }
+
+    const related = normalized.filter((candidate) => {
+      if (candidate === base) {
+        return true;
+      }
+
+      return belongToSameConceptFamily(base, candidate);
+    });
+
+    if (related.length < 2) {
+      continue;
+    }
+
+    related.forEach((item) => seen.add(item));
+    families.push(related);
+  }
+
+  return families;
+}
+
+function belongToSameConceptFamily(left: string, right: string): boolean {
+  const normalizedLeft = left.trim().toLowerCase();
+  const normalizedRight = right.trim().toLowerCase();
+  if (!normalizedLeft || !normalizedRight) {
+    return false;
+  }
+
+  return (
+    normalizedLeft === normalizedRight ||
+    normalizedLeft.startsWith(normalizedRight + " ") ||
+    normalizedRight.startsWith(normalizedLeft + " ")
+  );
 }
 
 function buildRepairPromptContext(
@@ -772,6 +855,7 @@ function buildRepairPromptContext(
 ): ChunkPromptContext {
   const extraNotes = [...promptContext.specialNotes];
   const explicitEnglishTargets = extractExplicitEnglishTargetsFromMustFix(mustFix);
+  const conceptFamilyTargets = extractConceptFamilyTargets(explicitEnglishTargets);
   const targetsHeadingLikeAnchor = mustFix.some(
     (item) => item.includes("标题") || item.includes("首次出现") || item.includes("中英对照")
   );
@@ -860,6 +944,16 @@ function buildRepairPromptContext(
       `本次 must_fix 明确点名了这些英文目标：${explicitEnglishTargets.join(" / ")}。`,
       "只要 must_fix 已经点名某个英文词、命令名、语言名、包名、平台名或术语，即使它看起来是常见技术词，也必须严格按 must_fix 要求修复，不能因为“太常见”就省略首现锚定。",
       "修复时必须在对应的标题、当前句、列表项或被点名位置本身保留这个英文原名，并补最小必要的中文说明；不要只译成中文，也不要把锚定转移到别处。"
+    );
+  }
+
+  if (conceptFamilyTargets.length > 0) {
+    extraNotes.push(
+      `本次 must_fix 里存在同一概念家族的多个英文目标：${conceptFamilyTargets
+        .map((family) => family.join(" / "))
+        .join(" ; ")}。`,
+      "对同一概念家族里的 base term 和 extended term，必须把它们视为两个独立锚点分别修复；不能因为已经补了较短词组，就省略较长词组，反之亦然。",
+      "如果 must_fix 同时点名了引用句里的短概念和说明句/引导句里的扩展概念，修复时要在各自被点名的位置分别补齐，不要把其中一个锚点挪去充当另一个。"
     );
   }
 
