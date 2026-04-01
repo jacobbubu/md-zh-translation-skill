@@ -1114,10 +1114,24 @@ async function repairDraftedSegment(
     .map((repairId) => context.state.repairs.find((item) => item.id === repairId))
     .filter((task): task is RepairTask => task !== undefined && task.status === "pending");
   const repairTaskBatches = splitRepairTaskBatches(context.state, repairTasks, MAX_MUST_FIX_PER_REPAIR_CALL);
+  const chunk = plan.chunks.find((item) => `chunk-${item.index + 1}` === context.chunkId);
+  if (!chunk) {
+    throw new HardGateError(`Missing chunk ${context.chunkId} while repairing segment ${draftedSegment.segmentId}.`);
+  }
 
   for (const [batchIndex, taskBatch] of repairTaskBatches.entries()) {
     const mustFixBatch = taskBatch.map((task) => task.instruction);
-    const repairPromptContext = buildRepairPromptContext(draftedSegment.promptContext, mustFixBatch);
+    const repairPromptContext = buildRepairPromptContext(
+      buildSegmentPromptContext(
+        context.state,
+        chunk,
+        plan,
+        context.sourcePathHint,
+        draftedSegment.segmentId,
+        draftedSegment.segment.source
+      ),
+      mustFixBatch
+    );
     const batchSuffix =
       repairTaskBatches.length > 1 ? `，修复批次 ${batchIndex + 1}/${repairTaskBatches.length}` : "";
     report(
@@ -1328,6 +1342,7 @@ function buildRepairPromptContext(
   const extraNotes = [...promptContext.specialNotes];
   const explicitEnglishTargets = extractExplicitEnglishTargetsFromMustFix(mustFix);
   const conceptFamilyTargets = extractConceptFamilyTargets(explicitEnglishTargets);
+  const duplicatePendingAnchorGroups = collectDuplicatePendingAnchorGroups(promptContext);
   const hasQuotedSentenceLocation =
     mustFix.some((item) => /位置：[^。\n]*“[^”]+”/.test(item)) &&
     mustFix.some((item) => item.includes("首次出现") || item.includes("中英文") || item.includes("中英对照"));
@@ -1439,6 +1454,16 @@ function buildRepairPromptContext(
     );
   }
 
+  if (duplicatePendingAnchorGroups.length > 0) {
+    extraNotes.push(
+      `当前分段里同一锚点在多个被点名位置仍未修齐：${duplicatePendingAnchorGroups
+        .map((group) => group.join(" / "))
+        .join(" ; ")}。`,
+      "即使本批 must_fix 只展示其中一条，也要结合状态切片里同一锚点的其他待修任务，逐个在各自被点名的句子、引用句、标题或列表项本身补齐。",
+      "不要因为其中一处已经补过英文原名或中文说明，就把另一处视为已完成；同一锚点的多个落点需要分别达标。"
+    );
+  }
+
   if (
     mustFix.some(
       (item) =>
@@ -1487,6 +1512,41 @@ function buildRepairPromptContext(
     ...promptContext,
     specialNotes: extraNotes
   };
+}
+
+function collectDuplicatePendingAnchorGroups(promptContext: ChunkPromptContext): string[][] {
+  const pendingRepairs = promptContext.stateSlice?.pendingRepairs ?? [];
+  const groups = new Map<string, Set<string>>();
+
+  for (const repair of pendingRepairs) {
+    const groupKey = repair.anchorId ?? inferRepairGroupKey(repair.instruction);
+    if (!groupKey) {
+      continue;
+    }
+
+    const group = groups.get(groupKey) ?? new Set<string>();
+    group.add(repair.locationLabel);
+    group.add(repair.instruction);
+    groups.set(groupKey, group);
+  }
+
+  return [...groups.values()]
+    .filter((group) => group.size > 1)
+    .map((group) => [...group].slice(0, 3));
+}
+
+function inferRepairGroupKey(instruction: string): string | null {
+  const quotedTerm = instruction.match(/首次出现的“([^”]+)”/)?.[1]?.trim();
+  if (quotedTerm) {
+    return quotedTerm;
+  }
+
+  const quotedEnglish = instruction.match(/“([^”]*[A-Za-z][^”]*)”/)?.[1]?.trim();
+  if (quotedEnglish) {
+    return quotedEnglish;
+  }
+
+  return null;
 }
 
 async function runBundledGateAudit(

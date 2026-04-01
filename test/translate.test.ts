@@ -2057,6 +2057,65 @@ test("translateMarkdownArticle repeats sentence-local repair guidance when must_
   assert.match(repairPrompt, /不要把锚定转移到同段其他句子、标题、列表项、引用外说明或后续段落/);
 });
 
+test("translateMarkdownArticle tells repair when the same anchor is still missing in multiple locations", async () => {
+  const source = [
+    "## So, What Do AI Agents Need?",
+    "",
+    "- Claude, are you reading your SSH keys? Also needs approval.",
+    "",
+    "**Filesystem Isolation**",
+    "",
+    "- Blocked zones that are never accessible (SSH keys, AWS credentials)",
+    ""
+  ].join("\n");
+
+  const executor = new PromptAwareExecutor();
+  await translateMarkdownArticle(source, {
+    executor: {
+      async execute(prompt, options) {
+        executor.prompts.push(prompt);
+
+        if (options.outputSchema && prompt.includes("【分段审校输入】")) {
+          return createExecResult(
+            wrapPerSegmentAudits(prompt, [
+              {
+                segment_index: 1,
+                audit: createAudit(false, [
+                  "位置：第 1 条项目符号“Claude，你在读取你的 SSH 密钥吗？这也需要审批。”问题：首次出现的“SSH 密钥”缺少英文对照，需在该句内补齐中英锚定。",
+                  "位置：第 4 条项目符号“阻止访问的区域（SSH 密钥、AWS 凭据）”问题：首次出现的“SSH 密钥”缺少英文对照，需在该列表项内补齐中英锚定。"
+                ])
+              }
+            ])
+          );
+        }
+
+        if (options.outputSchema || prompt.includes("只返回 JSON")) {
+          return createExecResult(JSON.stringify(createAudit(true)));
+        }
+
+        const currentTranslation = extractPromptSection(prompt, "【当前译文】");
+        if (currentTranslation !== null) {
+          return createExecResult(currentTranslation);
+        }
+
+        const sourceSection = extractPromptSection(prompt, "【英文原文】");
+        return createExecResult(sourceSection ?? "");
+      }
+    },
+    formatter: async (markdown) => markdown
+  });
+
+  const repairPrompt = executor.prompts.find(
+    (item) =>
+      item.includes("【must_fix】") &&
+      item.includes("SSH 密钥")
+  );
+  assert.ok(repairPrompt);
+  assert.match(repairPrompt, /同一锚点在多个被点名位置仍未修齐/);
+  assert.match(repairPrompt, /逐个在各自被点名的句子、引用句、标题或列表项本身补齐/);
+  assert.match(repairPrompt, /同一锚点的多个落点需要分别达标/);
+});
+
 test("translateMarkdownArticle repeats duplicate-English-anchor guidance when must_fix rejects repeated parenthetical English", async () => {
   const source = [
     "## Getting Started with Sandbox Mode",
