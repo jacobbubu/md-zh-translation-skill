@@ -997,6 +997,50 @@ test("translateMarkdownArticle keeps inline markdown links visible at chunk-leve
   assert.match(result.markdown, /\[macOS\]\(https:\/\/example\.com\/macos\)/);
 });
 
+test("translateMarkdownArticle rebuilds missing markdown link destinations from visible link labels", async () => {
+  const source = [
+    "# Title",
+    "",
+    "This is enforced by Linux [bubblewrap ](https://example.com/bubblewrap) or [macOS](https://example.com/macos).",
+    ""
+  ].join("\n");
+
+  class MissingLinkDestinationExecutor implements CodexExecutor {
+    async execute(prompt: string, options: CodexExecOptions): Promise<CodexExecResult> {
+      if (options.outputSchema || prompt.includes('"hard_checks"') || prompt.includes("只返回 JSON")) {
+        return createExecResult(wrapAuditForSegments(prompt, createAudit(true)));
+      }
+
+      if (prompt.includes("只做“风格与可读性润色”")) {
+        return createExecResult(extractPromptSection(prompt, "【当前译文】") ?? "");
+      }
+
+      if (prompt.includes("【英文原文】")) {
+        return createExecResult(
+          [
+            "# 标题",
+            "",
+            "这由 Linux bubblewrap（安全隔离组件）或 macOS（苹果操作系统）强制执行。",
+            ""
+          ].join("\n")
+        );
+      }
+
+      return createExecResult("[]");
+    }
+  }
+
+  const result = await translateMarkdownArticle(source, {
+    executor: new MissingLinkDestinationExecutor(),
+    formatter: async (markdown) => markdown
+  });
+
+  assert.match(
+    result.markdown,
+    /\[bubblewrap（安全隔离组件）]\(https:\/\/example\.com\/bubblewrap\)或 \[macOS（苹果操作系统）]\(https:\/\/example\.com\/macos\)/
+  );
+});
+
 test("translateMarkdownArticle keeps standalone code blocks out of translatable segment prompts", async () => {
   const source = [
     "# Title",
@@ -2684,7 +2728,7 @@ test("translateMarkdownArticle fails when the hard-pass translation already brok
 
   const { protectedBody } = protectMarkdownSpans(source);
   const passingAudit = JSON.stringify(createAudit(true));
-  const brokenDraft = protectedBody.replace("@@MDZH_LINK_DESTINATION_0001@@", "");
+  const brokenDraft = "Read the docs.\n\nKeep going.\n";
   const executor = new StubExecutor([brokenDraft, passingAudit]);
 
   await assert.rejects(
