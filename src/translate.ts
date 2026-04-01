@@ -10,7 +10,7 @@ import {
   buildStylePolishPrompt
 } from "./internal/prompts/scheme-h.js";
 import { DefaultCodexExecutor, type CodexExecutor } from "./codex-exec.js";
-import { normalizeSegmentAnchorText } from "./anchor-normalization.js";
+import { normalizeHeadingLikeAnchorText, normalizeSegmentAnchorText } from "./anchor-normalization.js";
 import { FormattingError, HardGateError } from "./errors.js";
 import { formatTranslatedBody, reconstructMarkdown } from "./format.js";
 import { planMarkdownChunks, type MarkdownChunk, type MarkdownChunkPlan } from "./markdown-chunks.js";
@@ -1082,7 +1082,12 @@ async function translateProtectedSegment(
     stripAddedInlineCodeFromPlainPaths(protectedSource, draftResult.text),
     chunkPromptContext.stateSlice
   );
-  const canonicalProtectedBody = reprotectMarkdownSpans(normalizedDraftText, combinedSpans);
+  const normalizedHeadingDraftText = normalizeHeadingLikeAnchorText(
+    protectedSource,
+    normalizedDraftText,
+    chunkPromptContext.stateSlice
+  );
+  const canonicalProtectedBody = reprotectMarkdownSpans(normalizedHeadingDraftText, combinedSpans);
   const restoredBody = restoreMarkdownSpans(canonicalProtectedBody, combinedSpans);
   applySegmentDraft(context.state, segmentId, {
     protectedSource,
@@ -1168,7 +1173,12 @@ async function repairDraftedSegment(
       stripAddedInlineCodeFromPlainPaths(draftedSegment.protectedSource, repairResult.text),
       buildSegmentTaskSlice(context.state, context.chunkId, draftedSegment.segmentId)
     );
-    draftedSegment.protectedBody = reprotectMarkdownSpans(normalizedRepairText, draftedSegment.spans);
+    const normalizedHeadingRepairText = normalizeHeadingLikeAnchorText(
+      draftedSegment.protectedSource,
+      normalizedRepairText,
+      buildSegmentTaskSlice(context.state, context.chunkId, draftedSegment.segmentId)
+    );
+    draftedSegment.protectedBody = reprotectMarkdownSpans(normalizedHeadingRepairText, draftedSegment.spans);
     draftedSegment.restoredBody = restoreMarkdownSpans(draftedSegment.protectedBody, draftedSegment.spans);
     applyRepairResult(context.state, draftedSegment.segmentId, taskBatch.map((task) => task.id), {
       protectedBody: draftedSegment.protectedBody,
@@ -1372,6 +1382,20 @@ function buildRepairPromptContext(
       extraNotes.push(
         "如果当前分段的结构是“冒号引导句或说明句 + 下一行加粗标题/标题 + 后续列表”，而 must_fix 指向的是该标题中的首现双语缺失，必须直接在这个标题本身补齐锚定；不要把修复转移到前面的引导句，也不要只在后面的列表项里补一次。",
         "对这类结构里的核心概念性英文标题，例如分类名、能力名、隔离/限制/保护等机制名称，修复目标应是标题本身的最小自然双语形式，例如“中文标题（English Term）”或等价表达；不要只保留中文标题。"
+      );
+    }
+
+    if (
+      promptContext.segmentHeadings.some(
+        (heading) =>
+          /^[A-Za-z][A-Za-z0-9 ]{0,30}\d+\s*:\s*[A-Za-z]/.test(heading) ||
+          /^[A-Za-z][A-Za-z0-9 ]{0,30}\s*:\s*[A-Za-z]/.test(heading)
+      )
+    ) {
+      extraNotes.push(
+        "如果标题本身带有编号标签、测试标签、步骤标签、示例标签或其他冒号前导部分，例如 `Test 2: ...`、`Step 1: ...`、`Example: ...`，修复时必须在这一整行标题里同时保留前导标签和后面的核心英文术语锚点。",
+        "不要只把冒号后的英文核心术语翻成中文而漏掉英文原名，也不要把英文锚点挪到下一句、后面的解释段或列表项里；这类标题的正确落点就是标题本身。",
+        "对这类标题，优先保留“中文标题 + 英文术语回括”或等价的最小自然双语形式，同时完整保留 `Test 2`、`Step 1`、`Example` 这类前导结构。"
       );
     }
   }

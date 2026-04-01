@@ -1,7 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { normalizeSegmentAnchorText, type PromptAnchor } from "../src/anchor-normalization.js";
+import {
+  normalizeHeadingLikeAnchorText,
+  normalizeSegmentAnchorText,
+  type PromptAnchor
+} from "../src/anchor-normalization.js";
 import type { PromptSlice } from "../src/translation-state.js";
 
 function createAnchor(
@@ -70,4 +74,29 @@ test("normalizeSegmentAnchorText collapses exact duplicate english-only parenthe
   const normalized = normalizeSegmentAnchorText("npm（npm） registry access is allowed.", slice);
 
   assert.equal(normalized, "npm registry access is allowed.");
+});
+
+test("normalizeHeadingLikeAnchorText restores a missing english anchor inside a bold pseudo-heading", () => {
+  const slice = createSlice({
+    requiredAnchors: [createAnchor("anchor-1", "System File Access", "系统文件访问")]
+  });
+  const source = [
+    "No permission prompts are displayed, and the operation completes immediately.",
+    "",
+    "**Test 2: System File Access**",
+    "",
+    "Tell Claude:"
+  ].join("\n");
+  const translated = [
+    "没有显示权限提示，操作会立即完成。",
+    "",
+    "**测试 2：系统文件访问**",
+    "",
+    "告诉 Claude："
+  ].join("\n");
+
+  const normalized = normalizeHeadingLikeAnchorText(source, translated, slice);
+
+  assert.match(normalized, /\*\*测试 2：系统文件访问（System File Access）\*\*/);
+  assert.match(normalized, /告诉 Claude：/);
 });

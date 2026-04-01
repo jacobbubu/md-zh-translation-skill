@@ -35,6 +35,60 @@ export function normalizeSegmentAnchorText(text: string, slice: PromptSlice | nu
   return normalized;
 }
 
+export function normalizeHeadingLikeAnchorText(
+  source: string,
+  text: string,
+  slice: PromptSlice | null
+): string {
+  if (!slice) {
+    return text;
+  }
+
+  const requiredAnchors = dedupePromptAnchors(slice.requiredAnchors).sort(
+    (left, right) => right.english.length - left.english.length
+  );
+  if (requiredAnchors.length === 0) {
+    return text;
+  }
+
+  const sourceHeadingLines = extractHeadingLikeLines(source);
+  const translatedHeadingLines = extractHeadingLikeLines(text);
+  if (sourceHeadingLines.length === 0 || translatedHeadingLines.length === 0) {
+    return text;
+  }
+
+  let normalized = text;
+
+  for (let index = 0; index < Math.min(sourceHeadingLines.length, translatedHeadingLines.length); index += 1) {
+    const sourceLine = sourceHeadingLines[index]!;
+    const translatedLine = translatedHeadingLines[index]!;
+
+    let normalizedLine = translatedLine.raw;
+    for (const anchor of requiredAnchors) {
+      if (
+        !containsWholePhrase(sourceLine.content, anchor.english) ||
+        !anchor.chineseHint ||
+        anchor.chineseHint.toLowerCase() === anchor.english.toLowerCase() ||
+        !normalizedLine.includes(anchor.chineseHint) ||
+        containsWholePhrase(normalizedLine, anchor.english)
+      ) {
+        continue;
+      }
+
+      normalizedLine = normalizedLine.replace(
+        anchor.chineseHint,
+        `${anchor.chineseHint}（${anchor.english}）`
+      );
+    }
+
+    if (normalizedLine !== translatedLine.raw) {
+      normalized = normalized.replace(translatedLine.raw, normalizedLine);
+    }
+  }
+
+  return normalized;
+}
+
 function normalizeSingleAnchor(
   text: string,
   anchor: PromptAnchor,
@@ -84,6 +138,35 @@ function collapseRepeatedEnglishParentheses(text: string, english: string): stri
   return text.replace(new RegExp(`（${escapedEnglish}）\\s*（${escapedEnglish}）`, "g"), `（${english}）`);
 }
 
+type HeadingLine = {
+  raw: string;
+  content: string;
+};
+
+function extractHeadingLikeLines(text: string): HeadingLine[] {
+  const headings: HeadingLine[] = [];
+
+  for (const rawLine of text.split(/\r?\n/)) {
+    const trimmed = rawLine.trim();
+    if (!trimmed) {
+      continue;
+    }
+
+    const atxMatch = trimmed.match(/^#{1,6}[ \t]+(.+?)(?:[ \t]+#+)?$/);
+    if (atxMatch?.[1]) {
+      headings.push({ raw: rawLine, content: atxMatch[1].trim() });
+      continue;
+    }
+
+    const boldMatch = trimmed.match(/^\*\*(.+)\*\*$/);
+    if (boldMatch?.[1]) {
+      headings.push({ raw: rawLine, content: boldMatch[1].trim() });
+    }
+  }
+
+  return headings;
+}
+
 function dedupePromptAnchors(anchors: readonly PromptAnchor[]): PromptAnchor[] {
   const seen = new Set<string>();
   const deduped: PromptAnchor[] = [];
@@ -124,6 +207,14 @@ function isShadowedByLongerAnchor(anchor: PromptAnchor, anchors: readonly Prompt
 function containsWholeEnglishPhrase(haystack: string, needle: string): boolean {
   const escapedNeedle = escapeRegExp(needle);
   return new RegExp(`\\b${escapedNeedle}\\b`, "i").test(haystack);
+}
+
+function containsWholePhrase(haystack: string, needle: string): boolean {
+  if (/[A-Za-z]/.test(needle)) {
+    return containsWholeEnglishPhrase(haystack, needle);
+  }
+
+  return haystack.includes(needle);
 }
 
 function normalizeAnchorText(value: string): string {
