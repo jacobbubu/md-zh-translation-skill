@@ -655,6 +655,46 @@ test("translateMarkdownArticle strips added inline code from plain path list ite
   assert.doesNotMatch(result.markdown, /`~\/\.config\/`/);
 });
 
+test("translateMarkdownArticle strips added inline code from plain command list items under Commands", async () => {
+  const source = [
+    "### Category 2: Prompted",
+    "",
+    "**Commands:**",
+    "",
+    "- docker (system-level tool)",
+    "- sudo anything (privilege escalation)"
+  ].join("\n");
+
+  class PlainCommandExecutor implements CodexExecutor {
+    async execute(prompt: string, options: CodexExecOptions): Promise<CodexExecResult> {
+      if (options.outputSchema || prompt.includes('"hard_checks"') || prompt.includes("只返回 JSON")) {
+        return createExecResult(wrapAuditForSegments(prompt, createAudit(true)));
+      }
+
+      const translated = [
+        "### 第 2 类：提示后执行",
+        "",
+        "**命令（Commands）：**",
+        "",
+        "- `docker`（系统级工具）",
+        "- `sudo` 的任何用法（提权）"
+      ].join("\n");
+
+      return createExecResult(translated);
+    }
+  }
+
+  const result = await translateMarkdownArticle(source, {
+    executor: new PlainCommandExecutor(),
+    formatter: async (markdown) => markdown
+  });
+
+  assert.match(result.markdown, /- docker（系统级工具）/);
+  assert.match(result.markdown, /- sudo 的任何用法（提权）/);
+  assert.doesNotMatch(result.markdown, /`docker`/);
+  assert.doesNotMatch(result.markdown, /`sudo`/);
+});
+
 test("translateMarkdownArticle runs the hidden pipeline chunk by chunk for long Markdown sections", async () => {
   const source = [
     "# Title",

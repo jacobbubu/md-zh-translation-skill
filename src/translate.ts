@@ -1152,13 +1152,55 @@ function stripAddedInlineCodeFromPlainPaths(source: string, translated: string):
     }
   }
 
+  const plainCommandTokens = collectPlainCommandTokens(sourceWithoutInlineCode, sourceInlineCodeTokens);
+
   let normalized = translated;
   for (const token of plainPathTokens) {
     const escapedToken = token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
     normalized = normalized.replace(new RegExp("`" + escapedToken + "`", "g"), token);
   }
 
+  for (const token of plainCommandTokens) {
+    const escapedToken = token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    normalized = normalized.replace(new RegExp("`" + escapedToken + "`", "g"), token);
+  }
+
   return normalized;
+}
+
+function collectPlainCommandTokens(
+  sourceWithoutInlineCode: string,
+  sourceInlineCodeTokens: ReadonlySet<string>
+): Set<string> {
+  const tokens = new Set<string>();
+  const lines = sourceWithoutInlineCode.split(/\r?\n/);
+  let inCommandsSection = false;
+
+  for (const rawLine of lines) {
+    const trimmed = rawLine.trim();
+    if (!trimmed) {
+      continue;
+    }
+
+    if (/^#{1,6}\s+/.test(trimmed) || /^\*\*.+\*\*:?\s*$/.test(trimmed)) {
+      inCommandsSection = /commands/i.test(trimmed);
+      continue;
+    }
+
+    if (!inCommandsSection) {
+      continue;
+    }
+
+    const bulletMatch = trimmed.match(/^(?:[-*+]|\d+[.)])\s+([A-Za-z][A-Za-z0-9+._/-]*)\b/);
+    const token = bulletMatch?.[1]?.trim();
+    if (!token || sourceInlineCodeTokens.has(token)) {
+      continue;
+    }
+
+    tokens.add(token);
+  }
+
+  return tokens;
 }
 
 type ProtectedChunkSegment = {
