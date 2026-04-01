@@ -2545,6 +2545,65 @@ test("translateMarkdownArticle repairs multiple must_fix items one at a time", a
   ]);
 });
 
+test("translateMarkdownArticle batches mixed-location repairs in the same segment together", async () => {
+  const source = [
+    "# Title",
+    "",
+    "> Quote line",
+    "",
+    "- List item one",
+    "- List item two",
+    ""
+  ].join("\n");
+  const repairMustFixSections: string[] = [];
+  let auditCallCount = 0;
+
+  const executor: CodexExecutor = {
+    async execute(prompt, options) {
+      if (prompt.includes("【must_fix】")) {
+        const mustFixSection = extractPromptSection(prompt, "【must_fix】") ?? "";
+        repairMustFixSections.push(mustFixSection.trim());
+        return createExecResult(source);
+      }
+
+      if (prompt.includes("只做“风格与可读性润色”")) {
+        return createExecResult(source);
+      }
+
+      if (options.outputSchema && prompt.includes("【分段审校输入】")) {
+        auditCallCount += 1;
+        const audit = auditCallCount === 1
+          ? createAudit(false, [
+              "第 1、2 条列表项中的 `Claude` 需要在本段首次出现处补中英文对照，不能只保留英文。",
+              "最后一条引用中的 `Sandbox mode` 需要补英文原名对应关系，不能只译成“沙盒模式”。"
+            ])
+          : createAudit(true);
+        return createExecResult(
+          wrapPerSegmentAudits(prompt, [{ segment_index: 1, audit }])
+        );
+      }
+
+      if (options.outputSchema || prompt.includes("只返回 JSON")) {
+        return createExecResult(JSON.stringify(createAudit(true)));
+      }
+
+      return createExecResult(source);
+    }
+  };
+
+  await translateMarkdownArticle(source, {
+    executor,
+    formatter: async (markdown) => markdown
+  });
+
+  assert.deepEqual(repairMustFixSections, [
+    [
+      "- 第 1、2 条列表项中的 `Claude` 需要在本段首次出现处补中英文对照，不能只保留英文。",
+      "- 最后一条引用中的 `Sandbox mode` 需要补英文原名对应关系，不能只译成“沙盒模式”。"
+    ].join("\n")
+  ]);
+});
+
 test("translateMarkdownArticle repeats slash-qualified heading repair guidance when must_fix targets a heading", async () => {
   const source = [
     "# Title",

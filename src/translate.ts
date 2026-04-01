@@ -756,6 +756,29 @@ function inferRepairLocationLabel(segmentSource: string): string {
   return "正文段落";
 }
 
+function inferRepairLocationLabelFromInstruction(
+  segmentSource: string,
+  instruction: string
+): string {
+  if (instruction.includes("标题")) {
+    return "标题";
+  }
+  if (instruction.includes("列表项") || instruction.includes("项目符号")) {
+    return "列表项";
+  }
+  if (instruction.includes("引用段") || instruction.includes("引用中的") || instruction.includes("引用句")) {
+    return "引用段";
+  }
+  if (instruction.includes("引导句") || instruction.includes("说明句") || instruction.includes("导语句")) {
+    return "列表引导句";
+  }
+  if (instruction.includes("当前句") || instruction.includes("该句") || /位置：[^。\n]*“[^”]+”/.test(instruction)) {
+    return "正文句";
+  }
+
+  return inferRepairLocationLabel(segmentSource);
+}
+
 function inferRepairAnchorId(
   slice: PromptSlice,
   instruction: string
@@ -811,14 +834,13 @@ function buildStructuredSegmentAuditResult(
 ): StateSegmentAuditResult {
   const chunkId = draftedSegment.segmentId.split("-segment-")[0] ?? `chunk-${draftedSegment.segment.index + 1}`;
   const slice = buildSegmentTaskSlice(state, chunkId, draftedSegment.segmentId);
-  const locationLabel = inferRepairLocationLabel(draftedSegment.segment.source);
   const filteredAudit = suppressCoveredAnchorMustFix(state, draftedSegment, slice, audit);
   const repairTasks: RepairTask[] = filteredAudit.must_fix.map((instruction, index) => ({
     id: `${draftedSegment.segmentId}-repair-${state.repairs.length + index + 1}`,
     segmentId: draftedSegment.segmentId,
     anchorId: inferRepairAnchorId(slice, instruction),
     failureType: inferRepairFailureType(filteredAudit, instruction),
-    locationLabel,
+    locationLabel: inferRepairLocationLabelFromInstruction(draftedSegment.segment.source, instruction),
     instruction,
     status: "pending"
   }));
@@ -1392,7 +1414,11 @@ function splitRepairTaskBatches(
         ? state.anchors.find((anchor) => anchor.id === nextTask.anchorId)?.familyId ?? nextTask.anchorId
         : null;
       const relatedToBatch = nextFamily ? batchFamilies.has(nextFamily) : false;
-      if (batch.length >= normalizedBatchSize && !relatedToBatch) {
+      const spansMultipleLocations =
+        batch.some(
+          (task) => task.segmentId === nextTask.segmentId && task.locationLabel !== nextTask.locationLabel
+        );
+      if (batch.length >= normalizedBatchSize && !relatedToBatch && !spansMultipleLocations) {
         break;
       }
 
