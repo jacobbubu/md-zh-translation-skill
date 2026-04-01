@@ -20,6 +20,7 @@ export type ProtectedSpan = {
   id: string;
   kind: ProtectedKind;
   raw: string;
+  labelText?: string;
 };
 
 export type ProtectedMarkdown = {
@@ -61,9 +62,9 @@ export function extractFrontmatter(markdown: string): FrontmatterSplit {
 export function protectMarkdownSpans(body: string): ProtectedMarkdown {
   const spans: ProtectedSpan[] = [];
 
-  const register = (kind: ProtectedKind, raw: string): string => {
+  const register = (kind: ProtectedKind, raw: string, extras: Partial<ProtectedSpan> = {}): string => {
     const id = createPlaceholder(kind, spans.length + 1);
-    spans.push({ id, kind, raw });
+    spans.push({ id, kind, raw, ...extras });
     return id;
   };
 
@@ -262,11 +263,12 @@ function protectInlineStrongEmphasisInLine(
 
 function protectLinkDestinations(
   input: string,
-  register: (kind: ProtectedKind, raw: string) => string
+  register: (kind: ProtectedKind, raw: string, extras?: Partial<ProtectedSpan>) => string
 ): string {
   return input.replace(/(!?\[[^\]\n]*\])\(([^()\n\s][^)\n]*)\)/g, (_match, label: string, destination: string) => {
     const kind: ProtectedKind = label.startsWith("![") ? "image_destination" : "link_destination";
-    return `${label}(${register(kind, destination)})`;
+    const labelText = label.slice(label.startsWith("![") ? 2 : 1, -1);
+    return `${label}(${register(kind, destination, { labelText })})`;
   });
 }
 
@@ -383,7 +385,11 @@ function reprotectExpandedProtectedSpan(
   switch (span.kind) {
     case "link_destination":
     case "image_destination":
-      return replaceFirstLiteral(output, `](${span.raw})`, `](${span.id})`);
+      return (
+        replaceFirstLiteral(output, `](${span.raw})`, `](${span.id})`) ??
+        replaceFirstLiteral(output, span.raw, span.id) ??
+        replaceMissingMarkdownLinkDestination(output, span)
+      );
     case "autolink":
       return replaceFirstLiteral(output, `<${span.raw}>`, `<${span.id}>`);
     case "html_attribute":
@@ -429,6 +435,34 @@ function replaceWrappedPlaceholder(source: string, placeholder: string, wrappers
     }
   }
   return null;
+}
+
+function replaceMissingMarkdownLinkDestination(source: string, span: ProtectedSpan): string | null {
+  const rawLabel = span.labelText?.trim();
+  if (!rawLabel) {
+    return null;
+  }
+
+  for (const pattern of buildLinkRelabelPatterns(rawLabel)) {
+    const match = source.match(pattern);
+    if (!match || match.index === undefined) {
+      continue;
+    }
+
+    const matchedText = match[0];
+    return `${source.slice(0, match.index)}[${matchedText}](${span.id})${source.slice(match.index + matchedText.length)}`;
+  }
+
+  return null;
+}
+
+function buildLinkRelabelPatterns(labelText: string): RegExp[] {
+  const escapedLabel = escapeRegex(labelText);
+  return [
+    new RegExp(`\\[${escapedLabel}(?:（[^）]+）)?\\](?!\\()`),
+    new RegExp(`[^\\s\\[\\]()（）]{1,30}（${escapedLabel}）`),
+    new RegExp(`(?<![\\w/.-])${escapedLabel}(?:（[^）]+）)?(?![\\w/.-])`)
+  ];
 }
 
 function expandNestedPlaceholderRaw(raw: string, spans: readonly ProtectedSpan[]): string {

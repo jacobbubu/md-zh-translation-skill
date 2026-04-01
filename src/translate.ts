@@ -1,4 +1,8 @@
+import { mkdir, writeFile } from "node:fs/promises";
+import path from "node:path";
+
 import {
+  buildDocumentAnalysisPrompt,
   buildBundledGateAuditPrompt,
   buildGateAuditPrompt,
   buildInitialPrompt,
@@ -6,6 +10,11 @@ import {
   buildStylePolishPrompt
 } from "./internal/prompts/scheme-h.js";
 import { DefaultCodexExecutor, type CodexExecutor } from "./codex-exec.js";
+import {
+  normalizeExplicitRepairAnchorText,
+  normalizeHeadingLikeAnchorText,
+  normalizeSegmentAnchorText
+} from "./anchor-normalization.js";
 import { FormattingError, HardGateError } from "./errors.js";
 import { formatTranslatedBody, reconstructMarkdown } from "./format.js";
 import { planMarkdownChunks, type MarkdownChunk, type MarkdownChunkPlan } from "./markdown-chunks.js";
@@ -17,6 +26,27 @@ import {
   restoreMarkdownSpans,
   type ProtectedSpan
 } from "./markdown-protection.js";
+import {
+  applyAnchorCatalog,
+  applyRepairResult,
+  applySegmentAudit,
+  applySegmentDraft,
+  buildSegmentTaskSlice,
+  createTranslationRunState,
+  getChunkSegments,
+  getSegmentState,
+  markChunkPhase,
+  markSegmentStyled,
+  setChunkFinalBody,
+  type AnchorCatalog,
+  type AuditCheckKey as StateAuditCheckKey,
+  type ChunkSeed,
+  type PromptSlice,
+  type RepairFailureType,
+  type RepairTask,
+  type SegmentAuditResult as StateSegmentAuditResult,
+  type TranslationRunState
+} from "./translation-state.js";
 
 const DEFAULT_MODEL = "gpt-5.4-mini";
 const MAX_REPAIR_CYCLES = 2;
@@ -49,6 +79,7 @@ type BundledGateAudit = {
 };
 
 export type TranslateProgress =
+  | "analyze"
   | "draft"
   | "audit"
   | "repair"
@@ -129,6 +160,48 @@ const BUNDLED_GATE_AUDIT_SCHEMA = {
   }
 } as const;
 
+const ANCHOR_CATALOG_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["anchors", "ignoredTerms"],
+  properties: {
+    anchors: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["english", "chineseHint", "familyKey", "firstOccurrence"],
+        properties: {
+          english: { type: "string" },
+          chineseHint: { type: "string" },
+          familyKey: { type: "string" },
+          firstOccurrence: {
+            type: "object",
+            additionalProperties: false,
+            required: ["chunkId", "segmentId"],
+            properties: {
+              chunkId: { type: "string" },
+              segmentId: { type: "string" }
+            }
+          }
+        }
+      }
+    },
+    ignoredTerms: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["english", "reason"],
+        properties: {
+          english: { type: "string" },
+          reason: { type: "string" }
+        }
+      }
+    }
+  }
+} as const;
+
 function auditItemSchema() {
   return {
     type: "object",
@@ -139,6 +212,14 @@ function auditItemSchema() {
       problem: { type: "string" }
     }
   };
+}
+
+function normalizeAuditQuoteStyle(text: string): string {
+  return text
+    .replaceAll("「", "“")
+    .replaceAll("」", "”")
+    .replaceAll("『", "‘")
+    .replaceAll("』", "’");
 }
 
 function extractJsonObject(text: string): string {
@@ -189,6 +270,8 @@ function parseGateAuditValue(value: unknown): GateAudit {
     if (typeof typed.pass !== "boolean" || typeof typed.problem !== "string") {
       throw new HardGateError(`Gate audit JSON has an invalid hard_checks.${key} entry.`);
     }
+
+    typed.problem = normalizeAuditQuoteStyle(typed.problem);
   }
 
   if (!Array.isArray(mustFix) || !mustFix.every((item) => typeof item === "string")) {
@@ -197,7 +280,7 @@ function parseGateAuditValue(value: unknown): GateAudit {
 
   return {
     hard_checks: hardChecks as GateAudit["hard_checks"],
-    must_fix: mustFix.map((item) => item.trim()).filter(Boolean)
+    must_fix: mustFix.map((item) => normalizeAuditQuoteStyle(item.trim())).filter(Boolean)
   };
 }
 
@@ -260,6 +343,70 @@ function parseBundledGateAudit(text: string, expectedSegmentIndices: readonly nu
   return { segments: audits };
 }
 
+function parseAnchorCatalog(text: string): AnchorCatalog {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(extractJsonObject(text));
+  } catch (error) {
+    throw new HardGateError(error instanceof Error ? error.message : String(error));
+  }
+
+  if (!parsed || typeof parsed !== "object") {
+    throw new HardGateError("Anchor catalog JSON is not an object.");
+  }
+
+  const data = parsed as Record<string, unknown>;
+  if (!Array.isArray(data.anchors) || !Array.isArray(data.ignoredTerms)) {
+    throw new HardGateError("Anchor catalog JSON must contain anchors and ignoredTerms arrays.");
+  }
+
+  const anchors = data.anchors.map((item, index) => {
+    if (!item || typeof item !== "object") {
+      throw new HardGateError(`Anchor catalog anchors[${index}] is not an object.`);
+    }
+    const anchor = item as Record<string, unknown>;
+    const firstOccurrence = anchor.firstOccurrence;
+    if (
+      typeof anchor.english !== "string" ||
+      typeof anchor.chineseHint !== "string" ||
+      typeof anchor.familyKey !== "string" ||
+      !firstOccurrence ||
+      typeof firstOccurrence !== "object" ||
+      typeof (firstOccurrence as Record<string, unknown>).chunkId !== "string" ||
+      typeof (firstOccurrence as Record<string, unknown>).segmentId !== "string"
+    ) {
+      throw new HardGateError(`Anchor catalog anchors[${index}] has an invalid shape.`);
+    }
+
+    return {
+      english: anchor.english.trim(),
+      chineseHint: anchor.chineseHint.trim(),
+      familyKey: anchor.familyKey.trim(),
+      firstOccurrence: {
+        chunkId: String((firstOccurrence as Record<string, unknown>).chunkId),
+        segmentId: String((firstOccurrence as Record<string, unknown>).segmentId)
+      }
+    };
+  });
+
+  const ignoredTerms = data.ignoredTerms.map((item, index) => {
+    if (!item || typeof item !== "object") {
+      throw new HardGateError(`Anchor catalog ignoredTerms[${index}] is not an object.`);
+    }
+    const ignored = item as Record<string, unknown>;
+    if (typeof ignored.english !== "string" || typeof ignored.reason !== "string") {
+      throw new HardGateError(`Anchor catalog ignoredTerms[${index}] has an invalid shape.`);
+    }
+
+    return {
+      english: ignored.english.trim(),
+      reason: ignored.reason.trim()
+    };
+  });
+
+  return { anchors, ignoredTerms };
+}
+
 function isHardPass(audit: GateAudit): boolean {
   return Object.values(audit.hard_checks).every((item) => item.pass);
 }
@@ -279,6 +426,87 @@ function report(options: TranslateOptions, stage: TranslateProgress, message: st
   options.onProgress?.(message, stage);
 }
 
+function buildChunkSeeds(
+  chunkPlan: MarkdownChunkPlan,
+  spanIndex: ReadonlyMap<string, ProtectedSpan>
+): ChunkSeed[] {
+  return chunkPlan.chunks.map((chunk) => ({
+    source: chunk.source,
+    separatorAfter: chunk.separatorAfter,
+    headingPath: [...chunk.headingPath],
+    segments: splitProtectedChunkSegments(chunk.source, spanIndex).map((segment) => ({
+      kind: segment.kind,
+      source: segment.source,
+      separatorAfter: segment.separatorAfter,
+      spanIds: segment.spans.map((span) => span.id),
+      headingHints: extractSegmentHeadingHints(segment.source),
+      specialNotes: extractSegmentSpecialNotes(segment.source)
+    }))
+  }));
+}
+
+function buildDocumentAnalysisInput(state: TranslationRunState): string {
+  return JSON.stringify(
+    {
+      document: state.document,
+      chunks: state.chunks.map((chunk) => ({
+        id: chunk.id,
+        index: chunk.index + 1,
+        headingPath: chunk.headingPath,
+        segments: getChunkSegments(state, chunk.id).map((segment) => ({
+          id: segment.id,
+          index: segment.index + 1,
+          kind: segment.kind,
+          headingHints: segment.headingHints,
+          source: segment.source
+        }))
+      }))
+    },
+    null,
+    2
+  );
+}
+
+async function analyzeDocumentForAnchors(
+  state: TranslationRunState,
+  context: Pick<ChunkTranslationContext, "executor" | "postDraftModel" | "cwd" | "options" | "postDraftReasoningEffort">
+): Promise<AnchorCatalog> {
+  const prompt = buildDocumentAnalysisPrompt(buildDocumentAnalysisInput(state));
+  try {
+    const result = await context.executor.execute(prompt, {
+      cwd: context.cwd,
+      model: context.postDraftModel,
+      reasoningEffort: context.postDraftReasoningEffort ?? AUDIT_REASONING_EFFORT,
+      outputSchema: ANCHOR_CATALOG_SCHEMA,
+      reuseSession: true,
+      onStderr: (stderrChunk) => {
+        const trimmed = stderrChunk.trim();
+        if (trimmed) {
+          report(context.options, "analyze", trimmed);
+        }
+      }
+    });
+    return parseAnchorCatalog(result.text);
+  } catch (error) {
+    report(
+      context.options,
+      "analyze",
+      `Document anchor analysis failed, falling back to an empty catalog: ${error instanceof Error ? error.message : String(error)}`
+    );
+    return { anchors: [], ignoredTerms: [] };
+  }
+}
+
+async function writeDebugStateIfRequested(state: TranslationRunState): Promise<void> {
+  const debugStatePath = process.env.MDZH_DEBUG_STATE_PATH?.trim();
+  if (!debugStatePath) {
+    return;
+  }
+
+  await mkdir(path.dirname(debugStatePath), { recursive: true });
+  await writeFile(debugStatePath, `${JSON.stringify(state, null, 2)}\n`, "utf8");
+}
+
 export async function translateMarkdownArticle(source: string, options: TranslateOptions = {}): Promise<TranslateResult> {
   const executor = options.executor ?? new DefaultCodexExecutor();
   const formatter = options.formatter ?? formatTranslatedBody;
@@ -293,43 +521,64 @@ export async function translateMarkdownArticle(source: string, options: Translat
   const { protectedBody, spans } = protectMarkdownSpans(body);
   const chunkPlan = planMarkdownChunks(protectedBody);
   const spanIndex = new Map(spans.map((span) => [span.id, span]));
+  const state = createTranslationRunState({
+    sourcePathHint,
+    documentTitle: chunkPlan.documentTitle,
+    frontmatterPresent: frontmatter !== null,
+    protectedSpans: spans,
+    chunks: buildChunkSeeds(chunkPlan, spanIndex)
+  });
   const restoredChunks: string[] = [];
   const gateAudits: GateAudit[] = [];
   let repairCyclesUsed = 0;
   let styleApplied = false;
-  let establishedTerms: string[] = [];
   let nextLocalSpanIndex = spanIndex.size + 1;
 
-  for (const chunk of chunkPlan.chunks) {
-    const chunkResult = await translateProtectedChunk(chunk, chunkPlan, {
-      cwd,
+  try {
+    report(options, "analyze", "Analyzing document-wide anchors.");
+    const anchorCatalog = await analyzeDocumentForAnchors(state, {
       executor,
-      draftModel,
       postDraftModel,
+      cwd,
       options,
-      sourcePathHint,
-      spanIndex,
-      establishedTerms,
-      nextLocalSpanIndex,
-      draftReasoningEffort: DRAFT_REASONING_EFFORT as ReasoningEffort,
       postDraftReasoningEffort
     });
+    applyAnchorCatalog(state, anchorCatalog);
 
-    restoredChunks.push(chunkResult.body + chunk.separatorAfter);
-    gateAudits.push(chunkResult.gateAudit);
-    repairCyclesUsed += chunkResult.repairCyclesUsed;
-    styleApplied = styleApplied || chunkResult.styleApplied;
-    nextLocalSpanIndex = chunkResult.nextLocalSpanIndex;
-    establishedTerms = mergeEstablishedTerms(
-      establishedTerms,
-      collectEstablishedTerms(chunk.source, chunkResult.body)
-    );
-  }
+    for (const chunk of chunkPlan.chunks) {
+      const chunkId = `chunk-${chunk.index + 1}`;
+      const chunkResult = await translateProtectedChunk(chunk, chunkPlan, {
+        state,
+        chunkId,
+        cwd,
+        executor,
+        draftModel,
+        postDraftModel,
+        options,
+        sourcePathHint,
+        spanIndex,
+        nextLocalSpanIndex,
+        draftReasoningEffort: DRAFT_REASONING_EFFORT as ReasoningEffort,
+        postDraftReasoningEffort
+      });
 
-  report(options, "format", "Formatting translated Markdown.");
-  try {
-    const formattedBody = await formatter(restoredChunks.join(""), sourcePathHint);
+      restoredChunks.push(chunkResult.body + chunk.separatorAfter);
+      gateAudits.push(chunkResult.gateAudit);
+      repairCyclesUsed += chunkResult.repairCyclesUsed;
+      styleApplied = styleApplied || chunkResult.styleApplied;
+      nextLocalSpanIndex = chunkResult.nextLocalSpanIndex;
+      setChunkFinalBody(state, chunkId, chunkResult.body);
+    }
+
+    report(options, "format", "Formatting translated Markdown.");
+    let formattedBody: string;
+    try {
+      formattedBody = await formatter(restoredChunks.join(""), sourcePathHint);
+    } catch (error) {
+      throw new FormattingError(error instanceof Error ? error.message : String(error));
+    }
     const markdown = reconstructMarkdown(frontmatter, formattedBody);
+    await writeDebugStateIfRequested(state);
     return {
       markdown,
       model: draftModel,
@@ -339,7 +588,11 @@ export async function translateMarkdownArticle(source: string, options: Translat
       chunkCount: chunkPlan.chunks.length
     };
   } catch (error) {
-    throw new FormattingError(error instanceof Error ? error.message : String(error));
+    await writeDebugStateIfRequested(state);
+    if (error instanceof HardGateError || error instanceof FormattingError) {
+      throw error;
+    }
+    throw error instanceof Error ? error : new Error(String(error));
   }
 }
 
@@ -370,6 +623,8 @@ function mergeGateAudits(audits: readonly GateAudit[]): GateAudit {
 }
 
 type ChunkTranslationContext = {
+  state: TranslationRunState;
+  chunkId: string;
   executor: CodexExecutor;
   draftModel: string;
   postDraftModel: string;
@@ -377,7 +632,6 @@ type ChunkTranslationContext = {
   sourcePathHint: string;
   options: TranslateOptions;
   spanIndex: ReadonlyMap<string, ProtectedSpan>;
-  establishedTerms: readonly string[];
   nextLocalSpanIndex: number;
   draftReasoningEffort: ReasoningEffort;
   postDraftReasoningEffort: ReasoningEffort | undefined;
@@ -393,6 +647,7 @@ type ChunkTranslationResult = {
 
 type DraftedSegmentState = {
   segment: ProtectedChunkSegment;
+  segmentId: string;
   promptContext: ChunkPromptContext;
   protectedSource: string;
   protectedBody: string;
@@ -401,36 +656,307 @@ type DraftedSegmentState = {
   threadId?: string;
 };
 
+function summarizePromptAnchor(anchor: PromptSlice["requiredAnchors"][number]): string {
+  return `${anchor.chineseHint || "未定中文"} / ${anchor.english}`;
+}
+
+function buildSegmentPromptContext(
+  state: TranslationRunState,
+  chunk: MarkdownChunk,
+  plan: MarkdownChunkPlan,
+  sourcePathHint: string,
+  segmentId: string,
+  source: string
+): ChunkPromptContext {
+  const slice = buildSegmentTaskSlice(state, `chunk-${chunk.index + 1}`, segmentId);
+  return {
+    documentTitle: plan.documentTitle,
+    headingPath: chunk.headingPath,
+    chunkIndex: chunk.index + 1,
+    chunkCount: plan.chunks.length,
+    sourcePathHint,
+    segmentHeadings: extractSegmentHeadingHints(source),
+    specialNotes: extractSegmentSpecialNotes(source),
+    requiredAnchors: slice.requiredAnchors.map(summarizePromptAnchor),
+    repeatAnchors: slice.repeatAnchors.map(summarizePromptAnchor),
+    establishedAnchors: slice.establishedAnchors.map(summarizePromptAnchor),
+    pendingRepairs: slice.pendingRepairs.map((task) => task.instruction),
+    stateSlice: slice
+  };
+}
+
+function buildChunkStylePromptContext(
+  state: TranslationRunState,
+  chunk: MarkdownChunk,
+  plan: MarkdownChunkPlan,
+  sourcePathHint: string,
+  source: string
+): ChunkPromptContext {
+  const chunkId = `chunk-${chunk.index + 1}`;
+  const chunkSegments = getChunkSegments(state, chunkId);
+  const combinedEstablished = chunkSegments.flatMap((segment) =>
+    buildSegmentTaskSlice(state, chunkId, segment.id).requiredAnchors.map(summarizePromptAnchor)
+  );
+  return {
+    documentTitle: plan.documentTitle,
+    headingPath: chunk.headingPath,
+    chunkIndex: chunk.index + 1,
+    chunkCount: plan.chunks.length,
+    sourcePathHint,
+    segmentHeadings: extractSegmentHeadingHints(source),
+    specialNotes: extractSegmentSpecialNotes(source),
+    requiredAnchors: [],
+    repeatAnchors: [],
+    establishedAnchors: [...new Set(combinedEstablished)],
+    pendingRepairs: [],
+    stateSlice: null
+  };
+}
+
+function inferRepairFailureType(audit: GateAudit, instruction: string): RepairFailureType {
+  if (/中英对照|双语|首现|锚定/.test(instruction)) {
+    return "missing_anchor";
+  }
+
+  const failedKey = (Object.entries(audit.hard_checks) as Array<
+    [StateAuditCheckKey, GateAudit["hard_checks"][AuditCheckKey]]
+  >).find(
+    ([, item]) => !item.pass
+  )?.[0];
+
+  switch (failedKey) {
+    case "paragraph_match":
+      return "paragraph_match";
+    case "numbers_units_logic":
+      return "numbers_units_logic";
+    case "chinese_punctuation":
+      return "chinese_punctuation";
+    case "unit_conversion_boundary":
+      return "unit_conversion_boundary";
+    case "protected_span_integrity":
+      return "protected_span_integrity";
+    default:
+      return "other";
+  }
+}
+
+function inferRepairLocationLabel(segmentSource: string): string {
+  if (containsHeadingLikeBlock(segmentSource)) {
+    return "标题";
+  }
+  if (containsBlockquoteBlock(segmentSource)) {
+    return "引用段";
+  }
+  if (containsListLikeBlock(segmentSource)) {
+    return "列表项";
+  }
+  if (containsListLeadInBlock(segmentSource)) {
+    return "列表引导句";
+  }
+  return "正文段落";
+}
+
+function inferRepairAnchorId(
+  slice: PromptSlice,
+  instruction: string
+): string | null {
+  const haystack = instruction.toLowerCase();
+  const anchors = [...slice.requiredAnchors, ...slice.repeatAnchors, ...slice.establishedAnchors];
+  for (const anchor of anchors) {
+    if (
+      haystack.includes(anchor.english.toLowerCase()) ||
+      (anchor.chineseHint && haystack.includes(anchor.chineseHint.toLowerCase()))
+    ) {
+      return anchor.anchorId;
+    }
+  }
+  return null;
+}
+
+function inferRepairTargetEnglish(
+  slice: PromptSlice,
+  instruction: string
+): string | null {
+  const anchorId = inferRepairAnchorId(slice, instruction);
+  if (anchorId) {
+    const anchors = [...slice.requiredAnchors, ...slice.repeatAnchors, ...slice.establishedAnchors];
+    const matchedAnchor = anchors.find((anchor) => anchor.anchorId === anchorId);
+    if (matchedAnchor) {
+      return matchedAnchor.english;
+    }
+  }
+
+  const backtickedEnglish = instruction.match(/`([^`]*[A-Za-z][^`]*)`/)?.[1]?.trim();
+  if (backtickedEnglish) {
+    return backtickedEnglish;
+  }
+
+  const quotedEnglish = instruction.match(/“([^”]*[A-Za-z][^”]*)”/)?.[1]?.trim();
+  if (quotedEnglish) {
+    return quotedEnglish;
+  }
+
+  const groupKey = inferRepairGroupKey(instruction);
+  if (groupKey && /[A-Za-z]/.test(groupKey)) {
+    return groupKey;
+  }
+
+  return null;
+}
+
+function buildStructuredSegmentAuditResult(
+  state: TranslationRunState,
+  draftedSegment: DraftedSegmentState,
+  audit: GateAudit
+): StateSegmentAuditResult {
+  const chunkId = draftedSegment.segmentId.split("-segment-")[0] ?? `chunk-${draftedSegment.segment.index + 1}`;
+  const slice = buildSegmentTaskSlice(state, chunkId, draftedSegment.segmentId);
+  const locationLabel = inferRepairLocationLabel(draftedSegment.segment.source);
+  const filteredAudit = suppressCoveredAnchorMustFix(state, draftedSegment, slice, audit);
+  const repairTasks: RepairTask[] = filteredAudit.must_fix.map((instruction, index) => ({
+    id: `${draftedSegment.segmentId}-repair-${state.repairs.length + index + 1}`,
+    segmentId: draftedSegment.segmentId,
+    anchorId: inferRepairAnchorId(slice, instruction),
+    failureType: inferRepairFailureType(filteredAudit, instruction),
+    locationLabel,
+    instruction,
+    status: "pending"
+  }));
+
+  return {
+    segmentId: draftedSegment.segmentId,
+    hardChecks: filteredAudit.hard_checks,
+    repairTasks,
+    rawMustFix: filteredAudit.must_fix
+  };
+}
+
+function suppressCoveredAnchorMustFix(
+  state: TranslationRunState,
+  draftedSegment: DraftedSegmentState,
+  slice: PromptSlice,
+  audit: GateAudit
+): GateAudit {
+  if (audit.must_fix.length === 0) {
+    return audit;
+  }
+
+  const remainingMustFix = audit.must_fix.filter((instruction) => {
+    const targetEnglish = inferRepairTargetEnglish(slice, instruction);
+    if (!targetEnglish) {
+      return true;
+    }
+
+    return !isAnchorCoveredByLongerPhraseInSameLocation(draftedSegment, targetEnglish);
+  });
+
+  if (remainingMustFix.length === audit.must_fix.length) {
+    return audit;
+  }
+
+  const nextHardChecks = { ...audit.hard_checks };
+  if (remainingMustFix.length === 0) {
+    nextHardChecks.first_mention_bilingual = { pass: true, problem: "" };
+  }
+
+  return {
+    hard_checks: nextHardChecks,
+    must_fix: remainingMustFix
+  };
+}
+
+function isAnchorCoveredByLongerPhraseInSameLocation(
+  draftedSegment: DraftedSegmentState,
+  english: string
+): boolean {
+  const sourceLines = draftedSegment.segment.source.split(/\r?\n/);
+  const translatedLines = draftedSegment.restoredBody.split(/\r?\n/);
+
+  const relevantPairs = sourceLines
+    .map((sourceLine, index) => ({ sourceLine, translatedLine: translatedLines[index] ?? "" }))
+    .filter(({ sourceLine }) => containsWholeEnglishPhrase(sourceLine, english));
+
+  if (relevantPairs.length === 0) {
+    return false;
+  }
+
+  return relevantPairs.every(({ sourceLine, translatedLine }) => {
+    if (hasStandaloneEnglishOccurrence(sourceLine, english)) {
+      return false;
+    }
+
+    return containsLongerEnglishPhraseWithChineseAnchor(translatedLine, english);
+  });
+}
+
+function hasStandaloneEnglishOccurrence(text: string, english: string): boolean {
+  const escaped = escapeForRegex(english);
+  return new RegExp(`\\b${escaped}\\b(?!\\s+[A-Za-z])`, "i").test(text);
+}
+
+function containsLongerEnglishPhraseWithChineseAnchor(text: string, english: string): boolean {
+  if (!/[\u4e00-\u9fff]/.test(text)) {
+    return false;
+  }
+
+  const escaped = escapeForRegex(english);
+  const patterns = [
+    new RegExp(`\\b${escaped}\\b\\s+[A-Za-z][A-Za-z0-9.+/_-]*`, "i"),
+    new RegExp(`[A-Za-z][A-Za-z0-9.+/_-]*\\s+\\b${escaped}\\b`, "i")
+  ];
+
+  return patterns.some((pattern) => pattern.test(text));
+}
+
+function containsWholeEnglishPhrase(text: string, english: string): boolean {
+  const escaped = escapeForRegex(english);
+  return new RegExp(`\\b${escaped}\\b`, "i").test(text);
+}
+
+function escapeForRegex(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 async function translateProtectedChunk(
   chunk: MarkdownChunk,
   plan: MarkdownChunkPlan,
   context: ChunkTranslationContext
 ): Promise<ChunkTranslationResult> {
   const chunkLabel = formatChunkLabel(chunk, plan);
-  const chunkPromptContext = buildChunkPromptContext(chunk, plan, context.sourcePathHint, context.establishedTerms);
+  const chunkPromptContext = buildChunkStylePromptContext(
+    context.state,
+    chunk,
+    plan,
+    context.sourcePathHint,
+    chunk.source
+  );
   const segments = splitProtectedChunkSegments(chunk.source, context.spanIndex);
   const draftedSegments: DraftedSegmentState[] = [];
-  const fixedSegments: ProtectedChunkSegment[] = [];
   let repairCyclesUsed = 0;
   let nextLocalSpanIndex = context.nextLocalSpanIndex;
+  markChunkPhase(context.state, context.chunkId, "drafting");
 
   for (const segment of segments) {
     if (segment.kind === "fixed") {
-      fixedSegments.push(segment);
       continue;
     }
 
-    const segmentPromptContext: ChunkPromptContext = {
-      ...chunkPromptContext,
-      segmentHeadings: extractSegmentHeadingHints(segment.source),
-      specialNotes: extractSegmentSpecialNotes(segment.source)
-    };
+    const segmentId = `${context.chunkId}-segment-${segment.index + 1}`;
+    const segmentPromptContext = buildSegmentPromptContext(
+      context.state,
+      chunk,
+      plan,
+      context.sourcePathHint,
+      segmentId,
+      segment.source
+    );
     const segmentLabel =
       segments.length > 1
         ? `${chunkLabel}, segment ${segment.index + 1}/${segments.length}`
         : chunkLabel;
     const segmentResult = await translateProtectedSegment(
       segment,
+      segmentId,
       plan,
       context,
       segmentPromptContext,
@@ -441,6 +967,7 @@ async function translateProtectedChunk(
     draftedSegments.push(segmentResult);
   }
 
+  markChunkPhase(context.state, context.chunkId, "auditing");
   let bundledAudit = await runBundledGateAudit(
     draftedSegments,
     plan,
@@ -462,6 +989,7 @@ async function translateProtectedChunk(
       `Chunk ${chunkPromptContext.chunkIndex}/${plan.chunks.length}${chunkLabel}: repair cycle ${repairCyclesUsed} of ${MAX_REPAIR_CYCLES} for ${failedSegmentCount} failed segment(s).`
     );
 
+    markChunkPhase(context.state, context.chunkId, "repairing");
     const repairedSegmentIndices = new Set<number>();
     for (const segmentAudit of bundledAudit.segments) {
       if (isHardPass(segmentAudit) || segmentAudit.must_fix.length === 0) {
@@ -479,7 +1007,9 @@ async function translateProtectedChunk(
 
       await repairDraftedSegment(
         draftedSegment,
-        segmentAudit.must_fix,
+        buildSegmentTaskSlice(context.state, context.chunkId, draftedSegment.segmentId).pendingRepairs.map(
+          (task) => task.repairId
+        ),
         plan,
         context,
         chunkLabel
@@ -499,6 +1029,7 @@ async function translateProtectedChunk(
   }
 
   if (!isBundledHardPass(bundledAudit)) {
+    markChunkPhase(context.state, context.chunkId, "failed");
     const remaining = bundledAudit.segments
       .filter((audit) => !isHardPass(audit))
       .map((audit) => `segment ${audit.segment_index}: ${audit.must_fix.join(" | ") || "hard gate failed"}`)
@@ -517,11 +1048,13 @@ async function translateProtectedChunk(
   let styleApplied = false;
 
   if (bundledAudit.segments.length > 0) {
-    const chunkStylePromptContext: ChunkPromptContext = {
-      ...chunkPromptContext,
-      segmentHeadings: extractSegmentHeadingHints(chunk.source),
-      specialNotes: extractSegmentSpecialNotes(chunk.source)
-    };
+    const chunkStylePromptContext = buildChunkStylePromptContext(
+      context.state,
+      chunk,
+      plan,
+      context.sourcePathHint,
+      chunk.source
+    );
 
     report(
       context.options,
@@ -554,6 +1087,9 @@ async function translateProtectedChunk(
         restoredChunkBody = hardPassBody;
       } else {
         styleApplied = true;
+        for (const draftedSegment of draftedSegments) {
+          markSegmentStyled(context.state, draftedSegment.segmentId);
+        }
       }
     } catch (error) {
       if (!(error instanceof HardGateError)) {
@@ -566,6 +1102,8 @@ async function translateProtectedChunk(
       );
     }
   }
+
+  markChunkPhase(context.state, context.chunkId, styleApplied ? "styled" : "completed");
 
   return {
     body: restoredChunkBody,
@@ -624,13 +1162,55 @@ function stripAddedInlineCodeFromPlainPaths(source: string, translated: string):
     }
   }
 
+  const plainCommandTokens = collectPlainCommandTokens(sourceWithoutInlineCode, sourceInlineCodeTokens);
+
   let normalized = translated;
   for (const token of plainPathTokens) {
     const escapedToken = token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
     normalized = normalized.replace(new RegExp("`" + escapedToken + "`", "g"), token);
   }
 
+  for (const token of plainCommandTokens) {
+    const escapedToken = token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    normalized = normalized.replace(new RegExp("`" + escapedToken + "`", "g"), token);
+  }
+
   return normalized;
+}
+
+function collectPlainCommandTokens(
+  sourceWithoutInlineCode: string,
+  sourceInlineCodeTokens: ReadonlySet<string>
+): Set<string> {
+  const tokens = new Set<string>();
+  const lines = sourceWithoutInlineCode.split(/\r?\n/);
+  let inCommandsSection = false;
+
+  for (const rawLine of lines) {
+    const trimmed = rawLine.trim();
+    if (!trimmed) {
+      continue;
+    }
+
+    if (/^#{1,6}\s+/.test(trimmed) || /^\*\*.+\*\*:?\s*$/.test(trimmed)) {
+      inCommandsSection = /commands/i.test(trimmed);
+      continue;
+    }
+
+    if (!inCommandsSection) {
+      continue;
+    }
+
+    const bulletMatch = trimmed.match(/^(?:[-*+]|\d+[.)])\s+([A-Za-z][A-Za-z0-9+._/-]*)\b/);
+    const token = bulletMatch?.[1]?.trim();
+    if (!token || sourceInlineCodeTokens.has(token)) {
+      continue;
+    }
+
+    tokens.add(token);
+  }
+
+  return tokens;
 }
 
 type ProtectedChunkSegment = {
@@ -643,6 +1223,7 @@ type ProtectedChunkSegment = {
 
 async function translateProtectedSegment(
   segment: ProtectedChunkSegment,
+  segmentId: string,
   plan: MarkdownChunkPlan,
   context: ChunkTranslationContext,
   chunkPromptContext: ChunkPromptContext,
@@ -671,12 +1252,27 @@ async function translateProtectedSegment(
     }
   );
   threadId = draftResult.threadId;
-  const normalizedDraftText = stripAddedInlineCodeFromPlainPaths(protectedSource, draftResult.text);
-  const canonicalProtectedBody = reprotectMarkdownSpans(normalizedDraftText, combinedSpans);
+  const normalizedDraftText = normalizeSegmentAnchorText(
+    stripAddedInlineCodeFromPlainPaths(protectedSource, draftResult.text),
+    chunkPromptContext.stateSlice
+  );
+  const normalizedHeadingDraftText = normalizeHeadingLikeAnchorText(
+    protectedSource,
+    normalizedDraftText,
+    chunkPromptContext.stateSlice
+  );
+  const canonicalProtectedBody = reprotectMarkdownSpans(normalizedHeadingDraftText, combinedSpans);
   const restoredBody = restoreMarkdownSpans(canonicalProtectedBody, combinedSpans);
+  applySegmentDraft(context.state, segmentId, {
+    protectedSource,
+    protectedBody: canonicalProtectedBody,
+    restoredBody,
+    ...(threadId ? { threadId } : {})
+  });
 
   return {
     segment,
+    segmentId,
     promptContext: chunkPromptContext,
     protectedSource,
     protectedBody: canonicalProtectedBody,
@@ -688,17 +1284,35 @@ async function translateProtectedSegment(
 
 async function repairDraftedSegment(
   draftedSegment: DraftedSegmentState,
-  mustFix: readonly string[],
+  repairTaskIds: readonly string[],
   plan: MarkdownChunkPlan,
   context: ChunkTranslationContext,
   chunkLabel: string
 ): Promise<void> {
-  const mustFixBatches = splitMustFixBatches(mustFix, MAX_MUST_FIX_PER_REPAIR_CALL);
+  const repairTasks = repairTaskIds
+    .map((repairId) => context.state.repairs.find((item) => item.id === repairId))
+    .filter((task): task is RepairTask => task !== undefined && task.status === "pending");
+  const repairTaskBatches = splitRepairTaskBatches(context.state, repairTasks, MAX_MUST_FIX_PER_REPAIR_CALL);
+  const chunk = plan.chunks.find((item) => `chunk-${item.index + 1}` === context.chunkId);
+  if (!chunk) {
+    throw new HardGateError(`Missing chunk ${context.chunkId} while repairing segment ${draftedSegment.segmentId}.`);
+  }
 
-  for (const [batchIndex, mustFixBatch] of mustFixBatches.entries()) {
-    const repairPromptContext = buildRepairPromptContext(draftedSegment.promptContext, mustFixBatch);
+  for (const [batchIndex, taskBatch] of repairTaskBatches.entries()) {
+    const mustFixBatch = taskBatch.map((task) => task.instruction);
+    const repairPromptContext = buildRepairPromptContext(
+      buildSegmentPromptContext(
+        context.state,
+        chunk,
+        plan,
+        context.sourcePathHint,
+        draftedSegment.segmentId,
+        draftedSegment.segment.source
+      ),
+      mustFixBatch
+    );
     const batchSuffix =
-      mustFixBatches.length > 1 ? `，修复批次 ${batchIndex + 1}/${mustFixBatches.length}` : "";
+      repairTaskBatches.length > 1 ? `，修复批次 ${batchIndex + 1}/${repairTaskBatches.length}` : "";
     report(
       context.options,
       "repair",
@@ -729,13 +1343,70 @@ async function repairDraftedSegment(
     if (repairResult.threadId) {
       draftedSegment.threadId = repairResult.threadId;
     }
-    const normalizedRepairText = stripAddedInlineCodeFromPlainPaths(
-      draftedSegment.protectedSource,
-      repairResult.text
+    const normalizedRepairText = normalizeSegmentAnchorText(
+      stripAddedInlineCodeFromPlainPaths(draftedSegment.protectedSource, repairResult.text),
+      buildSegmentTaskSlice(context.state, context.chunkId, draftedSegment.segmentId)
     );
-    draftedSegment.protectedBody = reprotectMarkdownSpans(normalizedRepairText, draftedSegment.spans);
+    const normalizedHeadingRepairText = normalizeHeadingLikeAnchorText(
+      draftedSegment.protectedSource,
+      normalizedRepairText,
+      buildSegmentTaskSlice(context.state, context.chunkId, draftedSegment.segmentId)
+    );
+    const normalizedExplicitRepairText = normalizeExplicitRepairAnchorText(
+      draftedSegment.protectedSource,
+      normalizedHeadingRepairText,
+      buildSegmentTaskSlice(context.state, context.chunkId, draftedSegment.segmentId)
+    );
+    draftedSegment.protectedBody = reprotectMarkdownSpans(normalizedExplicitRepairText, draftedSegment.spans);
     draftedSegment.restoredBody = restoreMarkdownSpans(draftedSegment.protectedBody, draftedSegment.spans);
+    applyRepairResult(context.state, draftedSegment.segmentId, taskBatch.map((task) => task.id), {
+      protectedBody: draftedSegment.protectedBody,
+      restoredBody: draftedSegment.restoredBody,
+      ...(draftedSegment.threadId ? { threadId: draftedSegment.threadId } : {})
+    });
   }
+}
+
+function splitRepairTaskBatches(
+  state: TranslationRunState,
+  tasks: readonly RepairTask[],
+  batchSize: number
+): RepairTask[][] {
+  const normalizedBatchSize = Math.max(1, batchSize);
+  const batches: RepairTask[][] = [];
+  let index = 0;
+
+  while (index < tasks.length) {
+    const batch = [tasks[index]!];
+    let batchFamilies = new Set<string>(
+      batch
+        .map((task) => task.anchorId)
+        .filter((anchorId): anchorId is string => Boolean(anchorId))
+        .map((anchorId) => state.anchors.find((anchor) => anchor.id === anchorId)?.familyId ?? anchorId)
+    );
+    index += 1;
+
+    while (index < tasks.length) {
+      const nextTask = tasks[index]!;
+      const nextFamily = nextTask.anchorId
+        ? state.anchors.find((anchor) => anchor.id === nextTask.anchorId)?.familyId ?? nextTask.anchorId
+        : null;
+      const relatedToBatch = nextFamily ? batchFamilies.has(nextFamily) : false;
+      if (batch.length >= normalizedBatchSize && !relatedToBatch) {
+        break;
+      }
+
+      batch.push(nextTask);
+      if (nextFamily) {
+        batchFamilies = new Set([...batchFamilies, nextFamily]);
+      }
+      index += 1;
+    }
+
+    batches.push(batch);
+  }
+
+  return batches;
 }
 
 function splitMustFixBatches(mustFix: readonly string[], batchSize: number): string[][] {
@@ -860,6 +1531,10 @@ function buildRepairPromptContext(
   const extraNotes = [...promptContext.specialNotes];
   const explicitEnglishTargets = extractExplicitEnglishTargetsFromMustFix(mustFix);
   const conceptFamilyTargets = extractConceptFamilyTargets(explicitEnglishTargets);
+  const duplicatePendingAnchorGroups = collectDuplicatePendingAnchorGroups(promptContext);
+  const hasQuotedSentenceLocation =
+    mustFix.some((item) => /位置：[^。\n]*“[^”]+”/.test(item)) &&
+    mustFix.some((item) => item.includes("首次出现") || item.includes("中英文") || item.includes("中英对照"));
   const targetsHeadingLikeAnchor = mustFix.some(
     (item) => item.includes("标题") || item.includes("首次出现") || item.includes("中英对照")
   );
@@ -886,6 +1561,20 @@ function buildRepairPromptContext(
       extraNotes.push(
         "如果当前分段的结构是“冒号引导句或说明句 + 下一行加粗标题/标题 + 后续列表”，而 must_fix 指向的是该标题中的首现双语缺失，必须直接在这个标题本身补齐锚定；不要把修复转移到前面的引导句，也不要只在后面的列表项里补一次。",
         "对这类结构里的核心概念性英文标题，例如分类名、能力名、隔离/限制/保护等机制名称，修复目标应是标题本身的最小自然双语形式，例如“中文标题（English Term）”或等价表达；不要只保留中文标题。"
+      );
+    }
+
+    if (
+      promptContext.segmentHeadings.some(
+        (heading) =>
+          /^[A-Za-z][A-Za-z0-9 ]{0,30}\d+\s*:\s*[A-Za-z]/.test(heading) ||
+          /^[A-Za-z][A-Za-z0-9 ]{0,30}\s*:\s*[A-Za-z]/.test(heading)
+      )
+    ) {
+      extraNotes.push(
+        "如果标题本身带有编号标签、测试标签、步骤标签、示例标签或其他冒号前导部分，例如 `Test 2: ...`、`Step 1: ...`、`Example: ...`，修复时必须在这一整行标题里同时保留前导标签和后面的核心英文术语锚点。",
+        "不要只把冒号后的英文核心术语翻成中文而漏掉英文原名，也不要把英文锚点挪到下一句、后面的解释段或列表项里；这类标题的正确落点就是标题本身。",
+        "对这类标题，优先保留“中文标题 + 英文术语回括”或等价的最小自然双语形式，同时完整保留 `Test 2`、`Step 1`、`Example` 这类前导结构。"
       );
     }
   }
@@ -932,6 +1621,13 @@ function buildRepairPromptContext(
     );
   }
 
+  if (hasQuotedSentenceLocation) {
+    extraNotes.push(
+      "本次 must_fix 已经通过“位置：……“某句””的形式明确摘录了具体句子。修复时必须把这句视为唯一有效落点，在这同一句本身补齐缺失的首现中英文对照或中文说明。",
+      "即使 must_fix 外层写的是“第N段”或正文段落，也不要把锚定转移到同段其他句子、标题、列表项、引用外说明或后续段落；被摘录的那一句就是修复目标。"
+    );
+  }
+
   if (
     promptContext.specialNotes.some((item) => item.includes("当前分段包含引用段落")) &&
     mustFix.some((item) => item.includes("引用段")) &&
@@ -958,6 +1654,16 @@ function buildRepairPromptContext(
         .join(" ; ")}。`,
       "对同一概念家族里的 base term 和 extended term，必须把它们视为两个独立锚点分别修复；不能因为已经补了较短词组，就省略较长词组，反之亦然。",
       "如果 must_fix 同时点名了引用句里的短概念和说明句/引导句里的扩展概念，修复时要在各自被点名的位置分别补齐，不要把其中一个锚点挪去充当另一个。"
+    );
+  }
+
+  if (duplicatePendingAnchorGroups.length > 0) {
+    extraNotes.push(
+      `当前分段里同一锚点在多个被点名位置仍未修齐：${duplicatePendingAnchorGroups
+        .map((group) => group.join(" / "))
+        .join(" ; ")}。`,
+      "即使本批 must_fix 只展示其中一条，也要结合状态切片里同一锚点的其他待修任务，逐个在各自被点名的句子、引用句、标题或列表项本身补齐。",
+      "不要因为其中一处已经补过英文原名或中文说明，就把另一处视为已完成；同一锚点的多个落点需要分别达标。"
     );
   }
 
@@ -1009,6 +1715,46 @@ function buildRepairPromptContext(
     ...promptContext,
     specialNotes: extraNotes
   };
+}
+
+function collectDuplicatePendingAnchorGroups(promptContext: ChunkPromptContext): string[][] {
+  const pendingRepairs = promptContext.stateSlice?.pendingRepairs ?? [];
+  const groups = new Map<string, Set<string>>();
+
+  for (const repair of pendingRepairs) {
+    const groupKey = repair.anchorId ?? inferRepairGroupKey(repair.instruction);
+    if (!groupKey) {
+      continue;
+    }
+
+    const group = groups.get(groupKey) ?? new Set<string>();
+    group.add(repair.locationLabel);
+    group.add(repair.instruction);
+    groups.set(groupKey, group);
+  }
+
+  return [...groups.values()]
+    .filter((group) => group.size > 1)
+    .map((group) => [...group].slice(0, 3));
+}
+
+function inferRepairGroupKey(instruction: string): string | null {
+  const quotedTerm = instruction.match(/首次出现的“([^”]+)”/)?.[1]?.trim();
+  if (quotedTerm) {
+    return quotedTerm;
+  }
+
+  const backtickedTerm = instruction.match(/`([^`]*)`/)?.[1]?.trim();
+  if (backtickedTerm) {
+    return backtickedTerm;
+  }
+
+  const quotedEnglish = instruction.match(/“([^”]*[A-Za-z][^”]*)”/)?.[1]?.trim();
+  if (quotedEnglish) {
+    return quotedEnglish;
+  }
+
+  return null;
 }
 
 async function runBundledGateAudit(
@@ -1072,6 +1818,16 @@ async function runBundledGateAudit(
 
   for (const segmentAudit of bundledAudit.segments) {
     validateStructuralGateChecks(segmentAudit);
+    const draftedSegment = draftedSegments.find((segment) => segment.segment.index + 1 === segmentAudit.segment_index);
+    if (!draftedSegment) {
+      throw new HardGateError(
+        `Chunk ${chunkPromptContext.chunkIndex}/${plan.chunks.length}${chunkLabel}: unknown segment ${segmentAudit.segment_index} in bundled audit.`
+      );
+    }
+    applySegmentAudit(
+      context.state,
+      buildStructuredSegmentAuditResult(context.state, draftedSegment, segmentAudit)
+    );
   }
   return bundledAudit;
 }
@@ -1156,6 +1912,11 @@ async function runFallbackSegmentAudits(
     );
 
     const audit = parseGateAudit(auditResult.text);
+    validateStructuralGateChecks(audit);
+    applySegmentAudit(
+      context.state,
+      buildStructuredSegmentAuditResult(context.state, draftedSegment, audit)
+    );
     segments.push({
       segment_index: draftedSegment.segment.index + 1,
       ...audit
@@ -1617,27 +2378,13 @@ type ChunkPromptContext = {
   chunkCount: number;
   sourcePathHint: string;
   segmentHeadings: string[];
-  establishedTerms: string[];
+  requiredAnchors: string[];
+  repeatAnchors: string[];
+  establishedAnchors: string[];
+  pendingRepairs: string[];
   specialNotes: string[];
+  stateSlice: PromptSlice | null;
 };
-
-function buildChunkPromptContext(
-  chunk: MarkdownChunk,
-  plan: MarkdownChunkPlan,
-  sourcePathHint: string,
-  establishedTerms: readonly string[]
-): ChunkPromptContext {
-  return {
-    documentTitle: plan.documentTitle,
-    headingPath: chunk.headingPath,
-    chunkIndex: chunk.index + 1,
-    chunkCount: plan.chunks.length,
-    sourcePathHint,
-    segmentHeadings: [],
-    establishedTerms: [...establishedTerms],
-    specialNotes: []
-  };
-}
 
 function withChunkContext(prompt: string, context: ChunkPromptContext): string {
   return withChunkContextAt(prompt, context, "【英文原文】");
@@ -1649,8 +2396,12 @@ function withChunkContextAt(prompt: string, context: ChunkPromptContext, marker:
   const documentTitle = context.documentTitle ?? "无标题";
   const segmentHeadings =
     context.segmentHeadings.length > 0 ? context.segmentHeadings.join(" | ") : "无显式标题";
-  const establishedTerms =
-    context.establishedTerms.length > 0 ? context.establishedTerms.join(" | ") : "无";
+  const requiredAnchors = context.requiredAnchors.length > 0 ? context.requiredAnchors.join(" | ") : "无";
+  const repeatAnchors = context.repeatAnchors.length > 0 ? context.repeatAnchors.join(" | ") : "无";
+  const establishedAnchors =
+    context.establishedAnchors.length > 0 ? context.establishedAnchors.join(" | ") : "无";
+  const pendingRepairs = context.pendingRepairs.length > 0 ? context.pendingRepairs.join(" | ") : "无";
+  const stateSliceJson = context.stateSlice ? JSON.stringify(context.stateSlice, null, 2) : "{}";
   const contextLines = [
     "【全文上下文】",
     `源文件提示：${context.sourcePathHint}`,
@@ -1658,11 +2409,16 @@ function withChunkContextAt(prompt: string, context: ChunkPromptContext, marker:
     `当前分块：第 ${context.chunkIndex} / ${context.chunkCount} 块`,
     `当前章节路径：${headingPath}`,
     `当前分段标题：${segmentHeadings}`,
-    `前文已完成首现锚定的专名/术语：${establishedTerms}`,
+    `当前分段必须建立的首现锚点：${requiredAnchors}`,
+    `当前分段里已在前文建立过、禁止重复补锚的项目：${repeatAnchors}`,
+    `全文已建立的锚点摘要：${establishedAnchors}`,
+    `当前分段待处理的结构化修复任务：${pendingRepairs}`,
+    "【状态切片(JSON)】",
+    stateSliceJson,
     "说明：当前输入只覆盖全文的一部分。请保持术语、专名、语气和上下文的一致性，不要补写未出现在当前分块中的段落。",
-    "上面的清单表示：这些专名、产品名、项目名或关键术语已经在全文前文完成首现双语锚定。",
-    "对清单内条目及其明显简称，即使它们在当前分块标题、加粗标题、列表项标题或正文里是本块第一次出现，也一律视为全文非首现；翻译、审校和修复时不要再要求补首次中英文对照。",
-    "只有不在前文清单里、且确实是全文第一次出现的专名、产品名、项目名或关键术语，才需要补首次中英文对照。",
+    "requiredAnchors 表示：这些专名、产品名、项目名或关键术语必须在当前分段本身建立首现双语锚点。",
+    "repeatAnchors 表示：这些项目已经在全文前文完成首现锚定，即使它们在当前分块标题、加粗标题、列表项标题或正文里是本块第一次出现，也不得再补首现中英文对照。",
+    "pendingRepairs 表示：这些修复任务已经绑定到当前分段，修复时必须就地完成，不要把锚点挪到别处。",
     "如果当前分段标题、加粗标题、列表项标题里包含冒号、括号限定语、枚举标签或英文补充说明，翻译时必须完整保留这些信息，不要只保留其中一部分。"
   ].join("\n");
   const specialNotesBlock =
