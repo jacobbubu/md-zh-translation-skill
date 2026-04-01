@@ -759,6 +759,37 @@ function inferRepairAnchorId(
   return null;
 }
 
+function inferRepairTargetEnglish(
+  slice: PromptSlice,
+  instruction: string
+): string | null {
+  const anchorId = inferRepairAnchorId(slice, instruction);
+  if (anchorId) {
+    const anchors = [...slice.requiredAnchors, ...slice.repeatAnchors, ...slice.establishedAnchors];
+    const matchedAnchor = anchors.find((anchor) => anchor.anchorId === anchorId);
+    if (matchedAnchor) {
+      return matchedAnchor.english;
+    }
+  }
+
+  const backtickedEnglish = instruction.match(/`([^`]*[A-Za-z][^`]*)`/)?.[1]?.trim();
+  if (backtickedEnglish) {
+    return backtickedEnglish;
+  }
+
+  const quotedEnglish = instruction.match(/“([^”]*[A-Za-z][^”]*)”/)?.[1]?.trim();
+  if (quotedEnglish) {
+    return quotedEnglish;
+  }
+
+  const groupKey = inferRepairGroupKey(instruction);
+  if (groupKey && /[A-Za-z]/.test(groupKey)) {
+    return groupKey;
+  }
+
+  return null;
+}
+
 function buildStructuredSegmentAuditResult(
   state: TranslationRunState,
   draftedSegment: DraftedSegmentState,
@@ -767,11 +798,12 @@ function buildStructuredSegmentAuditResult(
   const chunkId = draftedSegment.segmentId.split("-segment-")[0] ?? `chunk-${draftedSegment.segment.index + 1}`;
   const slice = buildSegmentTaskSlice(state, chunkId, draftedSegment.segmentId);
   const locationLabel = inferRepairLocationLabel(draftedSegment.segment.source);
-  const repairTasks: RepairTask[] = audit.must_fix.map((instruction, index) => ({
+  const filteredAudit = suppressCoveredAnchorMustFix(state, draftedSegment, slice, audit);
+  const repairTasks: RepairTask[] = filteredAudit.must_fix.map((instruction, index) => ({
     id: `${draftedSegment.segmentId}-repair-${state.repairs.length + index + 1}`,
     segmentId: draftedSegment.segmentId,
     anchorId: inferRepairAnchorId(slice, instruction),
-    failureType: inferRepairFailureType(audit, instruction),
+    failureType: inferRepairFailureType(filteredAudit, instruction),
     locationLabel,
     instruction,
     status: "pending"
@@ -779,10 +811,96 @@ function buildStructuredSegmentAuditResult(
 
   return {
     segmentId: draftedSegment.segmentId,
-    hardChecks: audit.hard_checks,
+    hardChecks: filteredAudit.hard_checks,
     repairTasks,
-    rawMustFix: audit.must_fix
+    rawMustFix: filteredAudit.must_fix
   };
+}
+
+function suppressCoveredAnchorMustFix(
+  state: TranslationRunState,
+  draftedSegment: DraftedSegmentState,
+  slice: PromptSlice,
+  audit: GateAudit
+): GateAudit {
+  if (audit.must_fix.length === 0) {
+    return audit;
+  }
+
+  const remainingMustFix = audit.must_fix.filter((instruction) => {
+    const targetEnglish = inferRepairTargetEnglish(slice, instruction);
+    if (!targetEnglish) {
+      return true;
+    }
+
+    return !isAnchorCoveredByLongerPhraseInSameLocation(draftedSegment, targetEnglish);
+  });
+
+  if (remainingMustFix.length === audit.must_fix.length) {
+    return audit;
+  }
+
+  const nextHardChecks = { ...audit.hard_checks };
+  if (remainingMustFix.length === 0) {
+    nextHardChecks.first_mention_bilingual = { pass: true, problem: "" };
+  }
+
+  return {
+    hard_checks: nextHardChecks,
+    must_fix: remainingMustFix
+  };
+}
+
+function isAnchorCoveredByLongerPhraseInSameLocation(
+  draftedSegment: DraftedSegmentState,
+  english: string
+): boolean {
+  const sourceLines = draftedSegment.segment.source.split(/\r?\n/);
+  const translatedLines = draftedSegment.restoredBody.split(/\r?\n/);
+
+  const relevantPairs = sourceLines
+    .map((sourceLine, index) => ({ sourceLine, translatedLine: translatedLines[index] ?? "" }))
+    .filter(({ sourceLine }) => containsWholeEnglishPhrase(sourceLine, english));
+
+  if (relevantPairs.length === 0) {
+    return false;
+  }
+
+  return relevantPairs.every(({ sourceLine, translatedLine }) => {
+    if (hasStandaloneEnglishOccurrence(sourceLine, english)) {
+      return false;
+    }
+
+    return containsLongerEnglishPhraseWithChineseAnchor(translatedLine, english);
+  });
+}
+
+function hasStandaloneEnglishOccurrence(text: string, english: string): boolean {
+  const escaped = escapeForRegex(english);
+  return new RegExp(`\\b${escaped}\\b(?!\\s+[A-Za-z])`, "i").test(text);
+}
+
+function containsLongerEnglishPhraseWithChineseAnchor(text: string, english: string): boolean {
+  if (!/[\u4e00-\u9fff]/.test(text)) {
+    return false;
+  }
+
+  const escaped = escapeForRegex(english);
+  const patterns = [
+    new RegExp(`\\b${escaped}\\b\\s+[A-Za-z][A-Za-z0-9.+/_-]*`, "i"),
+    new RegExp(`[A-Za-z][A-Za-z0-9.+/_-]*\\s+\\b${escaped}\\b`, "i")
+  ];
+
+  return patterns.some((pattern) => pattern.test(text));
+}
+
+function containsWholeEnglishPhrase(text: string, english: string): boolean {
+  const escaped = escapeForRegex(english);
+  return new RegExp(`\\b${escaped}\\b`, "i").test(text);
+}
+
+function escapeForRegex(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 async function translateProtectedChunk(
@@ -1563,6 +1681,11 @@ function inferRepairGroupKey(instruction: string): string | null {
   const quotedTerm = instruction.match(/首次出现的“([^”]+)”/)?.[1]?.trim();
   if (quotedTerm) {
     return quotedTerm;
+  }
+
+  const backtickedTerm = instruction.match(/`([^`]*)`/)?.[1]?.trim();
+  if (backtickedTerm) {
+    return backtickedTerm;
   }
 
   const quotedEnglish = instruction.match(/“([^”]*[A-Za-z][^”]*)”/)?.[1]?.trim();

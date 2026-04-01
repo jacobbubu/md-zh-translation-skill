@@ -1055,7 +1055,31 @@ test("translateMarkdownArticle keeps standalone code blocks out of translatable 
     ""
   ].join("\n");
 
-  const executor = new PromptAwareExecutor();
+  class AnchorExecutor extends PromptAwareExecutor {
+    override async execute(prompt: string, options: CodexExecOptions): Promise<CodexExecResult> {
+      if (isDocumentAnalysisPrompt(prompt)) {
+        return createExecResult(
+          JSON.stringify({
+            anchors: [
+              {
+                english: "npm",
+                chineseHint: "npm",
+                familyKey: "npm",
+                firstOccurrence: {
+                  chunkId: "chunk-1",
+                  segmentId: "chunk-1-segment-1"
+                }
+              }
+            ],
+            ignoredTerms: []
+          })
+        );
+      }
+      return super.execute(prompt, options);
+    }
+  }
+
+  const executor = new AnchorExecutor();
   const result = await translateMarkdownArticle(source, {
     executor,
     formatter: async (markdown) => markdown
@@ -2807,6 +2831,59 @@ test("translateMarkdownArticle does not carry generic prior headings into establ
   assert.ok(establishedTermsLine);
   assert.match(establishedTermsLine[1] ?? "", /Claude Code/);
   assert.doesNotMatch(establishedTermsLine[1] ?? "", /Launch Checklist/);
+});
+
+test("translateMarkdownArticle suppresses a short-anchor must_fix when a longer anchored phrase already covers it in the same list item", async () => {
+  const source = [
+    "## So, What Do AI Agents Need?",
+    "",
+    "- Pre-approved destinations (npm registry, GitHub, your APIs)",
+    ""
+  ].join("\n");
+
+  const executor = new PromptAwareExecutor();
+  const result = await translateMarkdownArticle(source, {
+    executor: {
+      async execute(prompt, options) {
+        executor.prompts.push(prompt);
+
+        if (options.outputSchema && prompt.includes("【分段审校输入】")) {
+          return createExecResult(
+            wrapPerSegmentAudits(prompt, [
+              {
+                segment_index: 1,
+                audit: createAudit(false, [
+                  "第 1 个项目符号“预先批准的目标位置（npm 包仓库（npm registry）、GitHub（代码托管平台）、你的 API）”中的 `npm` 首现未完成中英对照；需在此处直接补成带中文说明的自然锚点，不能等到后文再补。"
+                ])
+              }
+            ])
+          );
+        }
+
+        if (options.outputSchema || prompt.includes("只返回 JSON")) {
+          return createExecResult(JSON.stringify(createAudit(true)));
+        }
+
+        const sourceSection = extractPromptSection(prompt, "【英文原文】");
+        if (sourceSection !== null) {
+          return createExecResult(
+            sourceSection.replace(
+              "- Pre-approved destinations (npm registry, GitHub, your APIs)",
+              "- 预先批准的目标位置（npm 包仓库（npm registry）、GitHub（代码托管平台）、你的 API）"
+            )
+          );
+        }
+
+        const currentTranslation = extractPromptSection(prompt, "【当前译文】");
+        return createExecResult(currentTranslation ?? "");
+      }
+    },
+    formatter: async (markdown) => markdown
+  });
+
+  assert.match(result.markdown, /npm 包仓库（npm registry）/);
+  const repairPrompt = executor.prompts.find((item) => item.includes("【must_fix】") && item.includes("`npm`"));
+  assert.equal(repairPrompt, undefined);
 });
 
 test("translateMarkdownArticle adds structure guidance for translatable emphasis and command flags", async () => {
