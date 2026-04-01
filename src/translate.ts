@@ -214,6 +214,14 @@ function auditItemSchema() {
   };
 }
 
+function normalizeAuditQuoteStyle(text: string): string {
+  return text
+    .replaceAll("「", "“")
+    .replaceAll("」", "”")
+    .replaceAll("『", "‘")
+    .replaceAll("』", "’");
+}
+
 function extractJsonObject(text: string): string {
   const trimmed = text.trim();
   if (trimmed.startsWith("```")) {
@@ -262,6 +270,8 @@ function parseGateAuditValue(value: unknown): GateAudit {
     if (typeof typed.pass !== "boolean" || typeof typed.problem !== "string") {
       throw new HardGateError(`Gate audit JSON has an invalid hard_checks.${key} entry.`);
     }
+
+    typed.problem = normalizeAuditQuoteStyle(typed.problem);
   }
 
   if (!Array.isArray(mustFix) || !mustFix.every((item) => typeof item === "string")) {
@@ -270,7 +280,7 @@ function parseGateAuditValue(value: unknown): GateAudit {
 
   return {
     hard_checks: hardChecks as GateAudit["hard_checks"],
-    must_fix: mustFix.map((item) => item.trim()).filter(Boolean)
+    must_fix: mustFix.map((item) => normalizeAuditQuoteStyle(item.trim())).filter(Boolean)
   };
 }
 

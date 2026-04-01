@@ -250,6 +250,16 @@ test("parseGateAudit accepts fenced JSON output", () => {
   assert.deepEqual(parsed.must_fix, []);
 });
 
+test("parseGateAudit normalizes corner quotes in audit text", () => {
+  const audit = createAudit(false, ["第 2 类「Commands」小节中“docker”“sudo”两条命令需去掉行内代码。"]);
+  audit.hard_checks.first_mention_bilingual.problem = "标题『System File Access』缺少首现中英对照。";
+
+  const parsed = parseGateAudit(JSON.stringify(audit));
+
+  assert.equal(parsed.hard_checks.first_mention_bilingual.problem, "标题‘System File Access’缺少首现中英对照。");
+  assert.deepEqual(parsed.must_fix, ["第 2 类“Commands”小节中“docker”“sudo”两条命令需去掉行内代码。"]);
+});
+
 test("translateMarkdownArticle repairs once and then runs style polish", async () => {
   const source = "# Title\n\nBody";
   const firstAudit = JSON.stringify(createAudit(false, ["标题首现术语缺少中英对照"]));
