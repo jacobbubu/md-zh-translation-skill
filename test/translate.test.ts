@@ -1969,6 +1969,65 @@ test("translateMarkdownArticle repeats blockquote-specific repair guidance when 
   assert.match(repairPrompt, /不要把英文锚点延后到后文标题或下一段第一次出现的位置/);
 });
 
+test("translateMarkdownArticle normalizes an explicit quote-segment anchor target after repair", async () => {
+  const source = [
+    "## So, What Do AI Agents Need?",
+    "",
+    "> Let's now look at what Sandbox mode protects you from.",
+    ""
+  ].join("\n");
+
+  const executor = new PromptAwareExecutor();
+  const result = await translateMarkdownArticle(source, {
+    executor: {
+      async execute(prompt, options) {
+        executor.prompts.push(prompt);
+
+        if (options.outputSchema && prompt.includes("【分段审校输入】")) {
+          if (prompt.includes("【当前译文】\n> 现在让我们看看沙箱模式（Sandbox mode）会保护你免受什么影响。")) {
+            return createExecResult(wrapPerSegmentAudits(prompt, [{ segment_index: 1, audit: createAudit(true) }]));
+          }
+
+          return createExecResult(
+            wrapPerSegmentAudits(prompt, [
+              {
+                segment_index: 1,
+                audit: createAudit(false, [
+                  "第 4 段引用句“现在让我们看看沙箱模式会保护你免受什么影响。”中，关键术语“Sandbox mode”首次出现缺少英文对照，需补为“沙箱模式（Sandbox mode）”，并保留引用结构。"
+                ])
+              }
+            ])
+          );
+        }
+
+        if (options.outputSchema || prompt.includes("只返回 JSON")) {
+          return createExecResult(JSON.stringify(createAudit(true)));
+        }
+
+        const currentTranslation = extractPromptSection(prompt, "【当前译文】");
+        if (currentTranslation !== null) {
+          return createExecResult(currentTranslation);
+        }
+
+        const sourceSection = extractPromptSection(prompt, "【英文原文】");
+        if (sourceSection !== null) {
+          return createExecResult(
+            sourceSection.replace(
+              "> Let's now look at what Sandbox mode protects you from.",
+              "> 现在让我们看看沙箱模式会保护你免受什么影响。"
+            )
+          );
+        }
+
+        return createExecResult("");
+      }
+    },
+    formatter: async (markdown) => markdown
+  });
+
+  assert.match(result.markdown, /> 现在让我们看看沙箱模式（Sandbox mode）会保护你免受什么影响。/);
+});
+
 test("translateMarkdownArticle repeats paragraph-specific repair guidance when must_fix targets a numbered paragraph", async () => {
   const source = [
     "# Title",

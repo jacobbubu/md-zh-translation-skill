@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  normalizeExplicitRepairAnchorText,
   normalizeHeadingLikeAnchorText,
   normalizeSegmentAnchorText,
   type PromptAnchor
@@ -99,4 +100,25 @@ test("normalizeHeadingLikeAnchorText restores a missing english anchor inside a 
 
   assert.match(normalized, /\*\*测试 2：系统文件访问（System File Access）\*\*/);
   assert.match(normalized, /告诉 Claude：/);
+});
+
+test("normalizeExplicitRepairAnchorText restores a quoted-line anchor from an explicit repair target", () => {
+  const slice = createSlice({
+    pendingRepairs: [
+      {
+        repairId: "repair-1",
+        anchorId: null,
+        failureType: "missing_anchor",
+        locationLabel: "引用段",
+        instruction:
+          "第 4 段引用句“现在让我们看看沙箱模式会保护你免受什么影响。”中，关键术语“Sandbox mode”首次出现缺少英文对照，需补为“沙箱模式（Sandbox mode）”，并保留引用结构。"
+      }
+    ]
+  });
+  const source = "> Let's now look at what Sandbox mode protects you from.";
+  const translated = "> 现在让我们看看沙箱模式会保护你免受什么影响。";
+
+  const normalized = normalizeExplicitRepairAnchorText(source, translated, slice);
+
+  assert.equal(normalized, "> 现在让我们看看沙箱模式（Sandbox mode）会保护你免受什么影响。");
 });

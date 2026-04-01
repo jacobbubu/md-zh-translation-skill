@@ -10,7 +10,11 @@ import {
   buildStylePolishPrompt
 } from "./internal/prompts/scheme-h.js";
 import { DefaultCodexExecutor, type CodexExecutor } from "./codex-exec.js";
-import { normalizeHeadingLikeAnchorText, normalizeSegmentAnchorText } from "./anchor-normalization.js";
+import {
+  normalizeExplicitRepairAnchorText,
+  normalizeHeadingLikeAnchorText,
+  normalizeSegmentAnchorText
+} from "./anchor-normalization.js";
 import { FormattingError, HardGateError } from "./errors.js";
 import { formatTranslatedBody, reconstructMarkdown } from "./format.js";
 import { planMarkdownChunks, type MarkdownChunk, type MarkdownChunkPlan } from "./markdown-chunks.js";
@@ -1296,7 +1300,12 @@ async function repairDraftedSegment(
       normalizedRepairText,
       buildSegmentTaskSlice(context.state, context.chunkId, draftedSegment.segmentId)
     );
-    draftedSegment.protectedBody = reprotectMarkdownSpans(normalizedHeadingRepairText, draftedSegment.spans);
+    const normalizedExplicitRepairText = normalizeExplicitRepairAnchorText(
+      draftedSegment.protectedSource,
+      normalizedHeadingRepairText,
+      buildSegmentTaskSlice(context.state, context.chunkId, draftedSegment.segmentId)
+    );
+    draftedSegment.protectedBody = reprotectMarkdownSpans(normalizedExplicitRepairText, draftedSegment.spans);
     draftedSegment.restoredBody = restoreMarkdownSpans(draftedSegment.protectedBody, draftedSegment.spans);
     applyRepairResult(context.state, draftedSegment.segmentId, taskBatch.map((task) => task.id), {
       protectedBody: draftedSegment.protectedBody,

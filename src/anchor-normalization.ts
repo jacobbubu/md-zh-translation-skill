@@ -89,6 +89,52 @@ export function normalizeHeadingLikeAnchorText(
   return normalized;
 }
 
+export function normalizeExplicitRepairAnchorText(
+  source: string,
+  text: string,
+  slice: PromptSlice | null
+): string {
+  if (!slice || slice.pendingRepairs.length === 0) {
+    return text;
+  }
+
+  const targets = slice.pendingRepairs
+    .map((repair) => parseExplicitRepairTarget(repair.instruction))
+    .filter((target): target is ExplicitRepairTarget => target !== null);
+  if (targets.length === 0) {
+    return text;
+  }
+
+  const sourceLines = source.split(/\r?\n/);
+  const translatedLines = text.split(/\r?\n/);
+  let changed = false;
+
+  for (let index = 0; index < Math.min(sourceLines.length, translatedLines.length); index += 1) {
+    const sourceLine = sourceLines[index] ?? "";
+    let translatedLine = translatedLines[index] ?? "";
+
+    for (const target of targets) {
+      if (
+        !containsWholePhrase(sourceLine, target.english) ||
+        !translatedLine.includes(target.chineseHint) ||
+        containsWholePhrase(translatedLine, target.english)
+      ) {
+        continue;
+      }
+
+      translatedLine = translatedLine.replace(
+        target.chineseHint,
+        `${target.chineseHint}（${target.english}）`
+      );
+      changed = true;
+    }
+
+    translatedLines[index] = translatedLine;
+  }
+
+  return changed ? translatedLines.join("\n") : text;
+}
+
 function normalizeSingleAnchor(
   text: string,
   anchor: PromptAnchor,
@@ -142,6 +188,23 @@ type HeadingLine = {
   raw: string;
   content: string;
 };
+
+type ExplicitRepairTarget = {
+  chineseHint: string;
+  english: string;
+};
+
+function parseExplicitRepairTarget(instruction: string): ExplicitRepairTarget | null {
+  const match = instruction.match(/需补为“([^（”]+)（([^）]+)）”/);
+  if (!match?.[1] || !match[2]) {
+    return null;
+  }
+
+  return {
+    chineseHint: match[1].trim(),
+    english: match[2].trim()
+  };
+}
 
 function extractHeadingLikeLines(text: string): HeadingLine[] {
   const headings: HeadingLine[] = [];
