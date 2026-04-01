@@ -1,9 +1,22 @@
 import type { PromptSlice } from "./translation-state.js";
 
 export type PromptAnchor = PromptSlice["requiredAnchors"][number];
+type AnchorLike = Pick<PromptAnchor, "english" | "chineseHint">;
+type AnchorDisplayMode = "english-only" | "english-primary" | "chinese-primary";
+type AnchorDisplay = {
+  mode: AnchorDisplayMode;
+  english: string;
+  chineseDisplay: string;
+  canonical: string;
+  repeatText: string;
+};
 
 export function coalesceRequiredAnchors(requiredAnchors: readonly PromptAnchor[]): PromptAnchor[] {
   return requiredAnchors.filter((anchor) => !isShadowedByLongerAnchor(anchor, requiredAnchors));
+}
+
+export function formatAnchorDisplay(anchor: AnchorLike): string {
+  return resolveAnchorDisplay(anchor).canonical;
 }
 
 export function normalizeSegmentAnchorText(text: string, slice: PromptSlice | null): string {
@@ -141,22 +154,20 @@ function normalizeSingleAnchor(
   isRequired: boolean,
   isRepeatOrEstablished: boolean
 ): string {
-  const english = anchor.english.trim();
-  const chineseHint = anchor.chineseHint.trim();
+  const display = resolveAnchorDisplay(anchor);
+  const english = display.english;
+  const chineseHint = display.chineseDisplay;
 
   if (!english) {
     return text;
   }
 
   const escapedEnglish = escapeRegExp(english);
-  const hasDistinctChineseHint =
-    chineseHint.length > 0 && chineseHint.toLowerCase() !== english.toLowerCase();
-
   let normalized = text;
 
-  if (hasDistinctChineseHint) {
+  if (display.mode === "chinese-primary") {
     const escapedChinese = escapeRegExp(chineseHint);
-    const canonical = `${chineseHint}（${english}）`;
+    const canonical = display.canonical;
 
     normalized = normalized.replace(new RegExp(`${escapedEnglish}（${escapedChinese}）`, "g"), canonical);
     normalized = normalized.replace(new RegExp(`${escapedEnglish}（${escapedEnglish}）`, "g"), canonical);
@@ -165,6 +176,27 @@ function normalizeSingleAnchor(
 
     if (isRepeatOrEstablished) {
       normalized = normalized.replace(new RegExp(`${escapedChinese}（${escapedEnglish}）`, "g"), chineseHint);
+    }
+
+    return normalized;
+  }
+
+  if (display.mode === "english-primary") {
+    const escapedChinese = escapeRegExp(chineseHint);
+    const canonical = display.canonical;
+
+    normalized = normalized.replace(
+      new RegExp(`${escapedEnglish}\\s*${escapedChinese}（${escapedEnglish}）`, "g"),
+      canonical
+    );
+    normalized = normalized.replace(
+      new RegExp(`${escapedChinese}（${escapedEnglish}）`, "g"),
+      canonical
+    );
+    normalized = normalized.replace(new RegExp(`${escapedEnglish}（${escapedEnglish}）`, "g"), canonical);
+
+    if (isRepeatOrEstablished) {
+      normalized = normalized.replace(new RegExp(`${escapedEnglish}（${escapedChinese}）`, "g"), english);
     }
 
     return normalized;
@@ -286,4 +318,56 @@ function normalizeAnchorText(value: string): string {
 
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function resolveAnchorDisplay(anchor: AnchorLike): AnchorDisplay {
+  const english = anchor.english.trim();
+  const chineseHint = anchor.chineseHint.trim();
+
+  if (!english || !chineseHint || chineseHint.toLowerCase() === english.toLowerCase()) {
+    return {
+      mode: "english-only",
+      english,
+      chineseDisplay: "",
+      canonical: english,
+      repeatText: english
+    };
+  }
+
+  const strippedEnglishPrefix = stripLeadingEnglishHint(chineseHint, english);
+  const chineseDisplay = strippedEnglishPrefix ?? chineseHint;
+  if (shouldPreferEnglishPrimary(english, strippedEnglishPrefix)) {
+    return {
+      mode: "english-primary",
+      english,
+      chineseDisplay,
+      canonical: `${english}（${chineseDisplay}）`,
+      repeatText: english
+    };
+  }
+
+  return {
+    mode: "chinese-primary",
+    english,
+    chineseDisplay,
+    canonical: `${chineseDisplay}（${english}）`,
+    repeatText: chineseDisplay
+  };
+}
+
+function stripLeadingEnglishHint(chineseHint: string, english: string): string | null {
+  if (!chineseHint.toLowerCase().startsWith(english.toLowerCase())) {
+    return null;
+  }
+
+  const suffix = chineseHint.slice(english.length).trim();
+  return suffix.length > 0 ? suffix : null;
+}
+
+function shouldPreferEnglishPrimary(english: string, strippedEnglishPrefix: string | null): boolean {
+  if (strippedEnglishPrefix) {
+    return true;
+  }
+
+  return /^[A-Za-z0-9][A-Za-z0-9.+/_-]*$/.test(english);
 }

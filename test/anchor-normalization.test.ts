@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  formatAnchorDisplay,
   normalizeExplicitRepairAnchorText,
   normalizeHeadingLikeAnchorText,
   normalizeSegmentAnchorText,
@@ -75,6 +76,41 @@ test("normalizeSegmentAnchorText collapses exact duplicate english-only parenthe
   const normalized = normalizeSegmentAnchorText("npm（npm） registry access is allowed.", slice);
 
   assert.equal(normalized, "npm registry access is allowed.");
+});
+
+test("normalizeSegmentAnchorText rewrites english-leading duplicated anchor text into english-primary form", () => {
+  const slice = createSlice({
+    requiredAnchors: [createAnchor("anchor-1", "bubblewrap", "bubblewrap 框架")]
+  });
+
+  const normalized = normalizeSegmentAnchorText(
+    "Linux 上的 bubblewrap 框架（bubblewrap）提供了隔离能力。",
+    slice
+  );
+
+  assert.equal(normalized, "Linux 上的 bubblewrap（框架）提供了隔离能力。");
+});
+
+test("normalizeSegmentAnchorText preserves english-primary tool anchors with a chinese explanation", () => {
+  const slice = createSlice({
+    requiredAnchors: [createAnchor("anchor-1", "bubblewrap", "安全隔离组件")]
+  });
+
+  const normalized = normalizeSegmentAnchorText(
+    "Linux 上的 bubblewrap（安全隔离组件）提供了隔离能力。",
+    slice
+  );
+
+  assert.equal(normalized, "Linux 上的 bubblewrap（安全隔离组件）提供了隔离能力。");
+});
+
+test("formatAnchorDisplay prefers english-primary formatting for single-token tool names", () => {
+  assert.equal(formatAnchorDisplay(createAnchor("anchor-1", "bubblewrap", "安全隔离组件")), "bubblewrap（安全隔离组件）");
+  assert.equal(formatAnchorDisplay(createAnchor("anchor-2", "bubblewrap", "bubblewrap 框架")), "bubblewrap（框架）");
+  assert.equal(
+    formatAnchorDisplay(createAnchor("anchor-3", "Prompt injection attacks", "提示注入攻击")),
+    "提示注入攻击（Prompt injection attacks）"
+  );
 });
 
 test("normalizeHeadingLikeAnchorText restores a missing english anchor inside a bold pseudo-heading", () => {

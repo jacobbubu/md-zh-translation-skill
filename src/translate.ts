@@ -11,6 +11,7 @@ import {
 } from "./internal/prompts/scheme-h.js";
 import { DefaultCodexExecutor, type CodexExecutor } from "./codex-exec.js";
 import {
+  formatAnchorDisplay,
   normalizeExplicitRepairAnchorText,
   normalizeHeadingLikeAnchorText,
   normalizeSegmentAnchorText
@@ -657,7 +658,7 @@ type DraftedSegmentState = {
 };
 
 function summarizePromptAnchor(anchor: PromptSlice["requiredAnchors"][number]): string {
-  return `${anchor.chineseHint || "未定中文"} / ${anchor.english}`;
+  return formatAnchorDisplay(anchor) || "未定中文";
 }
 
 function buildSegmentPromptContext(

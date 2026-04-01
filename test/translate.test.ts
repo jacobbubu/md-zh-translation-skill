@@ -3198,7 +3198,7 @@ test("translateMarkdownArticle injects structured anchor state into draft prompt
 
   const draftPrompt = prompts.find((prompt) => prompt.includes("当前分段必须建立的首现锚点"));
   assert.ok(draftPrompt);
-  assert.match(draftPrompt, /提示注入攻击 \/ Prompt injection attacks/);
+  assert.match(draftPrompt, /提示注入攻击（Prompt injection attacks）/);
   assert.match(draftPrompt, /【状态切片\(JSON\)】/);
 });
 
