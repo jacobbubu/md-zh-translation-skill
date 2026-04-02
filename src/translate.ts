@@ -12,6 +12,7 @@ import {
 import { DefaultCodexExecutor, type CodexExecutor } from "./codex-exec.js";
 import {
   formatAnchorDisplay,
+  injectPlannedAnchorText,
   normalizeExplicitRepairAnchorText,
   normalizeHeadingLikeAnchorText,
   normalizeSegmentAnchorText
@@ -1331,9 +1332,14 @@ async function translateProtectedSegment(
     stripAddedInlineCodeFromPlainPaths(protectedSource, draftResult.text),
     chunkPromptContext.stateSlice
   );
-  const normalizedHeadingDraftText = normalizeHeadingLikeAnchorText(
+  const injectedDraftText = injectPlannedAnchorText(
     protectedSource,
     normalizedDraftText,
+    chunkPromptContext.stateSlice
+  );
+  const normalizedHeadingDraftText = normalizeHeadingLikeAnchorText(
+    protectedSource,
+    injectedDraftText,
     chunkPromptContext.stateSlice
   );
   const canonicalProtectedBody = reprotectMarkdownSpans(normalizedHeadingDraftText, combinedSpans);
@@ -1422,9 +1428,14 @@ async function repairDraftedSegment(
       stripAddedInlineCodeFromPlainPaths(draftedSegment.protectedSource, repairResult.text),
       buildSegmentTaskSlice(context.state, context.chunkId, draftedSegment.segmentId)
     );
-    const normalizedHeadingRepairText = normalizeHeadingLikeAnchorText(
+    const injectedRepairText = injectPlannedAnchorText(
       draftedSegment.protectedSource,
       normalizedRepairText,
+      buildSegmentTaskSlice(context.state, context.chunkId, draftedSegment.segmentId)
+    );
+    const normalizedHeadingRepairText = normalizeHeadingLikeAnchorText(
+      draftedSegment.protectedSource,
+      injectedRepairText,
       buildSegmentTaskSlice(context.state, context.chunkId, draftedSegment.segmentId)
     );
     const normalizedExplicitRepairText = normalizeExplicitRepairAnchorText(

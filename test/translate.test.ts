@@ -3330,6 +3330,47 @@ test("translateMarkdownArticle injects structured anchor state into draft prompt
   assert.match(draftPrompt, /【状态切片\(JSON\)】/);
 });
 
+test("translateMarkdownArticle injects required anchors into list items before hard gate", async () => {
+  const source = "- API tokens\n";
+  let auditedTranslation = "";
+
+  const executor: CodexExecutor = {
+    async execute(prompt, options) {
+      if (isDocumentAnalysisPrompt(prompt)) {
+        return createExecResult(
+          createAnchorCatalog([
+            {
+              english: "API tokens",
+              chineseHint: "API 令牌",
+              familyKey: "api tokens"
+            }
+          ])
+        );
+      }
+
+      if (options.outputSchema || prompt.includes('"hard_checks"') || prompt.includes("只返回 JSON")) {
+        auditedTranslation = extractPromptSection(prompt, "【当前译文】") ?? "";
+        return createExecResult(wrapAuditForSegments(prompt, createAudit(true)));
+      }
+
+      const currentTranslation = extractPromptSection(prompt, "【当前译文】");
+      if (currentTranslation !== null) {
+        return createExecResult(currentTranslation);
+      }
+
+      return createExecResult("- API 令牌");
+    }
+  };
+
+  const output = await translateMarkdownArticle(source, {
+    executor,
+    formatter: async (markdown) => markdown
+  });
+
+  assert.match(auditedTranslation, /- API 令牌（API tokens）/);
+  assert.match(output.markdown, /- API 令牌（API tokens）/);
+});
+
 test("translateMarkdownArticle exports debug state when MDZH_DEBUG_STATE_PATH is set", async () => {
   const tempDir = await mkdtemp(path.join(tmpdir(), "mdzh-state-"));
   const debugPath = path.join(tempDir, "state.json");

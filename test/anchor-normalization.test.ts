@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 
 import {
   formatAnchorDisplay,
+  injectPlannedAnchorText,
   normalizeExplicitRepairAnchorText,
   normalizeHeadingLikeAnchorText,
   normalizeSegmentAnchorText,
@@ -136,6 +137,54 @@ test("normalizeHeadingLikeAnchorText restores a missing english anchor inside a 
 
   assert.match(normalized, /\*\*测试 2：系统文件访问（System File Access）\*\*/);
   assert.match(normalized, /告诉 Claude：/);
+});
+
+test("injectPlannedAnchorText injects a missing anchor into a heading-like line", () => {
+  const slice = createSlice({
+    requiredAnchors: [createAnchor("anchor-1", "System File Access", "系统文件访问")]
+  });
+  const source = "**Test 2: System File Access**";
+  const translated = "**测试 2：系统文件访问**";
+
+  const normalized = injectPlannedAnchorText(source, translated, slice);
+
+  assert.equal(normalized, "**测试 2：系统文件访问（System File Access）**");
+});
+
+test("injectPlannedAnchorText injects a missing anchor into a list item", () => {
+  const slice = createSlice({
+    requiredAnchors: [createAnchor("anchor-1", "API tokens", "API 令牌")]
+  });
+  const source = "- API tokens";
+  const translated = "- API 令牌";
+
+  const normalized = injectPlannedAnchorText(source, translated, slice);
+
+  assert.equal(normalized, "- API 令牌（API tokens）");
+});
+
+test("injectPlannedAnchorText injects a missing anchor into a blockquote line", () => {
+  const slice = createSlice({
+    requiredAnchors: [createAnchor("anchor-1", "Sandbox mode", "沙箱模式")]
+  });
+  const source = "> Let's now look at what Sandbox mode protects you from.";
+  const translated = "> 现在让我们看看沙箱模式会保护你免受什么影响。";
+
+  const normalized = injectPlannedAnchorText(source, translated, slice);
+
+  assert.equal(normalized, "> 现在让我们看看沙箱模式（Sandbox mode）会保护你免受什么影响。");
+});
+
+test("injectPlannedAnchorText injects a missing anchor into a paragraph line", () => {
+  const slice = createSlice({
+    requiredAnchors: [createAnchor("anchor-1", "Prompt injection attacks", "提示注入攻击")]
+  });
+  const source = "Prompt injection attacks can hide malicious instructions.";
+  const translated = "提示注入攻击会隐藏恶意指令。";
+
+  const normalized = injectPlannedAnchorText(source, translated, slice);
+
+  assert.equal(normalized, "提示注入攻击（Prompt injection attacks）会隐藏恶意指令。");
 });
 
 test("normalizeExplicitRepairAnchorText restores a quoted-line anchor from an explicit repair target", () => {
