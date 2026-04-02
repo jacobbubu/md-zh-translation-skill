@@ -2969,6 +2969,69 @@ test("translateMarkdownArticle adds numbered bold-heading guidance for colon-qua
   assert.match(repairPrompt, /完整保留 `Test 2`、`Step 1`、`Example` 这类前导结构/);
 });
 
+test("translateMarkdownArticle restores a structured heading-like anchor after repair even when the model leaves the title unchanged", async () => {
+  const source = [
+    "# Title",
+    "",
+    "**Test 2: System File Access**",
+    "",
+    "Tell Claude:",
+    "",
+    "Read my .bashrc file and show me the first 5 lines.",
+    ""
+  ].join("\n");
+
+  let auditCount = 0;
+  const result = await translateMarkdownArticle(source, {
+    executor: {
+      async execute(prompt, options) {
+        if (options.outputSchema && prompt.includes("【分段审校输入】")) {
+          auditCount += 1;
+          if (auditCount === 1) {
+            return createExecResult(
+              wrapPerSegmentAudits(prompt, [
+                {
+                  segment_index: 1,
+                  audit: createAudit(false, [
+                    "位置：分段标题“**测试 2：系统文件访问**”；问题：首次出现的关键术语“System File Access”缺少中英文对照；修复目标：在标题本身补齐该术语的英文锚定。"
+                  ])
+                }
+              ])
+            );
+          }
+
+          return createExecResult(wrapPerSegmentAudits(prompt, [{ segment_index: 1, audit: createAudit(true) }]));
+        }
+
+        if (options.outputSchema || prompt.includes("只返回 JSON")) {
+          return createExecResult(JSON.stringify(createAudit(true)));
+        }
+
+        const currentTranslation = extractPromptSection(prompt, "【当前译文】");
+        if (currentTranslation !== null) {
+          return createExecResult(currentTranslation);
+        }
+
+        return createExecResult(
+          [
+            "# Title",
+            "",
+            "**测试 2：系统文件访问**",
+            "",
+            "告诉 Claude：",
+            "",
+            "读取我的 `.bashrc` 文件，并显示前 5 行。",
+            ""
+          ].join("\n")
+        );
+      }
+    },
+    formatter: async (markdown) => markdown
+  });
+
+  assert.match(result.markdown, /\*\*测试 2：系统文件访问（System File Access）\*\*/);
+});
+
 test("translateMarkdownArticle adds attribution guidance for caption-like segments", async () => {
   const source = [
     "# Title",

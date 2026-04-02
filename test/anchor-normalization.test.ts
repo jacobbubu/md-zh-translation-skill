@@ -246,3 +246,24 @@ test("normalizeExplicitRepairAnchorText restores a quoted-line anchor from an ex
 
   assert.equal(normalized, "> 现在让我们看看沙箱模式（Sandbox mode）会保护你免受什么影响。");
 });
+
+test("normalizeExplicitRepairAnchorText restores a heading-like anchor from a structured title repair target", () => {
+  const slice = createSlice({
+    pendingRepairs: [
+      {
+        repairId: "repair-1",
+        anchorId: null,
+        failureType: "missing_anchor",
+        locationLabel: "分段标题",
+        instruction:
+          "位置：分段标题“**测试 2：系统文件访问**”；问题：首次出现的关键术语“System File Access”缺少中英文对照；修复目标：在标题本身补齐该术语的英文锚定。"
+      }
+    ]
+  });
+  const source = "**Test 2: System File Access**";
+  const translated = "**测试 2：系统文件访问**";
+
+  const normalized = normalizeExplicitRepairAnchorText(source, translated, slice);
+
+  assert.equal(normalized, "**测试 2：系统文件访问（System File Access）**");
+});

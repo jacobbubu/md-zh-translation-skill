@@ -347,14 +347,29 @@ type ExplicitRepairTarget = {
 
 function parseExplicitRepairTarget(instruction: string): ExplicitRepairTarget | null {
   const match = instruction.match(/需补为“([^（”]+)（([^）]+)）”/);
-  if (!match?.[1] || !match[2]) {
+  if (match?.[1] && match[2]) {
+    return {
+      chineseHint: match[1].trim(),
+      english: match[2].trim()
+    };
+  }
+
+  const english =
+    instruction.match(/关键术语“([^”]*[A-Za-z][^”]*)”/)?.[1]?.trim() ??
+    instruction.match(/“([^”]*[A-Za-z][^”]*)”缺少/)?.[1]?.trim() ??
+    null;
+  const locationText = instruction.match(/位置：[^“]*“([^”]+)”/)?.[1]?.trim() ?? null;
+  const chineseHint = locationText ? stripInlineMarkdownMarkers(locationText).trim() : null;
+
+  if (!english || !chineseHint) {
     return null;
   }
 
-  return {
-    chineseHint: match[1].trim(),
-    english: match[2].trim()
-  };
+  return { chineseHint, english };
+}
+
+function stripInlineMarkdownMarkers(text: string): string {
+  return text.replace(/[*_`~]/g, "");
 }
 
 function extractHeadingLikeLines(text: string): HeadingLine[] {
