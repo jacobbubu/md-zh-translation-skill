@@ -705,6 +705,99 @@ test("translateMarkdownArticle strips added inline code from plain command list 
   assert.doesNotMatch(result.markdown, /`sudo`/);
 });
 
+test("translateMarkdownArticle strips added inline code from multi-command phrases under Commands", async () => {
+  const source = [
+    "### Category 1: Auto-Allowed",
+    "",
+    "**Commands:**",
+    "",
+    "- git status, git log, git diff",
+    "- npm install, npm test, npm run",
+    "- ls, cat, echo, basic shell commands",
+    "- python script.py (runs code in project)"
+  ].join("\n");
+
+  class MultiCommandExecutor implements CodexExecutor {
+    async execute(prompt: string, options: CodexExecOptions): Promise<CodexExecResult> {
+      if (options.outputSchema || prompt.includes('"hard_checks"') || prompt.includes("只返回 JSON")) {
+        return createExecResult(wrapAuditForSegments(prompt, createAudit(true)));
+      }
+
+      const translated = [
+        "### 第 1 类：自动允许",
+        "",
+        "**命令（Commands）：**",
+        "",
+        "- `git status`、`git log`、`git diff`",
+        "- `npm install`、`npm test`、`npm run`",
+        "- ls、`cat`、`echo`、基础 shell 命令",
+        "- `python script.py`（在项目中运行代码）"
+      ].join("\n");
+
+      return createExecResult(translated);
+    }
+  }
+
+  const result = await translateMarkdownArticle(source, {
+    executor: new MultiCommandExecutor(),
+    formatter: async (markdown) => markdown
+  });
+
+  assert.match(result.markdown, /- git status、git log、git diff/);
+  assert.match(result.markdown, /- npm install、npm test、npm run/);
+  assert.match(result.markdown, /- ls、cat、echo、基础 shell 命令/);
+  assert.match(result.markdown, /- python script\.py（在项目中运行代码）/);
+  assert.doesNotMatch(result.markdown, /`git status`/);
+  assert.doesNotMatch(result.markdown, /`npm install`/);
+  assert.doesNotMatch(result.markdown, /`cat`/);
+  assert.doesNotMatch(result.markdown, /`python script\.py`/);
+});
+
+test("translateMarkdownArticle restores inline code only at source locations when the same flag also appears as plain text", async () => {
+  const source = [
+    "## Claude Code Permission Problem",
+    "",
+    "If you use the --dangerously-skip-permissions flag, you remove safety guardrails.",
+    "",
+    "The `--dangerously-skip-permissions` flag exists as an escape hatch from this fatigue."
+  ].join("\n");
+
+  class MixedFlagExecutor implements CodexExecutor {
+    async execute(prompt: string, options: CodexExecOptions): Promise<CodexExecResult> {
+      if (isDocumentAnalysisPrompt(prompt)) {
+        return createExecResult(createEmptyAnchorCatalog());
+      }
+
+      if (options.outputSchema || prompt.includes('"hard_checks"') || prompt.includes("只返回 JSON")) {
+        return createExecResult(wrapAuditForSegments(prompt, createAudit(true)));
+      }
+
+      const translated = [
+        "## Claude Code 权限问题",
+        "",
+        "如果你使用 --dangerously-skip-permissions 标志，就会移除安全护栏。",
+        "",
+        "这个 --dangerously-skip-permissions 标志是为了缓解这种疲劳而存在的逃生舱。"
+      ].join("\n");
+
+      if (prompt.includes("只做“风格与可读性润色”")) {
+        return createExecResult(extractPromptSection(prompt, "【当前译文】") ?? translated);
+      }
+
+      return createExecResult(translated);
+    }
+  }
+
+  const result = await translateMarkdownArticle(source, {
+    executor: new MixedFlagExecutor(),
+    formatter: async (markdown) => markdown
+  });
+
+  assert.match(result.markdown, /如果你使用 --dangerously-skip-permissions 标志/);
+  assert.match(result.markdown, /这个 `--dangerously-skip-permissions` 标志是为了缓解这种疲劳而存在的逃生舱/);
+  assert.doesNotMatch(result.markdown, /如果你使用 `--dangerously-skip-permissions` 标志/);
+});
+
 test("translateMarkdownArticle runs the hidden pipeline chunk by chunk for long Markdown sections", async () => {
   const source = [
     "# Title",
@@ -2190,6 +2283,144 @@ test("translateMarkdownArticle repeats sentence-local repair guidance when must_
   assert.match(repairPrompt, /不要把锚定转移到同段其他句子、标题、列表项、引用外说明或后续段落/);
 });
 
+test("translateMarkdownArticle keeps sentence-local Claude repairs away from earlier Claude Code anchors", async () => {
+  const source = [
+    "# Title",
+    "",
+    "## Earlier",
+    "",
+    `${"Claude Code is already established here. ".repeat(240)}`,
+    "",
+    "## External API Access",
+    "",
+    "**Test 4: External API Access (Should Prompt First Time)**",
+    "",
+    "Tell Claude:",
+    ""
+  ].join("\n");
+
+  class PriorAnchorExecutor extends PromptAwareExecutor {
+    override async execute(prompt: string, options: CodexExecOptions): Promise<CodexExecResult> {
+      this.prompts.push(prompt);
+
+      if (isDocumentAnalysisPrompt(prompt)) {
+        return createExecResult(
+          createAnchorCatalog([
+            {
+              english: "Claude Code",
+              chineseHint: "Claude Code",
+              familyKey: "claude code",
+              chunkId: "chunk-1",
+              segmentId: "chunk-1-segment-1"
+            }
+          ])
+        );
+      }
+
+      if (options.outputSchema && prompt.includes("【分段审校输入】") && prompt.includes("Tell Claude:")) {
+        return createExecResult(
+          wrapPerSegmentAudits(prompt, [
+            {
+              segment_index: 1,
+              audit: createAudit(false, [
+                "第4段末句“告诉 Claude Code（Claude）”与原文“Tell Claude:”不一致；需保持原文专名 Claude 的对应，不要额外加入 Code。"
+              ])
+            }
+          ])
+        );
+      }
+
+      if (options.outputSchema || prompt.includes("只返回 JSON")) {
+        return createExecResult(wrapAuditForSegments(prompt, createAudit(true)));
+      }
+
+      const currentTranslation = extractPromptSection(prompt, "【当前译文】");
+      if (currentTranslation !== null) {
+        return createExecResult(currentTranslation);
+      }
+
+      const sourceSection = extractPromptSection(prompt, "【英文原文】");
+      return createExecResult(sourceSection ?? "");
+    }
+  }
+
+  const executor = new PriorAnchorExecutor();
+  await translateMarkdownArticle(source, {
+    executor,
+    formatter: async (markdown) => markdown
+  });
+
+  const repairPrompt = executor.prompts.find(
+    (item) =>
+      item.includes("【must_fix】") &&
+      item.includes("Tell Claude:") &&
+      item.includes("不要额外加入 Code")
+  );
+  assert.ok(repairPrompt);
+  assert.match(repairPrompt, /必须把这句视为唯一有效落点/);
+  assert.match(repairPrompt, /不要把锚定转移到同段其他句子、标题、列表项、引用外说明或后续段落/);
+  assert.doesNotMatch(repairPrompt, /本次 must_fix 明确指向标题/);
+  assert.doesNotMatch(repairPrompt, /本次 must_fix 明确点名了这些英文目标：.*Claude Code/);
+});
+
+test("translateMarkdownArticle keeps the source surface form when Claude and Claude Code share a family", async () => {
+  const source = [
+    "# Title",
+    "",
+    "Claude Code is already established earlier in this segment.",
+    "",
+    "Tell Claude:"
+  ].join("\n");
+
+  class ClaudeSurfaceExecutor extends PromptAwareExecutor {
+    override async execute(prompt: string, options: CodexExecOptions): Promise<CodexExecResult> {
+      this.prompts.push(prompt);
+
+      if (isDocumentAnalysisPrompt(prompt)) {
+        return createExecResult(
+          createAnchorCatalog([
+            {
+              english: "Claude Code",
+              chineseHint: "Claude Code",
+              familyKey: "claude-family"
+            },
+            {
+              english: "Claude",
+              chineseHint: "Anthropic 的 AI 助手",
+              familyKey: "claude-family"
+            }
+          ])
+        );
+      }
+
+      if (options.outputSchema || prompt.includes("只返回 JSON")) {
+        return createExecResult(wrapAuditForSegments(prompt, createAudit(true)));
+      }
+
+      const currentTranslation = extractPromptSection(prompt, "【当前译文】");
+      if (currentTranslation !== null) {
+        return createExecResult(currentTranslation);
+      }
+
+      return createExecResult([
+        "# 标题",
+        "",
+        "Claude Code 已在本段前文建立。",
+        "",
+        "告诉 Claude Code（Claude）："
+      ].join("\n"));
+    }
+  }
+
+  const result = await translateMarkdownArticle(source, {
+    executor: new ClaudeSurfaceExecutor(),
+    formatter: async (markdown) => markdown
+  });
+
+  assert.match(result.markdown, /告诉 Claude（Anthropic 的 AI 助手）：/);
+  assert.doesNotMatch(result.markdown, /Claude Code（Claude）/);
+});
+
 test("translateMarkdownArticle tells repair when the same anchor is still missing in multiple locations", async () => {
   const source = [
     "## So, What Do AI Agents Need?",
@@ -2545,6 +2776,65 @@ test("translateMarkdownArticle repairs multiple must_fix items one at a time", a
   ]);
 });
 
+test("translateMarkdownArticle batches mixed-location repairs in the same segment together", async () => {
+  const source = [
+    "# Title",
+    "",
+    "> Quote line",
+    "",
+    "- List item one",
+    "- List item two",
+    ""
+  ].join("\n");
+  const repairMustFixSections: string[] = [];
+  let auditCallCount = 0;
+
+  const executor: CodexExecutor = {
+    async execute(prompt, options) {
+      if (prompt.includes("【must_fix】")) {
+        const mustFixSection = extractPromptSection(prompt, "【must_fix】") ?? "";
+        repairMustFixSections.push(mustFixSection.trim());
+        return createExecResult(source);
+      }
+
+      if (prompt.includes("只做“风格与可读性润色”")) {
+        return createExecResult(source);
+      }
+
+      if (options.outputSchema && prompt.includes("【分段审校输入】")) {
+        auditCallCount += 1;
+        const audit = auditCallCount === 1
+          ? createAudit(false, [
+              "第 1、2 条列表项中的 `Claude` 需要在本段首次出现处补中英文对照，不能只保留英文。",
+              "最后一条引用中的 `Sandbox mode` 需要补英文原名对应关系，不能只译成“沙盒模式”。"
+            ])
+          : createAudit(true);
+        return createExecResult(
+          wrapPerSegmentAudits(prompt, [{ segment_index: 1, audit }])
+        );
+      }
+
+      if (options.outputSchema || prompt.includes("只返回 JSON")) {
+        return createExecResult(JSON.stringify(createAudit(true)));
+      }
+
+      return createExecResult(source);
+    }
+  };
+
+  await translateMarkdownArticle(source, {
+    executor,
+    formatter: async (markdown) => markdown
+  });
+
+  assert.deepEqual(repairMustFixSections, [
+    [
+      "- 第 1、2 条列表项中的 `Claude` 需要在本段首次出现处补中英文对照，不能只保留英文。",
+      "- 最后一条引用中的 `Sandbox mode` 需要补英文原名对应关系，不能只译成“沙盒模式”。"
+    ].join("\n")
+  ]);
+});
+
 test("translateMarkdownArticle repeats slash-qualified heading repair guidance when must_fix targets a heading", async () => {
   const source = [
     "# Title",
@@ -2780,6 +3070,231 @@ test("translateMarkdownArticle adds numbered bold-heading guidance for colon-qua
   assert.match(repairPrompt, /必须在这一整行标题里同时保留前导标签和后面的核心英文术语锚点/);
   assert.match(repairPrompt, /不要只把冒号后的英文核心术语翻成中文而漏掉英文原名/);
   assert.match(repairPrompt, /完整保留 `Test 2`、`Step 1`、`Example` 这类前导结构/);
+});
+
+test("translateMarkdownArticle restores a structured heading-like anchor after repair even when the model leaves the title unchanged", async () => {
+  const source = [
+    "# Title",
+    "",
+    "**Test 2: System File Access**",
+    "",
+    "Tell Claude:",
+    "",
+    "Read my .bashrc file and show me the first 5 lines.",
+    ""
+  ].join("\n");
+
+  let auditCount = 0;
+  const result = await translateMarkdownArticle(source, {
+    executor: {
+      async execute(prompt, options) {
+        if (options.outputSchema && prompt.includes("【分段审校输入】")) {
+          auditCount += 1;
+          if (auditCount === 1) {
+            return createExecResult(
+              wrapPerSegmentAudits(prompt, [
+                {
+                  segment_index: 1,
+                  audit: createAudit(false, [
+                    "位置：分段标题“**测试 2：系统文件访问**”；问题：首次出现的关键术语“System File Access”缺少中英文对照；修复目标：在标题本身补齐该术语的英文锚定。"
+                  ])
+                }
+              ])
+            );
+          }
+
+          return createExecResult(wrapPerSegmentAudits(prompt, [{ segment_index: 1, audit: createAudit(true) }]));
+        }
+
+        if (options.outputSchema || prompt.includes("只返回 JSON")) {
+          return createExecResult(JSON.stringify(createAudit(true)));
+        }
+
+        const currentTranslation = extractPromptSection(prompt, "【当前译文】");
+        if (currentTranslation !== null) {
+          return createExecResult(currentTranslation);
+        }
+
+        return createExecResult(
+          [
+            "# Title",
+            "",
+            "**测试 2：系统文件访问**",
+            "",
+            "告诉 Claude：",
+            "",
+            "读取我的 `.bashrc` 文件，并显示前 5 行。",
+            ""
+          ].join("\n")
+        );
+      }
+    },
+    formatter: async (markdown) => markdown
+  });
+
+  assert.match(result.markdown, /\*\*测试 2：系统文件访问（System File Access）\*\*/);
+});
+
+test("translateMarkdownArticle restores an ATX heading anchor after repair when must_fix only names the translated heading", async () => {
+  const source = [
+    "# Title",
+    "",
+    "### Credential Theft",
+    "",
+    "Attempts to access:",
+    ""
+  ].join("\n");
+
+  let auditCount = 0;
+  const result = await translateMarkdownArticle(source, {
+    executor: {
+      async execute(prompt, options) {
+        if (options.outputSchema && prompt.includes("【分段审校输入】")) {
+          auditCount += 1;
+          if (auditCount === 1) {
+            return createExecResult(
+              wrapPerSegmentAudits(prompt, [
+                {
+                  segment_index: 1,
+                  audit: createAudit(false, [
+                    "`### 凭证窃取`：这是本分段首次出现的关键术语，小标题需补英文对照后再用。"
+                  ])
+                }
+              ])
+            );
+          }
+
+          return createExecResult(wrapPerSegmentAudits(prompt, [{ segment_index: 1, audit: createAudit(true) }]));
+        }
+
+        if (options.outputSchema || prompt.includes("只返回 JSON")) {
+          return createExecResult(JSON.stringify(createAudit(true)));
+        }
+
+        const currentTranslation = extractPromptSection(prompt, "【当前译文】");
+        if (currentTranslation !== null) {
+          return createExecResult(currentTranslation);
+        }
+
+        return createExecResult(["# Title", "", "### 凭证窃取", "", "尝试访问：", ""].join("\n"));
+      }
+    },
+    formatter: async (markdown) => markdown
+  });
+
+  assert.match(result.markdown, /### 凭证窃取（Credential Theft）/);
+});
+
+test("translateMarkdownArticle restores missing source heading qualifiers inside category-style headings", async () => {
+  const source = [
+    "# Title",
+    "",
+    "### Category 2: Prompted (Requires Permission)",
+    "",
+    "Body.",
+    ""
+  ].join("\n");
+
+  let auditCount = 0;
+  const result = await translateMarkdownArticle(source, {
+    executor: {
+      async execute(prompt, options) {
+        if (options.outputSchema && prompt.includes("【分段审校输入】")) {
+          auditCount += 1;
+          if (auditCount === 1) {
+            return createExecResult(
+              wrapPerSegmentAudits(prompt, [
+                {
+                  segment_index: 1,
+                  audit: createAudit(false, [
+                    "位置：### 第 2 类：提示式（Prompted）。问题：缺少源文标题括注“Requires Permission”的对应信息。修复目标：补齐该标题的中英文对照，且不改动结构。"
+                  ])
+                }
+              ])
+            );
+          }
+
+          return createExecResult(wrapPerSegmentAudits(prompt, [{ segment_index: 1, audit: createAudit(true) }]));
+        }
+
+        if (options.outputSchema || prompt.includes("只返回 JSON")) {
+          return createExecResult(JSON.stringify(createAudit(true)));
+        }
+
+        const currentTranslation = extractPromptSection(prompt, "【当前译文】");
+        if (currentTranslation !== null) {
+          return createExecResult(currentTranslation);
+        }
+
+        return createExecResult(["# Title", "", "### 第 2 类：提示式（Prompted）", "", "正文。", ""].join("\n"));
+      }
+    },
+    formatter: async (markdown) => markdown
+  });
+
+  assert.match(result.markdown, /### 第 2 类：提示式（Prompted，Requires Permission）/);
+});
+
+test("translateMarkdownArticle restores a named anchor inside an ATX heading after repair", async () => {
+  const source = [
+    "# Title",
+    "",
+    "## How Sandbox Mode Changes Autonomous Coding",
+    "",
+    "Body.",
+    ""
+  ].join("\n");
+
+  let auditCount = 0;
+  const result = await translateMarkdownArticle(source, {
+    executor: {
+      async execute(prompt, options) {
+        if (isDocumentAnalysisPrompt(prompt)) {
+          return createExecResult(
+            createAnchorCatalog([
+              {
+                english: "Sandbox Mode",
+                chineseHint: "沙箱模式",
+                familyKey: "sandbox-mode"
+              }
+            ])
+          );
+        }
+
+        if (options.outputSchema && prompt.includes("【分段审校输入】")) {
+          auditCount += 1;
+          if (auditCount === 1) {
+            return createExecResult(
+              wrapPerSegmentAudits(prompt, [
+                {
+                  segment_index: 1,
+                  audit: createAudit(false, [
+                    "位置：## 标题“沙箱模式如何改变自主编码”｜问题：首现术语 Sandbox Mode 未补中英文对照｜修复目标：在标题本身建立该术语的双语锚点。"
+                  ])
+                }
+              ])
+            );
+          }
+
+          return createExecResult(wrapPerSegmentAudits(prompt, [{ segment_index: 1, audit: createAudit(true) }]));
+        }
+
+        if (options.outputSchema || prompt.includes("只返回 JSON")) {
+          return createExecResult(JSON.stringify(createAudit(true)));
+        }
+
+        const currentTranslation = extractPromptSection(prompt, "【当前译文】");
+        if (currentTranslation !== null) {
+          return createExecResult(currentTranslation);
+        }
+
+        return createExecResult(["# Title", "", "## 沙箱模式如何改变自主编码", "", "正文。", ""].join("\n"));
+      }
+    },
+    formatter: async (markdown) => markdown
+  });
+
+  assert.match(result.markdown, /## 沙箱模式（Sandbox Mode）如何改变自主编码/);
 });
 
 test("translateMarkdownArticle adds attribution guidance for caption-like segments", async () => {
@@ -3139,8 +3654,158 @@ test("translateMarkdownArticle injects structured anchor state into draft prompt
 
   const draftPrompt = prompts.find((prompt) => prompt.includes("当前分段必须建立的首现锚点"));
   assert.ok(draftPrompt);
-  assert.match(draftPrompt, /提示注入攻击 \/ Prompt injection attacks/);
+  assert.match(draftPrompt, /提示注入攻击（Prompt injection attacks）/);
   assert.match(draftPrompt, /【状态切片\(JSON\)】/);
+});
+
+test("translateMarkdownArticle injects required anchors into list items before hard gate", async () => {
+  const source = "- API tokens\n";
+  let auditedTranslation = "";
+
+  const executor: CodexExecutor = {
+    async execute(prompt, options) {
+      if (isDocumentAnalysisPrompt(prompt)) {
+        return createExecResult(
+          createAnchorCatalog([
+            {
+              english: "API tokens",
+              chineseHint: "API 令牌",
+              familyKey: "api tokens"
+            }
+          ])
+        );
+      }
+
+      if (options.outputSchema || prompt.includes('"hard_checks"') || prompt.includes("只返回 JSON")) {
+        auditedTranslation = extractPromptSection(prompt, "【当前译文】") ?? "";
+        return createExecResult(wrapAuditForSegments(prompt, createAudit(true)));
+      }
+
+      const currentTranslation = extractPromptSection(prompt, "【当前译文】");
+      if (currentTranslation !== null) {
+        return createExecResult(currentTranslation);
+      }
+
+      return createExecResult("- API 令牌");
+    }
+  };
+
+  const output = await translateMarkdownArticle(source, {
+    executor,
+    formatter: async (markdown) => markdown
+  });
+
+  assert.match(auditedTranslation, /- API 令牌（API tokens）/);
+  assert.match(output.markdown, /- API 令牌（API tokens）/);
+});
+
+test("translateMarkdownArticle restores a required anchor inside a longer list item after explicit repair", async () => {
+  const source = "- Environment variables containing secrets\n";
+  let auditCount = 0;
+
+  const executor: CodexExecutor = {
+    async execute(prompt, options) {
+      if (isDocumentAnalysisPrompt(prompt)) {
+        return createExecResult(
+          createAnchorCatalog([
+            {
+              english: "Environment variables",
+              chineseHint: "环境变量",
+              familyKey: "environment variables"
+            }
+          ])
+        );
+      }
+
+      if (options.outputSchema && prompt.includes("【分段审校输入】")) {
+        auditCount += 1;
+        if (auditCount === 1) {
+          return createExecResult(
+            wrapPerSegmentAudits(prompt, [
+              {
+                segment_index: 1,
+                audit: createAudit(false, [
+                  "位置：第一段列表“包含秘密信息的环境变量”：Environment variables 首次出现需补中英文对照，不能只写中文。"
+                ])
+              }
+            ])
+          );
+        }
+
+        return createExecResult(wrapPerSegmentAudits(prompt, [{ segment_index: 1, audit: createAudit(true) }]));
+      }
+
+      if (options.outputSchema || prompt.includes('"hard_checks"') || prompt.includes("只返回 JSON")) {
+        return createExecResult(JSON.stringify(createAudit(true)));
+      }
+
+      const currentTranslation = extractPromptSection(prompt, "【当前译文】");
+      if (currentTranslation !== null) {
+        return createExecResult(currentTranslation);
+      }
+
+      return createExecResult("- 包含秘密信息的环境变量");
+    }
+  };
+
+  const output = await translateMarkdownArticle(source, {
+    executor,
+    formatter: async (markdown) => markdown
+  });
+
+  assert.match(output.markdown, /- 包含秘密信息的环境变量（Environment variables）/);
+});
+
+test("translateMarkdownArticle does not inject required anchors into command phrases", async () => {
+  const source = ["**Commands:**", "", "- git status, git log, git diff", "- python script.py (runs code in project)", ""].join(
+    "\n"
+  );
+  let auditedTranslation = "";
+
+  const executor: CodexExecutor = {
+    async execute(prompt, options) {
+      if (isDocumentAnalysisPrompt(prompt)) {
+        return createExecResult(
+          createAnchorCatalog([
+            {
+              english: "Git",
+              chineseHint: "版本控制工具",
+              familyKey: "git"
+            },
+            {
+              english: "Python",
+              chineseHint: "python",
+              familyKey: "python"
+            }
+          ])
+        );
+      }
+
+      if (options.outputSchema || prompt.includes('"hard_checks"') || prompt.includes("只返回 JSON")) {
+        auditedTranslation = extractPromptSection(prompt, "【当前译文】") ?? "";
+        return createExecResult(wrapAuditForSegments(prompt, createAudit(true)));
+      }
+
+      const currentTranslation = extractPromptSection(prompt, "【当前译文】");
+      if (currentTranslation !== null) {
+        return createExecResult(currentTranslation);
+      }
+
+      return createExecResult(["**命令（Commands）：**", "", "- git status、git log、git diff", "- python script.py（在项目中运行代码）"].join("\n"));
+    }
+  };
+
+  const output = await translateMarkdownArticle(source, {
+    executor,
+    formatter: async (markdown) => markdown
+  });
+
+  assert.match(auditedTranslation, /- git status、git log、git diff/);
+  assert.match(auditedTranslation, /- python script\.py（在项目中运行代码）/);
+  assert.doesNotMatch(auditedTranslation, /Git（版本控制工具）status/);
+  assert.doesNotMatch(auditedTranslation, /Python（python）脚本 script\.py/);
+  assert.match(output.markdown, /- git status、git log、git diff/);
+  assert.match(output.markdown, /- python script\.py（在项目中运行代码）/);
 });
 
 test("translateMarkdownArticle exports debug state when MDZH_DEBUG_STATE_PATH is set", async () => {

@@ -11,8 +11,11 @@ import {
 } from "./internal/prompts/scheme-h.js";
 import { DefaultCodexExecutor, type CodexExecutor } from "./codex-exec.js";
 import {
+  formatAnchorDisplay,
+  injectPlannedAnchorText,
   normalizeExplicitRepairAnchorText,
   normalizeHeadingLikeAnchorText,
+  normalizeSourceSurfaceAnchorText,
   normalizeSegmentAnchorText
 } from "./anchor-normalization.js";
 import { FormattingError, HardGateError } from "./errors.js";
@@ -657,7 +660,7 @@ type DraftedSegmentState = {
 };
 
 function summarizePromptAnchor(anchor: PromptSlice["requiredAnchors"][number]): string {
-  return `${anchor.chineseHint || "未定中文"} / ${anchor.english}`;
+  return formatAnchorDisplay(anchor) || "未定中文";
 }
 
 function buildSegmentPromptContext(
@@ -756,12 +759,76 @@ function inferRepairLocationLabel(segmentSource: string): string {
   return "正文段落";
 }
 
+function inferRepairLocationLabelFromInstruction(
+  segmentSource: string,
+  instruction: string
+): string {
+  if (instruction.includes("标题")) {
+    return "标题";
+  }
+  if (instruction.includes("列表项") || instruction.includes("项目符号")) {
+    return "列表项";
+  }
+  if (instruction.includes("引用段") || instruction.includes("引用中的") || instruction.includes("引用句")) {
+    return "引用段";
+  }
+  if (instruction.includes("引导句") || instruction.includes("说明句") || instruction.includes("导语句")) {
+    return "列表引导句";
+  }
+  if (hasSentenceLocalRepairTarget(instruction)) {
+    return "正文句";
+  }
+
+  return inferRepairLocationLabel(segmentSource);
+}
+
+function hasSentenceLocalRepairTarget(instruction: string): boolean {
+  return (
+    instruction.includes("当前句") ||
+    instruction.includes("该句") ||
+    instruction.includes("句内") ||
+    instruction.includes("句中") ||
+    instruction.includes("首句") ||
+    instruction.includes("末句") ||
+    /第\d+段(?:第\d+句|首句|末句)/.test(instruction) ||
+    /位置：[^。\n]*“[^”]+”/.test(instruction)
+  );
+}
+
 function inferRepairAnchorId(
   slice: PromptSlice,
+  segmentSource: string,
   instruction: string
 ): string | null {
   const haystack = instruction.toLowerCase();
-  const anchors = [...slice.requiredAnchors, ...slice.repeatAnchors, ...slice.establishedAnchors];
+  const anchors = [...slice.requiredAnchors, ...slice.repeatAnchors, ...slice.establishedAnchors].filter(
+    (anchor) => segmentSource.toLowerCase().includes(anchor.english.trim().toLowerCase())
+  );
+
+  const explicitTargets = extractExplicitEnglishTargetsFromMustFix([instruction]);
+  for (const target of explicitTargets) {
+    const normalizedTarget = target.toLowerCase();
+    const exactAnchor = anchors.find((anchor) => anchor.english.toLowerCase() === normalizedTarget);
+    if (exactAnchor) {
+      return exactAnchor.anchorId;
+    }
+
+    const matchedAnchor = anchors.find(
+      (anchor) =>
+        normalizedTarget.includes(anchor.english.toLowerCase()) ||
+        anchor.english.toLowerCase().includes(normalizedTarget)
+    );
+    if (matchedAnchor) {
+      return matchedAnchor.anchorId;
+    }
+  }
+
+  for (const anchor of anchors) {
+    if (containsWholePhraseInText(instruction, anchor.english)) {
+      return anchor.anchorId;
+    }
+  }
+
   for (const anchor of anchors) {
     if (
       haystack.includes(anchor.english.toLowerCase()) ||
@@ -773,11 +840,25 @@ function inferRepairAnchorId(
   return null;
 }
 
+function containsWholePhraseInText(haystack: string, needle: string): boolean {
+  if (!needle) {
+    return false;
+  }
+
+  if (/[A-Za-z]/.test(needle)) {
+    const escapedNeedle = needle.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    return new RegExp(`\\b${escapedNeedle}\\b`, "i").test(haystack);
+  }
+
+  return haystack.includes(needle);
+}
+
 function inferRepairTargetEnglish(
   slice: PromptSlice,
+  segmentSource: string,
   instruction: string
 ): string | null {
-  const anchorId = inferRepairAnchorId(slice, instruction);
+  const anchorId = inferRepairAnchorId(slice, segmentSource, instruction);
   if (anchorId) {
     const anchors = [...slice.requiredAnchors, ...slice.repeatAnchors, ...slice.establishedAnchors];
     const matchedAnchor = anchors.find((anchor) => anchor.anchorId === anchorId);
@@ -811,14 +892,13 @@ function buildStructuredSegmentAuditResult(
 ): StateSegmentAuditResult {
   const chunkId = draftedSegment.segmentId.split("-segment-")[0] ?? `chunk-${draftedSegment.segment.index + 1}`;
   const slice = buildSegmentTaskSlice(state, chunkId, draftedSegment.segmentId);
-  const locationLabel = inferRepairLocationLabel(draftedSegment.segment.source);
   const filteredAudit = suppressCoveredAnchorMustFix(state, draftedSegment, slice, audit);
   const repairTasks: RepairTask[] = filteredAudit.must_fix.map((instruction, index) => ({
     id: `${draftedSegment.segmentId}-repair-${state.repairs.length + index + 1}`,
     segmentId: draftedSegment.segmentId,
-    anchorId: inferRepairAnchorId(slice, instruction),
+    anchorId: inferRepairAnchorId(slice, draftedSegment.segment.source, instruction),
     failureType: inferRepairFailureType(filteredAudit, instruction),
-    locationLabel,
+    locationLabel: inferRepairLocationLabelFromInstruction(draftedSegment.segment.source, instruction),
     instruction,
     status: "pending"
   }));
@@ -842,7 +922,7 @@ function suppressCoveredAnchorMustFix(
   }
 
   const remainingMustFix = audit.must_fix.filter((instruction) => {
-    const targetEnglish = inferRepairTargetEnglish(slice, instruction);
+    const targetEnglish = inferRepairTargetEnglish(slice, draftedSegment.segment.source, instruction);
     if (!targetEnglish) {
       return true;
     }
@@ -1077,7 +1157,16 @@ async function translateProtectedChunk(
         hardPassProtectedSource,
         styleResult.text
       );
-      restoredChunkBody = restoreMarkdownSpans(normalizedStyleText, chunkSpans);
+      const normalizedSurfaceStyleText = normalizeSourceSurfaceAnchorText(
+        hardPassProtectedSource,
+        normalizedStyleText,
+        chunkStylePromptContext.stateSlice
+      );
+      const restoredInlineStyleText = restoreInlineCodeFromSourceShape(
+        hardPassProtectedSource,
+        normalizedSurfaceStyleText
+      );
+      restoredChunkBody = restoreMarkdownSpans(restoredInlineStyleText, chunkSpans);
       if (looksLikeMetaTaskResponse(restoredChunkBody)) {
         report(
           context.options,
@@ -1178,6 +1267,122 @@ function stripAddedInlineCodeFromPlainPaths(source: string, translated: string):
   return normalized;
 }
 
+function restoreInlineCodeFromSourceShape(source: string, translated: string): string {
+  const sourceLines = source.split(/\r?\n/);
+  const translatedLines = translated.split(/\r?\n/);
+  let changed = false;
+
+  for (let index = 0; index < Math.min(sourceLines.length, translatedLines.length); index += 1) {
+    const sourceLine = sourceLines[index] ?? "";
+    let translatedLine = translatedLines[index] ?? "";
+    const sourceInlineCodeCounts = collectInlineCodeCounts(sourceLine);
+    if (sourceInlineCodeCounts.size === 0) {
+      continue;
+    }
+
+    const translatedInlineCodeCounts = collectInlineCodeCounts(translatedLine);
+    for (const [token, sourceCount] of sourceInlineCodeCounts.entries()) {
+      let missingCount = sourceCount - (translatedInlineCodeCounts.get(token) ?? 0);
+      while (missingCount > 0) {
+        const restoredLine = wrapPlainOccurrenceOutsideInlineCode(translatedLine, token);
+        if (restoredLine === translatedLine) {
+          break;
+        }
+        translatedLine = restoredLine;
+        missingCount -= 1;
+        changed = true;
+      }
+    }
+
+    translatedLines[index] = translatedLine;
+  }
+
+  return changed ? translatedLines.join("\n") : translated;
+}
+
+function collectInlineCodeCounts(text: string): Map<string, number> {
+  const counts = new Map<string, number>();
+  for (const match of text.matchAll(/`([^`\n]+)`/g)) {
+    const token = match[1]?.trim();
+    if (!token) {
+      continue;
+    }
+    counts.set(token, (counts.get(token) ?? 0) + 1);
+  }
+  return counts;
+}
+
+function wrapPlainOccurrenceOutsideInlineCode(text: string, token: string): string {
+  if (!token) {
+    return text;
+  }
+
+  let output = "";
+  let index = 0;
+  let textStart = 0;
+
+  while (index < text.length) {
+    if (text[index] !== "`") {
+      index += 1;
+      continue;
+    }
+
+    const plainSegment = text.slice(textStart, index);
+    const replaced = replacePlainTokenInSegment(plainSegment, token);
+    output += replaced.segment;
+    if (replaced.replaced) {
+      output += text.slice(index);
+      return output;
+    }
+
+    let tickCount = 1;
+    while (text[index + tickCount] === "`") {
+      tickCount += 1;
+    }
+
+    const fence = "`".repeat(tickCount);
+    const inlineStart = index;
+    index += tickCount;
+
+    let closingIndex = -1;
+    while (index < text.length) {
+      if (text.slice(index, index + tickCount) === fence) {
+        closingIndex = index;
+        break;
+      }
+      index += 1;
+    }
+
+    if (closingIndex < 0) {
+      output += text.slice(inlineStart, inlineStart + tickCount);
+      textStart = inlineStart + tickCount;
+      index = textStart;
+      continue;
+    }
+
+    output += text.slice(inlineStart, closingIndex + tickCount);
+    index = closingIndex + tickCount;
+    textStart = index;
+  }
+
+  const tail = text.slice(textStart);
+  const replacedTail = replacePlainTokenInSegment(tail, token);
+  output += replacedTail.segment;
+  return output;
+}
+
+function replacePlainTokenInSegment(segment: string, token: string): { segment: string; replaced: boolean } {
+  const index = segment.indexOf(token);
+  if (index < 0) {
+    return { segment, replaced: false };
+  }
+
+  return {
+    segment: `${segment.slice(0, index)}\`${token}\`${segment.slice(index + token.length)}`,
+    replaced: true
+  };
+}
+
 function collectPlainCommandTokens(
   sourceWithoutInlineCode: string,
   sourceInlineCodeTokens: ReadonlySet<string>
@@ -1201,16 +1406,37 @@ function collectPlainCommandTokens(
       continue;
     }
 
-    const bulletMatch = trimmed.match(/^(?:[-*+]|\d+[.)])\s+([A-Za-z][A-Za-z0-9+._/-]*)\b/);
-    const token = bulletMatch?.[1]?.trim();
-    if (!token || sourceInlineCodeTokens.has(token)) {
+    const bulletMatch = trimmed.match(/^(?:[-*+]|\d+[.)])\s+(.+)$/);
+    const body = bulletMatch?.[1]?.trim();
+    if (!body) {
       continue;
     }
 
-    tokens.add(token);
+    const commandPhrases = extractPlainCommandPhrases(body);
+    const leadingToken = body.match(/^([A-Za-z][A-Za-z0-9+._/-]*)\b/)?.[1]?.trim();
+    if (leadingToken && !sourceInlineCodeTokens.has(leadingToken)) {
+      tokens.add(leadingToken);
+    }
+    for (const phrase of commandPhrases) {
+      if (!sourceInlineCodeTokens.has(phrase)) {
+        tokens.add(phrase);
+      }
+    }
   }
 
   return tokens;
+}
+
+function extractPlainCommandPhrases(body: string): string[] {
+  const withoutTrailingExplanation = body.replace(/\s*\([^)]*\)\s*$/, "").trim();
+  if (!withoutTrailingExplanation) {
+    return [];
+  }
+
+  return withoutTrailingExplanation
+    .split(/\s*,\s*/)
+    .map((item) => item.trim())
+    .filter((item) => item.length > 0 && /[A-Za-z]/.test(item));
 }
 
 type ProtectedChunkSegment = {
@@ -1256,12 +1482,26 @@ async function translateProtectedSegment(
     stripAddedInlineCodeFromPlainPaths(protectedSource, draftResult.text),
     chunkPromptContext.stateSlice
   );
-  const normalizedHeadingDraftText = normalizeHeadingLikeAnchorText(
+  const injectedDraftText = injectPlannedAnchorText(
     protectedSource,
     normalizedDraftText,
     chunkPromptContext.stateSlice
   );
-  const canonicalProtectedBody = reprotectMarkdownSpans(normalizedHeadingDraftText, combinedSpans);
+  const normalizedHeadingDraftText = normalizeHeadingLikeAnchorText(
+    protectedSource,
+    injectedDraftText,
+    chunkPromptContext.stateSlice
+  );
+  const normalizedSurfaceDraftText = normalizeSourceSurfaceAnchorText(
+    protectedSource,
+    normalizedHeadingDraftText,
+    chunkPromptContext.stateSlice
+  );
+  const restoredInlineDraftText = restoreInlineCodeFromSourceShape(
+    protectedSource,
+    normalizedSurfaceDraftText
+  );
+  const canonicalProtectedBody = reprotectMarkdownSpans(restoredInlineDraftText, combinedSpans);
   const restoredBody = restoreMarkdownSpans(canonicalProtectedBody, combinedSpans);
   applySegmentDraft(context.state, segmentId, {
     protectedSource,
@@ -1347,9 +1587,14 @@ async function repairDraftedSegment(
       stripAddedInlineCodeFromPlainPaths(draftedSegment.protectedSource, repairResult.text),
       buildSegmentTaskSlice(context.state, context.chunkId, draftedSegment.segmentId)
     );
-    const normalizedHeadingRepairText = normalizeHeadingLikeAnchorText(
+    const injectedRepairText = injectPlannedAnchorText(
       draftedSegment.protectedSource,
       normalizedRepairText,
+      buildSegmentTaskSlice(context.state, context.chunkId, draftedSegment.segmentId)
+    );
+    const normalizedHeadingRepairText = normalizeHeadingLikeAnchorText(
+      draftedSegment.protectedSource,
+      injectedRepairText,
       buildSegmentTaskSlice(context.state, context.chunkId, draftedSegment.segmentId)
     );
     const normalizedExplicitRepairText = normalizeExplicitRepairAnchorText(
@@ -1357,7 +1602,16 @@ async function repairDraftedSegment(
       normalizedHeadingRepairText,
       buildSegmentTaskSlice(context.state, context.chunkId, draftedSegment.segmentId)
     );
-    draftedSegment.protectedBody = reprotectMarkdownSpans(normalizedExplicitRepairText, draftedSegment.spans);
+    const normalizedSurfaceRepairText = normalizeSourceSurfaceAnchorText(
+      draftedSegment.protectedSource,
+      normalizedExplicitRepairText,
+      buildSegmentTaskSlice(context.state, context.chunkId, draftedSegment.segmentId)
+    );
+    const restoredInlineRepairText = restoreInlineCodeFromSourceShape(
+      draftedSegment.protectedSource,
+      normalizedSurfaceRepairText
+    );
+    draftedSegment.protectedBody = reprotectMarkdownSpans(restoredInlineRepairText, draftedSegment.spans);
     draftedSegment.restoredBody = restoreMarkdownSpans(draftedSegment.protectedBody, draftedSegment.spans);
     applyRepairResult(context.state, draftedSegment.segmentId, taskBatch.map((task) => task.id), {
       protectedBody: draftedSegment.protectedBody,
@@ -1392,7 +1646,11 @@ function splitRepairTaskBatches(
         ? state.anchors.find((anchor) => anchor.id === nextTask.anchorId)?.familyId ?? nextTask.anchorId
         : null;
       const relatedToBatch = nextFamily ? batchFamilies.has(nextFamily) : false;
-      if (batch.length >= normalizedBatchSize && !relatedToBatch) {
+      const spansMultipleLocations =
+        batch.some(
+          (task) => task.segmentId === nextTask.segmentId && task.locationLabel !== nextTask.locationLabel
+        );
+      if (batch.length >= normalizedBatchSize && !relatedToBatch && !spansMultipleLocations) {
         break;
       }
 
@@ -1532,9 +1790,7 @@ function buildRepairPromptContext(
   const explicitEnglishTargets = extractExplicitEnglishTargetsFromMustFix(mustFix);
   const conceptFamilyTargets = extractConceptFamilyTargets(explicitEnglishTargets);
   const duplicatePendingAnchorGroups = collectDuplicatePendingAnchorGroups(promptContext);
-  const hasQuotedSentenceLocation =
-    mustFix.some((item) => /位置：[^。\n]*“[^”]+”/.test(item)) &&
-    mustFix.some((item) => item.includes("首次出现") || item.includes("中英文") || item.includes("中英对照"));
+  const hasQuotedSentenceLocation = mustFix.some((item) => hasSentenceLocalRepairTarget(item));
   const targetsHeadingLikeAnchor = mustFix.some(
     (item) => item.includes("标题") || item.includes("首次出现") || item.includes("中英对照")
   );
