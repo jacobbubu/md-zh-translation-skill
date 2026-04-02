@@ -3032,6 +3032,56 @@ test("translateMarkdownArticle restores a structured heading-like anchor after r
   assert.match(result.markdown, /\*\*测试 2：系统文件访问（System File Access）\*\*/);
 });
 
+test("translateMarkdownArticle restores an ATX heading anchor after repair when must_fix only names the translated heading", async () => {
+  const source = [
+    "# Title",
+    "",
+    "### Credential Theft",
+    "",
+    "Attempts to access:",
+    ""
+  ].join("\n");
+
+  let auditCount = 0;
+  const result = await translateMarkdownArticle(source, {
+    executor: {
+      async execute(prompt, options) {
+        if (options.outputSchema && prompt.includes("【分段审校输入】")) {
+          auditCount += 1;
+          if (auditCount === 1) {
+            return createExecResult(
+              wrapPerSegmentAudits(prompt, [
+                {
+                  segment_index: 1,
+                  audit: createAudit(false, [
+                    "`### 凭证窃取`：这是本分段首次出现的关键术语，小标题需补英文对照后再用。"
+                  ])
+                }
+              ])
+            );
+          }
+
+          return createExecResult(wrapPerSegmentAudits(prompt, [{ segment_index: 1, audit: createAudit(true) }]));
+        }
+
+        if (options.outputSchema || prompt.includes("只返回 JSON")) {
+          return createExecResult(JSON.stringify(createAudit(true)));
+        }
+
+        const currentTranslation = extractPromptSection(prompt, "【当前译文】");
+        if (currentTranslation !== null) {
+          return createExecResult(currentTranslation);
+        }
+
+        return createExecResult(["# Title", "", "### 凭证窃取", "", "尝试访问：", ""].join("\n"));
+      }
+    },
+    formatter: async (markdown) => markdown
+  });
+
+  assert.match(result.markdown, /### 凭证窃取（Credential Theft）/);
+});
+
 test("translateMarkdownArticle adds attribution guidance for caption-like segments", async () => {
   const source = [
     "# Title",

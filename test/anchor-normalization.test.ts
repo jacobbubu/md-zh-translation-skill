@@ -267,3 +267,23 @@ test("normalizeExplicitRepairAnchorText restores a heading-like anchor from a st
 
   assert.equal(normalized, "**测试 2：系统文件访问（System File Access）**");
 });
+
+test("normalizeExplicitRepairAnchorText falls back to the source ATX heading when the repair target omits english", () => {
+  const slice = createSlice({
+    pendingRepairs: [
+      {
+        repairId: "repair-1",
+        anchorId: null,
+        failureType: "missing_anchor",
+        locationLabel: "小标题",
+        instruction: "`### 凭证窃取`：这是本分段首次出现的关键术语，小标题需补英文对照后再用。"
+      }
+    ]
+  });
+  const source = "### Credential Theft";
+  const translated = "### 凭证窃取";
+
+  const normalized = normalizeExplicitRepairAnchorText(source, translated, slice);
+
+  assert.equal(normalized, "### 凭证窃取（Credential Theft）");
+});

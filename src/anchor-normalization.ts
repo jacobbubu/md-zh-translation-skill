@@ -166,6 +166,8 @@ export function normalizeExplicitRepairAnchorText(
 
   const sourceLines = source.split(/\r?\n/);
   const translatedLines = text.split(/\r?\n/);
+  const sourceHeadingLines = extractHeadingLikeLines(source);
+  const translatedHeadingLines = extractHeadingLikeLines(text);
   let changed = false;
 
   for (let index = 0; index < Math.min(sourceLines.length, translatedLines.length); index += 1) {
@@ -173,18 +175,22 @@ export function normalizeExplicitRepairAnchorText(
     let translatedLine = translatedLines[index] ?? "";
 
     for (const target of targets) {
+      const english =
+        target.english ??
+        resolveHeadingEnglishFromSource(target.chineseHint, sourceHeadingLines, translatedHeadingLines);
+      if (!english) {
+        continue;
+      }
+
       if (
-        !containsWholePhrase(sourceLine, target.english) ||
+        !containsWholePhrase(sourceLine, english) ||
         !translatedLine.includes(target.chineseHint) ||
-        containsWholePhrase(translatedLine, target.english)
+        containsWholePhrase(translatedLine, english)
       ) {
         continue;
       }
 
-      translatedLine = translatedLine.replace(
-        target.chineseHint,
-        `${target.chineseHint}（${target.english}）`
-      );
+      translatedLine = translatedLine.replace(target.chineseHint, `${target.chineseHint}（${english}）`);
       changed = true;
     }
 
@@ -192,6 +198,29 @@ export function normalizeExplicitRepairAnchorText(
   }
 
   return changed ? translatedLines.join("\n") : text;
+}
+
+function resolveHeadingEnglishFromSource(
+  chineseHint: string,
+  sourceHeadingLines: readonly HeadingLine[],
+  translatedHeadingLines: readonly HeadingLine[]
+): string | null {
+  for (let index = 0; index < Math.min(sourceHeadingLines.length, translatedHeadingLines.length); index += 1) {
+    const sourceHeading = sourceHeadingLines[index];
+    const translatedHeading = translatedHeadingLines[index];
+    if (!sourceHeading || !translatedHeading) {
+      continue;
+    }
+
+    if (
+      stripInlineMarkdownMarkers(translatedHeading.content).trim() === chineseHint &&
+      /[A-Za-z]/.test(sourceHeading.content)
+    ) {
+      return sourceHeading.content.trim();
+    }
+  }
+
+  return null;
 }
 
 function normalizeSingleAnchor(
@@ -342,7 +371,7 @@ type HeadingLine = {
 
 type ExplicitRepairTarget = {
   chineseHint: string;
-  english: string;
+  english: string | null;
 };
 
 function parseExplicitRepairTarget(instruction: string): ExplicitRepairTarget | null {
@@ -358,10 +387,13 @@ function parseExplicitRepairTarget(instruction: string): ExplicitRepairTarget | 
     instruction.match(/关键术语“([^”]*[A-Za-z][^”]*)”/)?.[1]?.trim() ??
     instruction.match(/“([^”]*[A-Za-z][^”]*)”缺少/)?.[1]?.trim() ??
     null;
-  const locationText = instruction.match(/位置：[^“]*“([^”]+)”/)?.[1]?.trim() ?? null;
-  const chineseHint = locationText ? stripInlineMarkdownMarkers(locationText).trim() : null;
+  const locationText =
+    instruction.match(/位置：[^“]*“([^”]+)”/)?.[1]?.trim() ??
+    instruction.match(/`([^`]+)`/)?.[1]?.trim() ??
+    null;
+  const chineseHint = locationText ? stripHeadingMarkers(stripInlineMarkdownMarkers(locationText).trim()) : null;
 
-  if (!english || !chineseHint) {
+  if (!chineseHint) {
     return null;
   }
 
@@ -370,6 +402,10 @@ function parseExplicitRepairTarget(instruction: string): ExplicitRepairTarget | 
 
 function stripInlineMarkdownMarkers(text: string): string {
   return text.replace(/[*_`~]/g, "");
+}
+
+function stripHeadingMarkers(text: string): string {
+  return text.replace(/^#{1,6}\s+/, "").trim();
 }
 
 function extractHeadingLikeLines(text: string): HeadingLine[] {
