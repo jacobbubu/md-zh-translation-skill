@@ -48,6 +48,61 @@ export function normalizeSegmentAnchorText(text: string, slice: PromptSlice | nu
   return normalizeRepeatedEnglishParenthesesWithLocalHints(normalized);
 }
 
+export function normalizeSourceSurfaceAnchorText(
+  source: string,
+  text: string,
+  slice: PromptSlice | null
+): string {
+  if (!slice) {
+    return text;
+  }
+
+  const anchors = dedupePromptAnchors([
+    ...slice.requiredAnchors,
+    ...slice.repeatAnchors,
+    ...slice.establishedAnchors
+  ]);
+  if (anchors.length === 0) {
+    return text;
+  }
+
+  const sourceLines = source.split(/\r?\n/);
+  const translatedLines = text.split(/\r?\n/);
+  let changed = false;
+
+  for (let index = 0; index < Math.min(sourceLines.length, translatedLines.length); index += 1) {
+    const sourceLine = sourceLines[index] ?? "";
+    let translatedLine = translatedLines[index] ?? "";
+    const sourceAnchors = coalesceSourceLineAnchors(
+      anchors.filter((anchor) => containsWholePhrase(sourceLine, anchor.english))
+    );
+    if (sourceAnchors.length === 0) {
+      continue;
+    }
+
+    for (const sourceAnchor of sourceAnchors) {
+      const siblingVariants = anchors.filter(
+        (candidate) =>
+          candidate.familyId === sourceAnchor.familyId &&
+          candidate.anchorId !== sourceAnchor.anchorId &&
+          !containsWholePhrase(sourceLine, candidate.english)
+      );
+
+      for (const variant of siblingVariants) {
+        const normalizedLine = collapseUnexpectedFamilyVariant(translatedLine, variant, sourceAnchor);
+        if (normalizedLine !== translatedLine) {
+          translatedLine = normalizedLine;
+          changed = true;
+        }
+      }
+    }
+
+    translatedLines[index] = translatedLine;
+  }
+
+  return changed ? translatedLines.join("\n") : text;
+}
+
 export function injectPlannedAnchorText(
   source: string,
   text: string,
@@ -71,12 +126,11 @@ export function injectPlannedAnchorText(
   for (let index = 0; index < Math.min(sourceLines.length, translatedLines.length); index += 1) {
     const sourceLine = sourceLines[index] ?? "";
     let translatedLine = translatedLines[index] ?? "";
+    const lineAnchors = coalesceSourceLineAnchors(
+      requiredAnchors.filter((anchor) => containsWholePhrase(sourceLine, anchor.english))
+    );
 
-    for (const anchor of requiredAnchors) {
-      if (!containsWholePhrase(sourceLine, anchor.english)) {
-        continue;
-      }
-
+    for (const anchor of lineAnchors) {
       if (shouldSkipAnchorInjectionForCommandPhrase(sourceLine, anchor)) {
         continue;
       }
@@ -121,11 +175,13 @@ export function normalizeHeadingLikeAnchorText(
   for (let index = 0; index < Math.min(sourceHeadingLines.length, translatedHeadingLines.length); index += 1) {
     const sourceLine = sourceHeadingLines[index]!;
     const translatedLine = translatedHeadingLines[index]!;
+    const lineAnchors = coalesceSourceLineAnchors(
+      requiredAnchors.filter((anchor) => containsWholePhrase(sourceLine.content, anchor.english))
+    );
 
     let normalizedLine = translatedLine.raw;
-    for (const anchor of requiredAnchors) {
+    for (const anchor of lineAnchors) {
       if (
-        !containsWholePhrase(sourceLine.content, anchor.english) ||
         !anchor.chineseHint ||
         anchor.chineseHint.toLowerCase() === anchor.english.toLowerCase() ||
         !normalizedLine.includes(anchor.chineseHint) ||
@@ -407,6 +463,59 @@ function injectAnchorIntoLine(text: string, anchor: PromptAnchor): string {
   }
 
   return text;
+}
+
+function collapseUnexpectedFamilyVariant(
+  text: string,
+  variant: PromptAnchor,
+  sourceAnchor: PromptAnchor
+): string {
+  const variantDisplay = resolveAnchorDisplay(variant);
+  const sourceDisplay = resolveAnchorDisplay(sourceAnchor);
+  let normalized = text;
+  const variantSuffix = variant.english.startsWith(`${sourceAnchor.english} `)
+    ? variant.english.slice(sourceAnchor.english.length).trim()
+    : "";
+
+  const replacements: Array<[string, string]> = [
+    [variantDisplay.canonical, sourceDisplay.canonical],
+    [`${variant.english}（${sourceAnchor.english}）`, sourceDisplay.canonical],
+    [`${variant.english}（${sourceDisplay.chineseDisplay}）`, sourceDisplay.canonical],
+    [`${variantDisplay.canonical}（${sourceAnchor.english}）`, sourceDisplay.canonical],
+    [`${sourceDisplay.canonical}（${sourceAnchor.english}）`, sourceDisplay.canonical]
+  ];
+
+  if (variantSuffix) {
+    replacements.push(
+      [`${sourceDisplay.canonical} ${variantSuffix}（${sourceAnchor.english}）`, sourceDisplay.canonical],
+      [`${sourceDisplay.canonical} ${variantSuffix}`, sourceDisplay.canonical]
+    );
+  }
+
+  for (const [from, to] of replacements) {
+    if (from && to && normalized.includes(from)) {
+      normalized = normalized.split(from).join(to);
+    }
+  }
+
+  if (containsWholePhrase(normalized, variant.english) && !containsWholePhrase(text, sourceAnchor.english)) {
+    normalized = replaceWholePhraseOnce(normalized, variant.english, sourceDisplay.canonical);
+  }
+
+  return normalized;
+}
+
+function coalesceSourceLineAnchors(anchors: readonly PromptAnchor[]): PromptAnchor[] {
+  return anchors.filter(
+    (anchor) =>
+      !anchors.some(
+        (candidate) =>
+          candidate.anchorId !== anchor.anchorId &&
+          candidate.familyId === anchor.familyId &&
+          candidate.english.length > anchor.english.length &&
+          containsWholePhrase(candidate.english, anchor.english)
+      )
+  );
 }
 
 function shouldSkipAnchorInjectionForCommandPhrase(sourceLine: string, anchor: PromptAnchor): boolean {

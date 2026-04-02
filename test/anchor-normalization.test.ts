@@ -7,6 +7,7 @@ import {
   normalizeExplicitRepairAnchorText,
   normalizeHeadingLikeAnchorText,
   normalizeSegmentAnchorText,
+  normalizeSourceSurfaceAnchorText,
   type PromptAnchor
 } from "../src/anchor-normalization.js";
 import type { PromptSlice } from "../src/translation-state.js";
@@ -130,6 +131,19 @@ test("normalizeSegmentAnchorText strips a trailing repeated english name from an
   );
 
   assert.equal(normalized, "这些内容默认会被阻止，即使 Claude（Anthropic 的 AI 助手）被指示要访问它们。");
+});
+
+test("normalizeSourceSurfaceAnchorText keeps the source surface form when a longer family variant appears in translation", () => {
+  const slice = createSlice({
+    requiredAnchors: [createAnchor("anchor-1", "Claude", "Anthropic 的 AI 助手", "claude-family")],
+    establishedAnchors: [createAnchor("anchor-2", "Claude Code", "Claude Code", "claude-family")]
+  });
+  const source = "Tell Claude:";
+  const translated = "告诉 Claude Code（Claude）：";
+
+  const normalized = normalizeSourceSurfaceAnchorText(source, translated, slice);
+
+  assert.equal(normalized, "告诉 Claude（Anthropic 的 AI 助手）：");
 });
 
 test("normalizeSegmentAnchorText collapses duplicate English parentheses when no better local hint exists", () => {

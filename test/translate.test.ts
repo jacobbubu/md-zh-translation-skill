@@ -2363,6 +2363,64 @@ test("translateMarkdownArticle keeps sentence-local Claude repairs away from ear
   assert.doesNotMatch(repairPrompt, /本次 must_fix 明确点名了这些英文目标：.*Claude Code/);
 });
 
+test("translateMarkdownArticle keeps the source surface form when Claude and Claude Code share a family", async () => {
+  const source = [
+    "# Title",
+    "",
+    "Claude Code is already established earlier in this segment.",
+    "",
+    "Tell Claude:"
+  ].join("\n");
+
+  class ClaudeSurfaceExecutor extends PromptAwareExecutor {
+    override async execute(prompt: string, options: CodexExecOptions): Promise<CodexExecResult> {
+      this.prompts.push(prompt);
+
+      if (isDocumentAnalysisPrompt(prompt)) {
+        return createExecResult(
+          createAnchorCatalog([
+            {
+              english: "Claude Code",
+              chineseHint: "Claude Code",
+              familyKey: "claude-family"
+            },
+            {
+              english: "Claude",
+              chineseHint: "Anthropic 的 AI 助手",
+              familyKey: "claude-family"
+            }
+          ])
+        );
+      }
+
+      if (options.outputSchema || prompt.includes("只返回 JSON")) {
+        return createExecResult(wrapAuditForSegments(prompt, createAudit(true)));
+      }
+
+      const currentTranslation = extractPromptSection(prompt, "【当前译文】");
+      if (currentTranslation !== null) {
+        return createExecResult(currentTranslation);
+      }
+
+      return createExecResult([
+        "# 标题",
+        "",
+        "Claude Code 已在本段前文建立。",
+        "",
+        "告诉 Claude Code（Claude）："
+      ].join("\n"));
+    }
+  }
+
+  const result = await translateMarkdownArticle(source, {
+    executor: new ClaudeSurfaceExecutor(),
+    formatter: async (markdown) => markdown
+  });
+
+  assert.match(result.markdown, /告诉 Claude（Anthropic 的 AI 助手）：/);
+  assert.doesNotMatch(result.markdown, /Claude Code（Claude）/);
+});
+
 test("translateMarkdownArticle tells repair when the same anchor is still missing in multiple locations", async () => {
   const source = [
     "## So, What Do AI Agents Need?",

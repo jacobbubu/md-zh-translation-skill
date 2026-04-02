@@ -15,6 +15,7 @@ import {
   injectPlannedAnchorText,
   normalizeExplicitRepairAnchorText,
   normalizeHeadingLikeAnchorText,
+  normalizeSourceSurfaceAnchorText,
   normalizeSegmentAnchorText
 } from "./anchor-normalization.js";
 import { FormattingError, HardGateError } from "./errors.js";
@@ -807,6 +808,11 @@ function inferRepairAnchorId(
   const explicitTargets = extractExplicitEnglishTargetsFromMustFix([instruction]);
   for (const target of explicitTargets) {
     const normalizedTarget = target.toLowerCase();
+    const exactAnchor = anchors.find((anchor) => anchor.english.toLowerCase() === normalizedTarget);
+    if (exactAnchor) {
+      return exactAnchor.anchorId;
+    }
+
     const matchedAnchor = anchors.find(
       (anchor) =>
         normalizedTarget.includes(anchor.english.toLowerCase()) ||
@@ -814,6 +820,12 @@ function inferRepairAnchorId(
     );
     if (matchedAnchor) {
       return matchedAnchor.anchorId;
+    }
+  }
+
+  for (const anchor of anchors) {
+    if (containsWholePhraseInText(instruction, anchor.english)) {
+      return anchor.anchorId;
     }
   }
 
@@ -826,6 +838,19 @@ function inferRepairAnchorId(
     }
   }
   return null;
+}
+
+function containsWholePhraseInText(haystack: string, needle: string): boolean {
+  if (!needle) {
+    return false;
+  }
+
+  if (/[A-Za-z]/.test(needle)) {
+    const escapedNeedle = needle.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    return new RegExp(`\\b${escapedNeedle}\\b`, "i").test(haystack);
+  }
+
+  return haystack.includes(needle);
 }
 
 function inferRepairTargetEnglish(
@@ -1132,9 +1157,14 @@ async function translateProtectedChunk(
         hardPassProtectedSource,
         styleResult.text
       );
+      const normalizedSurfaceStyleText = normalizeSourceSurfaceAnchorText(
+        hardPassProtectedSource,
+        normalizedStyleText,
+        chunkStylePromptContext.stateSlice
+      );
       const restoredInlineStyleText = restoreInlineCodeFromSourceShape(
         hardPassProtectedSource,
-        normalizedStyleText
+        normalizedSurfaceStyleText
       );
       restoredChunkBody = restoreMarkdownSpans(restoredInlineStyleText, chunkSpans);
       if (looksLikeMetaTaskResponse(restoredChunkBody)) {
@@ -1462,9 +1492,14 @@ async function translateProtectedSegment(
     injectedDraftText,
     chunkPromptContext.stateSlice
   );
+  const normalizedSurfaceDraftText = normalizeSourceSurfaceAnchorText(
+    protectedSource,
+    normalizedHeadingDraftText,
+    chunkPromptContext.stateSlice
+  );
   const restoredInlineDraftText = restoreInlineCodeFromSourceShape(
     protectedSource,
-    normalizedHeadingDraftText
+    normalizedSurfaceDraftText
   );
   const canonicalProtectedBody = reprotectMarkdownSpans(restoredInlineDraftText, combinedSpans);
   const restoredBody = restoreMarkdownSpans(canonicalProtectedBody, combinedSpans);
@@ -1567,9 +1602,14 @@ async function repairDraftedSegment(
       normalizedHeadingRepairText,
       buildSegmentTaskSlice(context.state, context.chunkId, draftedSegment.segmentId)
     );
+    const normalizedSurfaceRepairText = normalizeSourceSurfaceAnchorText(
+      draftedSegment.protectedSource,
+      normalizedExplicitRepairText,
+      buildSegmentTaskSlice(context.state, context.chunkId, draftedSegment.segmentId)
+    );
     const restoredInlineRepairText = restoreInlineCodeFromSourceShape(
       draftedSegment.protectedSource,
-      normalizedExplicitRepairText
+      normalizedSurfaceRepairText
     );
     draftedSegment.protectedBody = reprotectMarkdownSpans(restoredInlineRepairText, draftedSegment.spans);
     draftedSegment.restoredBody = restoreMarkdownSpans(draftedSegment.protectedBody, draftedSegment.spans);
