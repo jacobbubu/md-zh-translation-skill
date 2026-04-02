@@ -77,6 +77,10 @@ export function injectPlannedAnchorText(
         continue;
       }
 
+      if (shouldSkipAnchorInjectionForCommandPhrase(sourceLine, anchor)) {
+        continue;
+      }
+
       const injectedLine = injectAnchorIntoLine(translatedLine, anchor);
       if (injectedLine !== translatedLine) {
         translatedLine = injectedLine;
@@ -298,6 +302,37 @@ function injectAnchorIntoLine(text: string, anchor: PromptAnchor): string {
   }
 
   return text;
+}
+
+function shouldSkipAnchorInjectionForCommandPhrase(sourceLine: string, anchor: PromptAnchor): boolean {
+  const trimmed = sourceLine.trim();
+  const bulletMatch = trimmed.match(/^(?:[-*+]|\d+[.)])\s+(.+)$/);
+  const body = bulletMatch?.[1]?.trim();
+  if (!body) {
+    return false;
+  }
+
+  const english = anchor.english.trim();
+  if (!english || /\s/.test(english)) {
+    return false;
+  }
+
+  const withoutTrailingExplanation = body.replace(/\s*\([^)]*\)\s*$/, "").trim();
+  const leadingToken = withoutTrailingExplanation.match(/^([A-Za-z][A-Za-z0-9+._/-]*)\b/)?.[1]?.trim();
+  if (!leadingToken || leadingToken.toLowerCase() !== english.toLowerCase()) {
+    return false;
+  }
+
+  const remainder = withoutTrailingExplanation.slice(leadingToken.length).trim();
+  if (!remainder) {
+    return false;
+  }
+
+  if (remainder.includes(",")) {
+    return true;
+  }
+
+  return /^[A-Za-z0-9./_-]/.test(remainder);
 }
 
 type HeadingLine = {

@@ -187,6 +187,21 @@ test("injectPlannedAnchorText injects a missing anchor into a paragraph line", (
   assert.equal(normalized, "提示注入攻击（Prompt injection attacks）会隐藏恶意指令。");
 });
 
+test("injectPlannedAnchorText does not expand command phrases inside Commands-style list items", () => {
+  const slice = createSlice({
+    requiredAnchors: [
+      createAnchor("anchor-1", "Git", "版本控制工具"),
+      createAnchor("anchor-2", "Python", "python")
+    ]
+  });
+  const source = ["- git status, git log, git diff", "- python script.py (runs code in project)"].join("\n");
+  const translated = ["- git status、git log、git diff", "- python script.py（在项目中运行代码）"].join("\n");
+
+  const normalized = injectPlannedAnchorText(source, translated, slice);
+
+  assert.equal(normalized, translated);
+});
+
 test("normalizeExplicitRepairAnchorText restores a quoted-line anchor from an explicit repair target", () => {
   const slice = createSlice({
     pendingRepairs: [

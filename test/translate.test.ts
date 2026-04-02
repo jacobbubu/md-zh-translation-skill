@@ -3371,6 +3371,58 @@ test("translateMarkdownArticle injects required anchors into list items before h
   assert.match(output.markdown, /- API 令牌（API tokens）/);
 });
 
+test("translateMarkdownArticle does not inject required anchors into command phrases", async () => {
+  const source = ["**Commands:**", "", "- git status, git log, git diff", "- python script.py (runs code in project)", ""].join(
+    "\n"
+  );
+  let auditedTranslation = "";
+
+  const executor: CodexExecutor = {
+    async execute(prompt, options) {
+      if (isDocumentAnalysisPrompt(prompt)) {
+        return createExecResult(
+          createAnchorCatalog([
+            {
+              english: "Git",
+              chineseHint: "版本控制工具",
+              familyKey: "git"
+            },
+            {
+              english: "Python",
+              chineseHint: "python",
+              familyKey: "python"
+            }
+          ])
+        );
+      }
+
+      if (options.outputSchema || prompt.includes('"hard_checks"') || prompt.includes("只返回 JSON")) {
+        auditedTranslation = extractPromptSection(prompt, "【当前译文】") ?? "";
+        return createExecResult(wrapAuditForSegments(prompt, createAudit(true)));
+      }
+
+      const currentTranslation = extractPromptSection(prompt, "【当前译文】");
+      if (currentTranslation !== null) {
+        return createExecResult(currentTranslation);
+      }
+
+      return createExecResult(["**命令（Commands）：**", "", "- git status、git log、git diff", "- python script.py（在项目中运行代码）"].join("\n"));
+    }
+  };
+
+  const output = await translateMarkdownArticle(source, {
+    executor,
+    formatter: async (markdown) => markdown
+  });
+
+  assert.match(auditedTranslation, /- git status、git log、git diff/);
+  assert.match(auditedTranslation, /- python script\.py（在项目中运行代码）/);
+  assert.doesNotMatch(auditedTranslation, /Git（版本控制工具）status/);
+  assert.doesNotMatch(auditedTranslation, /Python（python）脚本 script\.py/);
+  assert.match(output.markdown, /- git status、git log、git diff/);
+  assert.match(output.markdown, /- python script\.py（在项目中运行代码）/);
+});
+
 test("translateMarkdownArticle exports debug state when MDZH_DEBUG_STATE_PATH is set", async () => {
   const tempDir = await mkdtemp(path.join(tmpdir(), "mdzh-state-"));
   const debugPath = path.join(tempDir, "state.json");
