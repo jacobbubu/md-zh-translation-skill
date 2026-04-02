@@ -1132,7 +1132,11 @@ async function translateProtectedChunk(
         hardPassProtectedSource,
         styleResult.text
       );
-      restoredChunkBody = restoreMarkdownSpans(normalizedStyleText, chunkSpans);
+      const restoredInlineStyleText = restoreInlineCodeFromSourceShape(
+        hardPassProtectedSource,
+        normalizedStyleText
+      );
+      restoredChunkBody = restoreMarkdownSpans(restoredInlineStyleText, chunkSpans);
       if (looksLikeMetaTaskResponse(restoredChunkBody)) {
         report(
           context.options,
@@ -1231,6 +1235,122 @@ function stripAddedInlineCodeFromPlainPaths(source: string, translated: string):
   }
 
   return normalized;
+}
+
+function restoreInlineCodeFromSourceShape(source: string, translated: string): string {
+  const sourceLines = source.split(/\r?\n/);
+  const translatedLines = translated.split(/\r?\n/);
+  let changed = false;
+
+  for (let index = 0; index < Math.min(sourceLines.length, translatedLines.length); index += 1) {
+    const sourceLine = sourceLines[index] ?? "";
+    let translatedLine = translatedLines[index] ?? "";
+    const sourceInlineCodeCounts = collectInlineCodeCounts(sourceLine);
+    if (sourceInlineCodeCounts.size === 0) {
+      continue;
+    }
+
+    const translatedInlineCodeCounts = collectInlineCodeCounts(translatedLine);
+    for (const [token, sourceCount] of sourceInlineCodeCounts.entries()) {
+      let missingCount = sourceCount - (translatedInlineCodeCounts.get(token) ?? 0);
+      while (missingCount > 0) {
+        const restoredLine = wrapPlainOccurrenceOutsideInlineCode(translatedLine, token);
+        if (restoredLine === translatedLine) {
+          break;
+        }
+        translatedLine = restoredLine;
+        missingCount -= 1;
+        changed = true;
+      }
+    }
+
+    translatedLines[index] = translatedLine;
+  }
+
+  return changed ? translatedLines.join("\n") : translated;
+}
+
+function collectInlineCodeCounts(text: string): Map<string, number> {
+  const counts = new Map<string, number>();
+  for (const match of text.matchAll(/`([^`\n]+)`/g)) {
+    const token = match[1]?.trim();
+    if (!token) {
+      continue;
+    }
+    counts.set(token, (counts.get(token) ?? 0) + 1);
+  }
+  return counts;
+}
+
+function wrapPlainOccurrenceOutsideInlineCode(text: string, token: string): string {
+  if (!token) {
+    return text;
+  }
+
+  let output = "";
+  let index = 0;
+  let textStart = 0;
+
+  while (index < text.length) {
+    if (text[index] !== "`") {
+      index += 1;
+      continue;
+    }
+
+    const plainSegment = text.slice(textStart, index);
+    const replaced = replacePlainTokenInSegment(plainSegment, token);
+    output += replaced.segment;
+    if (replaced.replaced) {
+      output += text.slice(index);
+      return output;
+    }
+
+    let tickCount = 1;
+    while (text[index + tickCount] === "`") {
+      tickCount += 1;
+    }
+
+    const fence = "`".repeat(tickCount);
+    const inlineStart = index;
+    index += tickCount;
+
+    let closingIndex = -1;
+    while (index < text.length) {
+      if (text.slice(index, index + tickCount) === fence) {
+        closingIndex = index;
+        break;
+      }
+      index += 1;
+    }
+
+    if (closingIndex < 0) {
+      output += text.slice(inlineStart, inlineStart + tickCount);
+      textStart = inlineStart + tickCount;
+      index = textStart;
+      continue;
+    }
+
+    output += text.slice(inlineStart, closingIndex + tickCount);
+    index = closingIndex + tickCount;
+    textStart = index;
+  }
+
+  const tail = text.slice(textStart);
+  const replacedTail = replacePlainTokenInSegment(tail, token);
+  output += replacedTail.segment;
+  return output;
+}
+
+function replacePlainTokenInSegment(segment: string, token: string): { segment: string; replaced: boolean } {
+  const index = segment.indexOf(token);
+  if (index < 0) {
+    return { segment, replaced: false };
+  }
+
+  return {
+    segment: `${segment.slice(0, index)}\`${token}\`${segment.slice(index + token.length)}`,
+    replaced: true
+  };
 }
 
 function collectPlainCommandTokens(
@@ -1342,7 +1462,11 @@ async function translateProtectedSegment(
     injectedDraftText,
     chunkPromptContext.stateSlice
   );
-  const canonicalProtectedBody = reprotectMarkdownSpans(normalizedHeadingDraftText, combinedSpans);
+  const restoredInlineDraftText = restoreInlineCodeFromSourceShape(
+    protectedSource,
+    normalizedHeadingDraftText
+  );
+  const canonicalProtectedBody = reprotectMarkdownSpans(restoredInlineDraftText, combinedSpans);
   const restoredBody = restoreMarkdownSpans(canonicalProtectedBody, combinedSpans);
   applySegmentDraft(context.state, segmentId, {
     protectedSource,
@@ -1443,7 +1567,11 @@ async function repairDraftedSegment(
       normalizedHeadingRepairText,
       buildSegmentTaskSlice(context.state, context.chunkId, draftedSegment.segmentId)
     );
-    draftedSegment.protectedBody = reprotectMarkdownSpans(normalizedExplicitRepairText, draftedSegment.spans);
+    const restoredInlineRepairText = restoreInlineCodeFromSourceShape(
+      draftedSegment.protectedSource,
+      normalizedExplicitRepairText
+    );
+    draftedSegment.protectedBody = reprotectMarkdownSpans(restoredInlineRepairText, draftedSegment.spans);
     draftedSegment.restoredBody = restoreMarkdownSpans(draftedSegment.protectedBody, draftedSegment.spans);
     applyRepairResult(context.state, draftedSegment.segmentId, taskBatch.map((task) => task.id), {
       protectedBody: draftedSegment.protectedBody,

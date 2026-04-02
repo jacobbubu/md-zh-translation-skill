@@ -753,6 +753,51 @@ test("translateMarkdownArticle strips added inline code from multi-command phras
   assert.doesNotMatch(result.markdown, /`python script\.py`/);
 });
 
+test("translateMarkdownArticle restores inline code only at source locations when the same flag also appears as plain text", async () => {
+  const source = [
+    "## Claude Code Permission Problem",
+    "",
+    "If you use the --dangerously-skip-permissions flag, you remove safety guardrails.",
+    "",
+    "The `--dangerously-skip-permissions` flag exists as an escape hatch from this fatigue."
+  ].join("\n");
+
+  class MixedFlagExecutor implements CodexExecutor {
+    async execute(prompt: string, options: CodexExecOptions): Promise<CodexExecResult> {
+      if (isDocumentAnalysisPrompt(prompt)) {
+        return createExecResult(createEmptyAnchorCatalog());
+      }
+
+      if (options.outputSchema || prompt.includes('"hard_checks"') || prompt.includes("只返回 JSON")) {
+        return createExecResult(wrapAuditForSegments(prompt, createAudit(true)));
+      }
+
+      const translated = [
+        "## Claude Code 权限问题",
+        "",
+        "如果你使用 --dangerously-skip-permissions 标志，就会移除安全护栏。",
+        "",
+        "这个 --dangerously-skip-permissions 标志是为了缓解这种疲劳而存在的逃生舱。"
+      ].join("\n");
+
+      if (prompt.includes("只做“风格与可读性润色”")) {
+        return createExecResult(extractPromptSection(prompt, "【当前译文】") ?? translated);
+      }
+
+      return createExecResult(translated);
+    }
+  }
+
+  const result = await translateMarkdownArticle(source, {
+    executor: new MixedFlagExecutor(),
+    formatter: async (markdown) => markdown
+  });
+
+  assert.match(result.markdown, /如果你使用 --dangerously-skip-permissions 标志/);
+  assert.match(result.markdown, /这个 `--dangerously-skip-permissions` 标志是为了缓解这种疲劳而存在的逃生舱/);
+  assert.doesNotMatch(result.markdown, /如果你使用 `--dangerously-skip-permissions` 标志/);
+});
+
 test("translateMarkdownArticle runs the hidden pipeline chunk by chunk for long Markdown sections", async () => {
   const source = [
     "# Title",
