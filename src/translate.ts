@@ -773,19 +773,49 @@ function inferRepairLocationLabelFromInstruction(
   if (instruction.includes("引导句") || instruction.includes("说明句") || instruction.includes("导语句")) {
     return "列表引导句";
   }
-  if (instruction.includes("当前句") || instruction.includes("该句") || /位置：[^。\n]*“[^”]+”/.test(instruction)) {
+  if (hasSentenceLocalRepairTarget(instruction)) {
     return "正文句";
   }
 
   return inferRepairLocationLabel(segmentSource);
 }
 
+function hasSentenceLocalRepairTarget(instruction: string): boolean {
+  return (
+    instruction.includes("当前句") ||
+    instruction.includes("该句") ||
+    instruction.includes("句内") ||
+    instruction.includes("句中") ||
+    instruction.includes("首句") ||
+    instruction.includes("末句") ||
+    /第\d+段(?:第\d+句|首句|末句)/.test(instruction) ||
+    /位置：[^。\n]*“[^”]+”/.test(instruction)
+  );
+}
+
 function inferRepairAnchorId(
   slice: PromptSlice,
+  segmentSource: string,
   instruction: string
 ): string | null {
   const haystack = instruction.toLowerCase();
-  const anchors = [...slice.requiredAnchors, ...slice.repeatAnchors, ...slice.establishedAnchors];
+  const anchors = [...slice.requiredAnchors, ...slice.repeatAnchors, ...slice.establishedAnchors].filter(
+    (anchor) => segmentSource.toLowerCase().includes(anchor.english.trim().toLowerCase())
+  );
+
+  const explicitTargets = extractExplicitEnglishTargetsFromMustFix([instruction]);
+  for (const target of explicitTargets) {
+    const normalizedTarget = target.toLowerCase();
+    const matchedAnchor = anchors.find(
+      (anchor) =>
+        normalizedTarget.includes(anchor.english.toLowerCase()) ||
+        anchor.english.toLowerCase().includes(normalizedTarget)
+    );
+    if (matchedAnchor) {
+      return matchedAnchor.anchorId;
+    }
+  }
+
   for (const anchor of anchors) {
     if (
       haystack.includes(anchor.english.toLowerCase()) ||
@@ -799,9 +829,10 @@ function inferRepairAnchorId(
 
 function inferRepairTargetEnglish(
   slice: PromptSlice,
+  segmentSource: string,
   instruction: string
 ): string | null {
-  const anchorId = inferRepairAnchorId(slice, instruction);
+  const anchorId = inferRepairAnchorId(slice, segmentSource, instruction);
   if (anchorId) {
     const anchors = [...slice.requiredAnchors, ...slice.repeatAnchors, ...slice.establishedAnchors];
     const matchedAnchor = anchors.find((anchor) => anchor.anchorId === anchorId);
@@ -839,7 +870,7 @@ function buildStructuredSegmentAuditResult(
   const repairTasks: RepairTask[] = filteredAudit.must_fix.map((instruction, index) => ({
     id: `${draftedSegment.segmentId}-repair-${state.repairs.length + index + 1}`,
     segmentId: draftedSegment.segmentId,
-    anchorId: inferRepairAnchorId(slice, instruction),
+    anchorId: inferRepairAnchorId(slice, draftedSegment.segment.source, instruction),
     failureType: inferRepairFailureType(filteredAudit, instruction),
     locationLabel: inferRepairLocationLabelFromInstruction(draftedSegment.segment.source, instruction),
     instruction,
@@ -865,7 +896,7 @@ function suppressCoveredAnchorMustFix(
   }
 
   const remainingMustFix = audit.must_fix.filter((instruction) => {
-    const targetEnglish = inferRepairTargetEnglish(slice, instruction);
+    const targetEnglish = inferRepairTargetEnglish(slice, draftedSegment.segment.source, instruction);
     if (!targetEnglish) {
       return true;
     }
@@ -1559,9 +1590,7 @@ function buildRepairPromptContext(
   const explicitEnglishTargets = extractExplicitEnglishTargetsFromMustFix(mustFix);
   const conceptFamilyTargets = extractConceptFamilyTargets(explicitEnglishTargets);
   const duplicatePendingAnchorGroups = collectDuplicatePendingAnchorGroups(promptContext);
-  const hasQuotedSentenceLocation =
-    mustFix.some((item) => /位置：[^。\n]*“[^”]+”/.test(item)) &&
-    mustFix.some((item) => item.includes("首次出现") || item.includes("中英文") || item.includes("中英对照"));
+  const hasQuotedSentenceLocation = mustFix.some((item) => hasSentenceLocalRepairTarget(item));
   const targetsHeadingLikeAnchor = mustFix.some(
     (item) => item.includes("标题") || item.includes("首次出现") || item.includes("中英对照")
   );

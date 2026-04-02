@@ -2190,6 +2190,86 @@ test("translateMarkdownArticle repeats sentence-local repair guidance when must_
   assert.match(repairPrompt, /不要把锚定转移到同段其他句子、标题、列表项、引用外说明或后续段落/);
 });
 
+test("translateMarkdownArticle keeps sentence-local Claude repairs away from earlier Claude Code anchors", async () => {
+  const source = [
+    "# Title",
+    "",
+    "## Earlier",
+    "",
+    `${"Claude Code is already established here. ".repeat(240)}`,
+    "",
+    "## External API Access",
+    "",
+    "**Test 4: External API Access (Should Prompt First Time)**",
+    "",
+    "Tell Claude:",
+    ""
+  ].join("\n");
+
+  class PriorAnchorExecutor extends PromptAwareExecutor {
+    override async execute(prompt: string, options: CodexExecOptions): Promise<CodexExecResult> {
+      this.prompts.push(prompt);
+
+      if (isDocumentAnalysisPrompt(prompt)) {
+        return createExecResult(
+          createAnchorCatalog([
+            {
+              english: "Claude Code",
+              chineseHint: "Claude Code",
+              familyKey: "claude code",
+              chunkId: "chunk-1",
+              segmentId: "chunk-1-segment-1"
+            }
+          ])
+        );
+      }
+
+      if (options.outputSchema && prompt.includes("【分段审校输入】") && prompt.includes("Tell Claude:")) {
+        return createExecResult(
+          wrapPerSegmentAudits(prompt, [
+            {
+              segment_index: 1,
+              audit: createAudit(false, [
+                "第4段末句“告诉 Claude Code（Claude）”与原文“Tell Claude:”不一致；需保持原文专名 Claude 的对应，不要额外加入 Code。"
+              ])
+            }
+          ])
+        );
+      }
+
+      if (options.outputSchema || prompt.includes("只返回 JSON")) {
+        return createExecResult(wrapAuditForSegments(prompt, createAudit(true)));
+      }
+
+      const currentTranslation = extractPromptSection(prompt, "【当前译文】");
+      if (currentTranslation !== null) {
+        return createExecResult(currentTranslation);
+      }
+
+      const sourceSection = extractPromptSection(prompt, "【英文原文】");
+      return createExecResult(sourceSection ?? "");
+    }
+  }
+
+  const executor = new PriorAnchorExecutor();
+  await translateMarkdownArticle(source, {
+    executor,
+    formatter: async (markdown) => markdown
+  });
+
+  const repairPrompt = executor.prompts.find(
+    (item) =>
+      item.includes("【must_fix】") &&
+      item.includes("Tell Claude:") &&
+      item.includes("不要额外加入 Code")
+  );
+  assert.ok(repairPrompt);
+  assert.match(repairPrompt, /必须把这句视为唯一有效落点/);
+  assert.match(repairPrompt, /不要把锚定转移到同段其他句子、标题、列表项、引用外说明或后续段落/);
+  assert.doesNotMatch(repairPrompt, /本次 must_fix 明确指向标题/);
+  assert.doesNotMatch(repairPrompt, /本次 must_fix 明确点名了这些英文目标：.*Claude Code/);
+});
+
 test("translateMarkdownArticle tells repair when the same anchor is still missing in multiple locations", async () => {
   const source = [
     "## So, What Do AI Agents Need?",
