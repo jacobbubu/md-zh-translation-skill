@@ -1,9 +1,22 @@
 import type { PromptSlice } from "./translation-state.js";
 
 export type PromptAnchor = PromptSlice["requiredAnchors"][number];
+type AnchorLike = Pick<PromptAnchor, "english" | "chineseHint">;
+type AnchorDisplayMode = "english-only" | "english-primary" | "chinese-primary";
+type AnchorDisplay = {
+  mode: AnchorDisplayMode;
+  english: string;
+  chineseDisplay: string;
+  canonical: string;
+  repeatText: string;
+};
 
 export function coalesceRequiredAnchors(requiredAnchors: readonly PromptAnchor[]): PromptAnchor[] {
   return requiredAnchors.filter((anchor) => !isShadowedByLongerAnchor(anchor, requiredAnchors));
+}
+
+export function formatAnchorDisplay(anchor: AnchorLike): string {
+  return resolveAnchorDisplay(anchor).canonical;
 }
 
 export function normalizeSegmentAnchorText(text: string, slice: PromptSlice | null): string {
@@ -32,7 +45,107 @@ export function normalizeSegmentAnchorText(text: string, slice: PromptSlice | nu
     );
   }
 
-  return normalized;
+  return normalizeRepeatedEnglishParenthesesWithLocalHints(normalized);
+}
+
+export function normalizeSourceSurfaceAnchorText(
+  source: string,
+  text: string,
+  slice: PromptSlice | null
+): string {
+  if (!slice) {
+    return text;
+  }
+
+  const anchors = dedupePromptAnchors([
+    ...slice.requiredAnchors,
+    ...slice.repeatAnchors,
+    ...slice.establishedAnchors
+  ]);
+  if (anchors.length === 0) {
+    return text;
+  }
+
+  const sourceLines = source.split(/\r?\n/);
+  const translatedLines = text.split(/\r?\n/);
+  let changed = false;
+
+  for (let index = 0; index < Math.min(sourceLines.length, translatedLines.length); index += 1) {
+    const sourceLine = sourceLines[index] ?? "";
+    let translatedLine = translatedLines[index] ?? "";
+    const sourceAnchors = coalesceSourceLineAnchors(
+      anchors.filter((anchor) => containsWholePhrase(sourceLine, anchor.english))
+    );
+    if (sourceAnchors.length === 0) {
+      continue;
+    }
+
+    for (const sourceAnchor of sourceAnchors) {
+      const siblingVariants = anchors.filter(
+        (candidate) =>
+          candidate.familyId === sourceAnchor.familyId &&
+          candidate.anchorId !== sourceAnchor.anchorId &&
+          !containsWholePhrase(sourceLine, candidate.english)
+      );
+
+      for (const variant of siblingVariants) {
+        const normalizedLine = collapseUnexpectedFamilyVariant(translatedLine, variant, sourceAnchor);
+        if (normalizedLine !== translatedLine) {
+          translatedLine = normalizedLine;
+          changed = true;
+        }
+      }
+    }
+
+    translatedLines[index] = translatedLine;
+  }
+
+  return changed ? translatedLines.join("\n") : text;
+}
+
+export function injectPlannedAnchorText(
+  source: string,
+  text: string,
+  slice: PromptSlice | null
+): string {
+  if (!slice) {
+    return text;
+  }
+
+  const requiredAnchors = coalesceRequiredAnchors(dedupePromptAnchors(slice.requiredAnchors)).sort(
+    (left, right) => right.english.length - left.english.length
+  );
+  if (requiredAnchors.length === 0) {
+    return text;
+  }
+
+  const sourceLines = source.split(/\r?\n/);
+  const translatedLines = text.split(/\r?\n/);
+  let changed = false;
+
+  for (let index = 0; index < Math.min(sourceLines.length, translatedLines.length); index += 1) {
+    const sourceLine = sourceLines[index] ?? "";
+    let translatedLine = translatedLines[index] ?? "";
+    const lineAnchors = coalesceSourceLineAnchors(
+      requiredAnchors.filter((anchor) => containsWholePhrase(sourceLine, anchor.english))
+    );
+
+    for (const anchor of lineAnchors) {
+      if (shouldSkipAnchorInjectionForCommandPhrase(sourceLine, anchor)) {
+        continue;
+      }
+
+      const injectedLine = injectAnchorIntoLine(translatedLine, anchor);
+      if (injectedLine !== translatedLine) {
+        translatedLine = injectedLine;
+        changed = true;
+      }
+    }
+
+    translatedLines[index] = translatedLine;
+  }
+
+  return changed ? translatedLines.join("\n") : text;
 }
 
 export function normalizeHeadingLikeAnchorText(
@@ -62,11 +175,13 @@ export function normalizeHeadingLikeAnchorText(
   for (let index = 0; index < Math.min(sourceHeadingLines.length, translatedHeadingLines.length); index += 1) {
     const sourceLine = sourceHeadingLines[index]!;
     const translatedLine = translatedHeadingLines[index]!;
+    const lineAnchors = coalesceSourceLineAnchors(
+      requiredAnchors.filter((anchor) => containsWholePhrase(sourceLine.content, anchor.english))
+    );
 
     let normalizedLine = translatedLine.raw;
-    for (const anchor of requiredAnchors) {
+    for (const anchor of lineAnchors) {
       if (
-        !containsWholePhrase(sourceLine.content, anchor.english) ||
         !anchor.chineseHint ||
         anchor.chineseHint.toLowerCase() === anchor.english.toLowerCase() ||
         !normalizedLine.includes(anchor.chineseHint) ||
@@ -107,6 +222,8 @@ export function normalizeExplicitRepairAnchorText(
 
   const sourceLines = source.split(/\r?\n/);
   const translatedLines = text.split(/\r?\n/);
+  const sourceHeadingLines = extractHeadingLikeLines(source);
+  const translatedHeadingLines = extractHeadingLikeLines(text);
   let changed = false;
 
   for (let index = 0; index < Math.min(sourceLines.length, translatedLines.length); index += 1) {
@@ -114,18 +231,51 @@ export function normalizeExplicitRepairAnchorText(
     let translatedLine = translatedLines[index] ?? "";
 
     for (const target of targets) {
+      const sourceHeading = extractHeadingLikeLine(sourceLine);
+      const translatedHeading = extractHeadingLikeLine(translatedLine);
+      const matchingAnchor = resolvePromptAnchorForExplicitRepair(target, slice);
+      const english =
+        matchingAnchor?.english ??
+        target.english ??
+        resolveHeadingEnglishFromSource(target.chineseHint, sourceHeadingLines, translatedHeadingLines);
+      if (!english) {
+        continue;
+      }
+
       if (
-        !containsWholePhrase(sourceLine, target.english) ||
+        sourceHeading &&
+        translatedHeading &&
+        stripInlineMarkdownMarkers(translatedHeading.content).includes(target.chineseHint)
+      ) {
+        const normalizedHeading =
+          matchingAnchor && translatedHeading.content.includes(matchingAnchor.chineseHint)
+            ? injectAnchorIntoLine(translatedHeading.content, matchingAnchor)
+            : normalizeHeadingRepairContent(translatedHeading.content, english);
+        if (normalizedHeading !== translatedHeading.content) {
+          translatedLine = translatedLine.replace(translatedHeading.content, normalizedHeading);
+          changed = true;
+          continue;
+        }
+      }
+
+      if (
+        !containsWholePhrase(sourceLine, english) ||
         !translatedLine.includes(target.chineseHint) ||
-        containsWholePhrase(translatedLine, target.english)
+        containsWholePhrase(translatedLine, english)
       ) {
         continue;
       }
 
-      translatedLine = translatedLine.replace(
-        target.chineseHint,
-        `${target.chineseHint}（${target.english}）`
-      );
+      if (matchingAnchor) {
+        const normalizedLine = injectAnchorIntoLine(translatedLine, matchingAnchor);
+        if (normalizedLine !== translatedLine) {
+          translatedLine = normalizedLine;
+          changed = true;
+          continue;
+        }
+      }
+
+      translatedLine = translatedLine.replace(target.chineseHint, `${target.chineseHint}（${english}）`);
       changed = true;
     }
 
@@ -135,28 +285,92 @@ export function normalizeExplicitRepairAnchorText(
   return changed ? translatedLines.join("\n") : text;
 }
 
+function resolveHeadingEnglishFromSource(
+  chineseHint: string,
+  sourceHeadingLines: readonly HeadingLine[],
+  translatedHeadingLines: readonly HeadingLine[]
+): string | null {
+  for (let index = 0; index < Math.min(sourceHeadingLines.length, translatedHeadingLines.length); index += 1) {
+    const sourceHeading = sourceHeadingLines[index];
+    const translatedHeading = translatedHeadingLines[index];
+    if (!sourceHeading || !translatedHeading) {
+      continue;
+    }
+
+    if (
+      stripInlineMarkdownMarkers(translatedHeading.content).trim() === chineseHint &&
+      /[A-Za-z]/.test(sourceHeading.content)
+    ) {
+      return sourceHeading.content.trim();
+    }
+  }
+
+  return null;
+}
+
+function normalizeHeadingRepairContent(content: string, english: string): string {
+  if (!english || containsWholePhrase(content, english)) {
+    return content;
+  }
+
+  const parentheticalMatch = content.match(/（([^）]*[A-Za-z][^）]*)）(?!.*（)/);
+  if (!parentheticalMatch?.[1]) {
+    return `${content}（${english}）`;
+  }
+
+  const inner = parentheticalMatch[1].trim();
+  if (containsWholePhrase(inner, english)) {
+    return content;
+  }
+
+  return content.replace(parentheticalMatch[0], `（${inner}，${english}）`);
+}
+
+function resolvePromptAnchorForExplicitRepair(
+  target: ExplicitRepairTarget,
+  slice: PromptSlice
+): PromptAnchor | null {
+  const targetEnglish = target.english?.toLowerCase();
+  if (!targetEnglish) {
+    return null;
+  }
+
+  const anchors = dedupePromptAnchors([
+    ...slice.requiredAnchors,
+    ...slice.repeatAnchors,
+    ...slice.establishedAnchors
+  ]);
+
+  return (
+    anchors.find(
+      (anchor) =>
+        anchor.english.toLowerCase() === targetEnglish &&
+        anchor.chineseHint !== target.english &&
+        target.chineseHint.includes(anchor.chineseHint)
+    ) ?? null
+  );
+}
+
 function normalizeSingleAnchor(
   text: string,
   anchor: PromptAnchor,
   isRequired: boolean,
   isRepeatOrEstablished: boolean
 ): string {
-  const english = anchor.english.trim();
-  const chineseHint = anchor.chineseHint.trim();
+  const display = resolveAnchorDisplay(anchor);
+  const english = display.english;
+  const chineseHint = display.chineseDisplay;
 
   if (!english) {
     return text;
   }
 
   const escapedEnglish = escapeRegExp(english);
-  const hasDistinctChineseHint =
-    chineseHint.length > 0 && chineseHint.toLowerCase() !== english.toLowerCase();
-
   let normalized = text;
 
-  if (hasDistinctChineseHint) {
+  if (display.mode === "chinese-primary") {
     const escapedChinese = escapeRegExp(chineseHint);
-    const canonical = `${chineseHint}（${english}）`;
+    const canonical = display.canonical;
 
     normalized = normalized.replace(new RegExp(`${escapedEnglish}（${escapedChinese}）`, "g"), canonical);
     normalized = normalized.replace(new RegExp(`${escapedEnglish}（${escapedEnglish}）`, "g"), canonical);
@@ -165,6 +379,31 @@ function normalizeSingleAnchor(
 
     if (isRepeatOrEstablished) {
       normalized = normalized.replace(new RegExp(`${escapedChinese}（${escapedEnglish}）`, "g"), chineseHint);
+    }
+
+    return normalized;
+  }
+
+  if (display.mode === "english-primary") {
+    const escapedChinese = escapeRegExp(chineseHint);
+    const canonical = display.canonical;
+
+    normalized = normalized.replace(
+      new RegExp(`${escapedEnglish}（${escapedChinese}\\s+${escapedEnglish}）`, "g"),
+      canonical
+    );
+    normalized = normalized.replace(
+      new RegExp(`${escapedEnglish}\\s*${escapedChinese}（${escapedEnglish}）`, "g"),
+      canonical
+    );
+    normalized = normalized.replace(
+      new RegExp(`${escapedChinese}（${escapedEnglish}）`, "g"),
+      canonical
+    );
+    normalized = normalized.replace(new RegExp(`${escapedEnglish}（${escapedEnglish}）`, "g"), canonical);
+
+    if (isRepeatOrEstablished) {
+      normalized = normalized.replace(new RegExp(`${escapedEnglish}（${escapedChinese}）`, "g"), english);
     }
 
     return normalized;
@@ -184,46 +423,206 @@ function collapseRepeatedEnglishParentheses(text: string, english: string): stri
   return text.replace(new RegExp(`（${escapedEnglish}）\\s*（${escapedEnglish}）`, "g"), `（${english}）`);
 }
 
+function injectAnchorIntoLine(text: string, anchor: PromptAnchor): string {
+  const display = resolveAnchorDisplay(anchor);
+
+  if (!display.english || display.mode === "english-only") {
+    return text;
+  }
+
+  if (display.mode === "english-primary") {
+    if (text.includes(display.canonical)) {
+      return text;
+    }
+
+    if (containsWholePhrase(text, display.english) && !text.includes(display.chineseDisplay)) {
+      return replaceWholePhraseOnce(text, display.english, display.canonical);
+    }
+
+    if (text.includes(anchor.chineseHint)) {
+      return replaceFirst(text, anchor.chineseHint, display.canonical);
+    }
+
+    if (display.chineseDisplay && text.includes(display.chineseDisplay)) {
+      return replaceFirst(text, display.chineseDisplay, display.canonical);
+    }
+
+    return text;
+  }
+
+  if (text.includes(display.canonical) || containsWholePhrase(text, display.english)) {
+    return text;
+  }
+
+  if (text.includes(display.chineseDisplay)) {
+    return replaceFirst(text, display.chineseDisplay, display.canonical);
+  }
+
+  if (text.includes(anchor.chineseHint)) {
+    return replaceFirst(text, anchor.chineseHint, display.canonical);
+  }
+
+  return text;
+}
+
+function collapseUnexpectedFamilyVariant(
+  text: string,
+  variant: PromptAnchor,
+  sourceAnchor: PromptAnchor
+): string {
+  const variantDisplay = resolveAnchorDisplay(variant);
+  const sourceDisplay = resolveAnchorDisplay(sourceAnchor);
+  let normalized = text;
+  const variantSuffix = variant.english.startsWith(`${sourceAnchor.english} `)
+    ? variant.english.slice(sourceAnchor.english.length).trim()
+    : "";
+
+  const replacements: Array<[string, string]> = [
+    [variantDisplay.canonical, sourceDisplay.canonical],
+    [`${variant.english}（${sourceAnchor.english}）`, sourceDisplay.canonical],
+    [`${variant.english}（${sourceDisplay.chineseDisplay}）`, sourceDisplay.canonical],
+    [`${variantDisplay.canonical}（${sourceAnchor.english}）`, sourceDisplay.canonical],
+    [`${sourceDisplay.canonical}（${sourceAnchor.english}）`, sourceDisplay.canonical]
+  ];
+
+  if (variantSuffix) {
+    replacements.push(
+      [`${sourceDisplay.canonical} ${variantSuffix}（${sourceAnchor.english}）`, sourceDisplay.canonical],
+      [`${sourceDisplay.canonical} ${variantSuffix}`, sourceDisplay.canonical]
+    );
+  }
+
+  for (const [from, to] of replacements) {
+    if (from && to && normalized.includes(from)) {
+      normalized = normalized.split(from).join(to);
+    }
+  }
+
+  if (containsWholePhrase(normalized, variant.english) && !containsWholePhrase(text, sourceAnchor.english)) {
+    normalized = replaceWholePhraseOnce(normalized, variant.english, sourceDisplay.canonical);
+  }
+
+  return normalized;
+}
+
+function coalesceSourceLineAnchors(anchors: readonly PromptAnchor[]): PromptAnchor[] {
+  return anchors.filter(
+    (anchor) =>
+      !anchors.some(
+        (candidate) =>
+          candidate.anchorId !== anchor.anchorId &&
+          candidate.familyId === anchor.familyId &&
+          candidate.english.length > anchor.english.length &&
+          containsWholePhrase(candidate.english, anchor.english)
+      )
+  );
+}
+
+function shouldSkipAnchorInjectionForCommandPhrase(sourceLine: string, anchor: PromptAnchor): boolean {
+  const trimmed = sourceLine.trim();
+  const bulletMatch = trimmed.match(/^(?:[-*+]|\d+[.)])\s+(.+)$/);
+  const body = bulletMatch?.[1]?.trim();
+  if (!body) {
+    return false;
+  }
+
+  const english = anchor.english.trim();
+  if (!english || /\s/.test(english)) {
+    return false;
+  }
+
+  const withoutTrailingExplanation = body.replace(/\s*\([^)]*\)\s*$/, "").trim();
+  const leadingToken = withoutTrailingExplanation.match(/^([A-Za-z][A-Za-z0-9+._/-]*)\b/)?.[1]?.trim();
+  if (!leadingToken || leadingToken.toLowerCase() !== english.toLowerCase()) {
+    return false;
+  }
+
+  const remainder = withoutTrailingExplanation.slice(leadingToken.length).trim();
+  if (!remainder) {
+    return false;
+  }
+
+  if (remainder.includes(",")) {
+    return true;
+  }
+
+  return /^[A-Za-z0-9./_-]/.test(remainder);
+}
+
 type HeadingLine = {
   raw: string;
   content: string;
 };
 
+function extractHeadingLikeLine(rawLine: string): HeadingLine | null {
+  const trimmed = rawLine.trim();
+  if (!trimmed) {
+    return null;
+  }
+
+  const atxMatch = trimmed.match(/^#{1,6}[ \t]+(.+?)(?:[ \t]+#+)?$/);
+  if (atxMatch?.[1]) {
+    return { raw: rawLine, content: atxMatch[1].trim() };
+  }
+
+  const boldMatch = trimmed.match(/^\*\*(.+)\*\*$/);
+  if (boldMatch?.[1]) {
+    return { raw: rawLine, content: boldMatch[1].trim() };
+  }
+
+  return null;
+}
+
 type ExplicitRepairTarget = {
   chineseHint: string;
-  english: string;
+  english: string | null;
 };
 
 function parseExplicitRepairTarget(instruction: string): ExplicitRepairTarget | null {
   const match = instruction.match(/需补为“([^（”]+)（([^）]+)）”/);
-  if (!match?.[1] || !match[2]) {
+  if (match?.[1] && match[2]) {
+    return {
+      chineseHint: match[1].trim(),
+      english: match[2].trim()
+    };
+  }
+
+  const english =
+    instruction.match(/关键术语“([^”]*[A-Za-z][^”]*)”/)?.[1]?.trim() ??
+    instruction.match(/首现术语\s+([A-Za-z][A-Za-z0-9 .+/_-]*)\s+未补/)?.[1]?.trim() ??
+    instruction.match(/[：:]\s*([A-Za-z][A-Za-z0-9 .+/_-]*)\s+首次出现需补/)?.[1]?.trim() ??
+    instruction.match(/括注“([^”]*[A-Za-z][^”]*)”/)?.[1]?.trim() ??
+    instruction.match(/“([^”]*[A-Za-z][^”]*)”缺少/)?.[1]?.trim() ??
+    null;
+  const locationText =
+    instruction.match(/位置：[^。；\n“]*“([^”]+)”/)?.[1]?.trim() ??
+    instruction.match(/位置：(.+?)。问题[:：]/)?.[1]?.trim() ??
+    instruction.match(/`([^`]+)`/)?.[1]?.trim() ??
+    null;
+  const chineseHint = locationText ? stripHeadingMarkers(stripInlineMarkdownMarkers(locationText).trim()) : null;
+
+  if (!chineseHint) {
     return null;
   }
 
-  return {
-    chineseHint: match[1].trim(),
-    english: match[2].trim()
-  };
+  return { chineseHint, english };
+}
+
+function stripInlineMarkdownMarkers(text: string): string {
+  return text.replace(/[*_`~]/g, "");
+}
+
+function stripHeadingMarkers(text: string): string {
+  return text.replace(/^#{1,6}\s+/, "").trim();
 }
 
 function extractHeadingLikeLines(text: string): HeadingLine[] {
   const headings: HeadingLine[] = [];
 
   for (const rawLine of text.split(/\r?\n/)) {
-    const trimmed = rawLine.trim();
-    if (!trimmed) {
-      continue;
-    }
-
-    const atxMatch = trimmed.match(/^#{1,6}[ \t]+(.+?)(?:[ \t]+#+)?$/);
-    if (atxMatch?.[1]) {
-      headings.push({ raw: rawLine, content: atxMatch[1].trim() });
-      continue;
-    }
-
-    const boldMatch = trimmed.match(/^\*\*(.+)\*\*$/);
-    if (boldMatch?.[1]) {
-      headings.push({ raw: rawLine, content: boldMatch[1].trim() });
+    const heading = extractHeadingLikeLine(rawLine);
+    if (heading) {
+      headings.push(heading);
     }
   }
 
@@ -286,4 +685,120 @@ function normalizeAnchorText(value: string): string {
 
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function replaceFirst(text: string, needle: string, replacement: string): string {
+  const index = text.indexOf(needle);
+  if (index === -1) {
+    return text;
+  }
+  return `${text.slice(0, index)}${replacement}${text.slice(index + needle.length)}`;
+}
+
+function replaceWholePhraseOnce(text: string, needle: string, replacement: string): string {
+  if (!/[A-Za-z]/.test(needle)) {
+    return replaceFirst(text, needle, replacement);
+  }
+
+  const pattern = new RegExp(`\\b${escapeRegExp(needle)}\\b`);
+  return text.replace(pattern, replacement);
+}
+
+function normalizeRepeatedEnglishParenthesesWithLocalHints(text: string): string {
+  const localEnglishPrimary = new Map<string, string>();
+  const englishPrimaryPattern = /\b([A-Za-z][A-Za-z0-9.+/_ -]{1,})（([^（）\n]+)）/g;
+
+  for (const match of text.matchAll(englishPrimaryPattern)) {
+    const english = match[1]?.trim();
+    const explainer = match[2]?.trim();
+    if (!english || !explainer) {
+      continue;
+    }
+    if (english.toLowerCase() === explainer.toLowerCase()) {
+      continue;
+    }
+    localEnglishPrimary.set(english.toLowerCase(), `${english}（${explainer}）`);
+  }
+
+  return text.replace(englishPrimaryPattern, (raw, englishRaw, innerRaw) => {
+    const english = String(englishRaw).trim();
+    const inner = String(innerRaw).trim();
+    if (!english || !inner) {
+      return raw;
+    }
+
+    if (english.toLowerCase() !== inner.toLowerCase()) {
+      return raw;
+    }
+
+    const canonical = localEnglishPrimary.get(english.toLowerCase());
+    return canonical ?? english;
+  });
+}
+
+function resolveAnchorDisplay(anchor: AnchorLike): AnchorDisplay {
+  const english = anchor.english.trim();
+  const chineseHint = anchor.chineseHint.trim();
+
+  if (!english || !chineseHint || chineseHint.toLowerCase() === english.toLowerCase()) {
+    return {
+      mode: "english-only",
+      english,
+      chineseDisplay: "",
+      canonical: english,
+      repeatText: english
+    };
+  }
+
+  const strippedEnglishPrefix = stripLeadingEnglishHint(chineseHint, english);
+  const strippedEnglishSuffix = stripTrailingEnglishHint(strippedEnglishPrefix ?? chineseHint, english);
+  const chineseDisplay = strippedEnglishSuffix ?? strippedEnglishPrefix ?? chineseHint;
+  if (shouldPreferEnglishPrimary(english, strippedEnglishPrefix)) {
+    return {
+      mode: "english-primary",
+      english,
+      chineseDisplay,
+      canonical: `${english}（${chineseDisplay}）`,
+      repeatText: english
+    };
+  }
+
+  return {
+    mode: "chinese-primary",
+    english,
+    chineseDisplay,
+    canonical: `${chineseDisplay}（${english}）`,
+    repeatText: chineseDisplay
+  };
+}
+
+function stripLeadingEnglishHint(chineseHint: string, english: string): string | null {
+  if (!chineseHint.toLowerCase().startsWith(english.toLowerCase())) {
+    return null;
+  }
+
+  const suffix = chineseHint.slice(english.length).trim();
+  return suffix.length > 0 ? suffix : null;
+}
+
+function stripTrailingEnglishHint(chineseHint: string, english: string): string | null {
+  if (!chineseHint.toLowerCase().endsWith(english.toLowerCase())) {
+    return null;
+  }
+
+  const prefix = chineseHint
+    .slice(0, Math.max(0, chineseHint.length - english.length))
+    .trim()
+    .replace(/[（(：:，,、\-–—\s]+$/u, "")
+    .trim();
+
+  return prefix.length > 0 ? prefix : null;
+}
+
+function shouldPreferEnglishPrimary(english: string, strippedEnglishPrefix: string | null): boolean {
+  if (strippedEnglishPrefix) {
+    return true;
+  }
+
+  return /^[A-Za-z0-9][A-Za-z0-9.+/_-]*$/.test(english);
 }

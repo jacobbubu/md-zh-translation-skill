@@ -2,9 +2,12 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  formatAnchorDisplay,
+  injectPlannedAnchorText,
   normalizeExplicitRepairAnchorText,
   normalizeHeadingLikeAnchorText,
   normalizeSegmentAnchorText,
+  normalizeSourceSurfaceAnchorText,
   type PromptAnchor
 } from "../src/anchor-normalization.js";
 import type { PromptSlice } from "../src/translation-state.js";
@@ -77,6 +80,91 @@ test("normalizeSegmentAnchorText collapses exact duplicate english-only parenthe
   assert.equal(normalized, "npm registry access is allowed.");
 });
 
+test("normalizeSegmentAnchorText rewrites english-leading duplicated anchor text into english-primary form", () => {
+  const slice = createSlice({
+    requiredAnchors: [createAnchor("anchor-1", "bubblewrap", "bubblewrap 框架")]
+  });
+
+  const normalized = normalizeSegmentAnchorText(
+    "Linux 上的 bubblewrap 框架（bubblewrap）提供了隔离能力。",
+    slice
+  );
+
+  assert.equal(normalized, "Linux 上的 bubblewrap（框架）提供了隔离能力。");
+});
+
+test("normalizeSegmentAnchorText preserves english-primary tool anchors with a chinese explanation", () => {
+  const slice = createSlice({
+    requiredAnchors: [createAnchor("anchor-1", "bubblewrap", "安全隔离组件")]
+  });
+
+  const normalized = normalizeSegmentAnchorText(
+    "Linux 上的 bubblewrap（安全隔离组件）提供了隔离能力。",
+    slice
+  );
+
+  assert.equal(normalized, "Linux 上的 bubblewrap（安全隔离组件）提供了隔离能力。");
+});
+
+test("normalizeSegmentAnchorText reuses a better local english-primary hint when a duplicate English parenthesis appears", () => {
+  const slice = createSlice({
+    requiredAnchors: []
+  });
+
+  const normalized = normalizeSegmentAnchorText(
+    "它会移除所有提示，但也会取消所有保护。Claude（Claude）可以访问任何文件。\n- Claude（AI 助手）在你的项目文件夹里创建一个文件？这需要批准。",
+    slice
+  );
+
+  assert.match(normalized, /Claude（AI 助手）可以访问任何文件。/);
+  assert.doesNotMatch(normalized, /Claude（Claude）/);
+});
+
+test("normalizeSegmentAnchorText strips a trailing repeated english name from an english-primary explainer", () => {
+  const slice = createSlice({
+    requiredAnchors: [createAnchor("anchor-1", "Claude", "Anthropic 的 AI 助手 Claude")]
+  });
+
+  const normalized = normalizeSegmentAnchorText(
+    "这些内容默认会被阻止，即使 Claude（Anthropic 的 AI 助手 Claude）被指示要访问它们。",
+    slice
+  );
+
+  assert.equal(normalized, "这些内容默认会被阻止，即使 Claude（Anthropic 的 AI 助手）被指示要访问它们。");
+});
+
+test("normalizeSourceSurfaceAnchorText keeps the source surface form when a longer family variant appears in translation", () => {
+  const slice = createSlice({
+    requiredAnchors: [createAnchor("anchor-1", "Claude", "Anthropic 的 AI 助手", "claude-family")],
+    establishedAnchors: [createAnchor("anchor-2", "Claude Code", "Claude Code", "claude-family")]
+  });
+  const source = "Tell Claude:";
+  const translated = "告诉 Claude Code（Claude）：";
+
+  const normalized = normalizeSourceSurfaceAnchorText(source, translated, slice);
+
+  assert.equal(normalized, "告诉 Claude（Anthropic 的 AI 助手）：");
+});
+
+test("normalizeSegmentAnchorText collapses duplicate English parentheses when no better local hint exists", () => {
+  const slice = createSlice({
+    requiredAnchors: []
+  });
+
+  const normalized = normalizeSegmentAnchorText("Claude（Claude）可以访问任何文件。", slice);
+
+  assert.equal(normalized, "Claude可以访问任何文件。");
+});
+
+test("formatAnchorDisplay prefers english-primary formatting for single-token tool names", () => {
+  assert.equal(formatAnchorDisplay(createAnchor("anchor-1", "bubblewrap", "安全隔离组件")), "bubblewrap（安全隔离组件）");
+  assert.equal(formatAnchorDisplay(createAnchor("anchor-2", "bubblewrap", "bubblewrap 框架")), "bubblewrap（框架）");
+  assert.equal(
+    formatAnchorDisplay(createAnchor("anchor-3", "Prompt injection attacks", "提示注入攻击")),
+    "提示注入攻击（Prompt injection attacks）"
+  );
+});
+
 test("normalizeHeadingLikeAnchorText restores a missing english anchor inside a bold pseudo-heading", () => {
   const slice = createSlice({
     requiredAnchors: [createAnchor("anchor-1", "System File Access", "系统文件访问")]
@@ -102,6 +190,69 @@ test("normalizeHeadingLikeAnchorText restores a missing english anchor inside a 
   assert.match(normalized, /告诉 Claude：/);
 });
 
+test("injectPlannedAnchorText injects a missing anchor into a heading-like line", () => {
+  const slice = createSlice({
+    requiredAnchors: [createAnchor("anchor-1", "System File Access", "系统文件访问")]
+  });
+  const source = "**Test 2: System File Access**";
+  const translated = "**测试 2：系统文件访问**";
+
+  const normalized = injectPlannedAnchorText(source, translated, slice);
+
+  assert.equal(normalized, "**测试 2：系统文件访问（System File Access）**");
+});
+
+test("injectPlannedAnchorText injects a missing anchor into a list item", () => {
+  const slice = createSlice({
+    requiredAnchors: [createAnchor("anchor-1", "API tokens", "API 令牌")]
+  });
+  const source = "- API tokens";
+  const translated = "- API 令牌";
+
+  const normalized = injectPlannedAnchorText(source, translated, slice);
+
+  assert.equal(normalized, "- API 令牌（API tokens）");
+});
+
+test("injectPlannedAnchorText injects a missing anchor into a blockquote line", () => {
+  const slice = createSlice({
+    requiredAnchors: [createAnchor("anchor-1", "Sandbox mode", "沙箱模式")]
+  });
+  const source = "> Let's now look at what Sandbox mode protects you from.";
+  const translated = "> 现在让我们看看沙箱模式会保护你免受什么影响。";
+
+  const normalized = injectPlannedAnchorText(source, translated, slice);
+
+  assert.equal(normalized, "> 现在让我们看看沙箱模式（Sandbox mode）会保护你免受什么影响。");
+});
+
+test("injectPlannedAnchorText injects a missing anchor into a paragraph line", () => {
+  const slice = createSlice({
+    requiredAnchors: [createAnchor("anchor-1", "Prompt injection attacks", "提示注入攻击")]
+  });
+  const source = "Prompt injection attacks can hide malicious instructions.";
+  const translated = "提示注入攻击会隐藏恶意指令。";
+
+  const normalized = injectPlannedAnchorText(source, translated, slice);
+
+  assert.equal(normalized, "提示注入攻击（Prompt injection attacks）会隐藏恶意指令。");
+});
+
+test("injectPlannedAnchorText does not expand command phrases inside Commands-style list items", () => {
+  const slice = createSlice({
+    requiredAnchors: [
+      createAnchor("anchor-1", "Git", "版本控制工具"),
+      createAnchor("anchor-2", "Python", "python")
+    ]
+  });
+  const source = ["- git status, git log, git diff", "- python script.py (runs code in project)"].join("\n");
+  const translated = ["- git status、git log、git diff", "- python script.py（在项目中运行代码）"].join("\n");
+
+  const normalized = injectPlannedAnchorText(source, translated, slice);
+
+  assert.equal(normalized, translated);
+});
+
 test("normalizeExplicitRepairAnchorText restores a quoted-line anchor from an explicit repair target", () => {
   const slice = createSlice({
     pendingRepairs: [
@@ -121,4 +272,110 @@ test("normalizeExplicitRepairAnchorText restores a quoted-line anchor from an ex
   const normalized = normalizeExplicitRepairAnchorText(source, translated, slice);
 
   assert.equal(normalized, "> 现在让我们看看沙箱模式（Sandbox mode）会保护你免受什么影响。");
+});
+
+test("normalizeExplicitRepairAnchorText restores a heading-like anchor from a structured title repair target", () => {
+  const slice = createSlice({
+    pendingRepairs: [
+      {
+        repairId: "repair-1",
+        anchorId: null,
+        failureType: "missing_anchor",
+        locationLabel: "分段标题",
+        instruction:
+          "位置：分段标题“**测试 2：系统文件访问**”；问题：首次出现的关键术语“System File Access”缺少中英文对照；修复目标：在标题本身补齐该术语的英文锚定。"
+      }
+    ]
+  });
+  const source = "**Test 2: System File Access**";
+  const translated = "**测试 2：系统文件访问**";
+
+  const normalized = normalizeExplicitRepairAnchorText(source, translated, slice);
+
+  assert.equal(normalized, "**测试 2：系统文件访问（System File Access）**");
+});
+
+test("normalizeExplicitRepairAnchorText falls back to the source ATX heading when the repair target omits english", () => {
+  const slice = createSlice({
+    pendingRepairs: [
+      {
+        repairId: "repair-1",
+        anchorId: null,
+        failureType: "missing_anchor",
+        locationLabel: "小标题",
+        instruction: "`### 凭证窃取`：这是本分段首次出现的关键术语，小标题需补英文对照后再用。"
+      }
+    ]
+  });
+  const source = "### Credential Theft";
+  const translated = "### 凭证窃取";
+
+  const normalized = normalizeExplicitRepairAnchorText(source, translated, slice);
+
+  assert.equal(normalized, "### 凭证窃取（Credential Theft）");
+});
+
+test("normalizeExplicitRepairAnchorText preserves missing source heading qualifiers inside an existing heading parenthesis", () => {
+  const slice = createSlice({
+    pendingRepairs: [
+      {
+        repairId: "repair-1",
+        anchorId: null,
+        failureType: "missing_anchor",
+        locationLabel: "小标题",
+        instruction:
+          "位置：### 第 2 类：提示式（Prompted）。问题：缺少源文标题括注“Requires Permission”的对应信息。修复目标：补齐该标题的中英文对照，且不改动结构。"
+      }
+    ]
+  });
+  const source = "### Category 2: Prompted (Requires Permission)";
+  const translated = "### 第 2 类：提示式（Prompted）";
+
+  const normalized = normalizeExplicitRepairAnchorText(source, translated, slice);
+
+  assert.equal(normalized, "### 第 2 类：提示式（Prompted，Requires Permission）");
+});
+
+test("normalizeExplicitRepairAnchorText injects a named anchor back into a heading line", () => {
+  const slice = createSlice({
+    requiredAnchors: [createAnchor("anchor-1", "Sandbox Mode", "沙箱模式")],
+    pendingRepairs: [
+      {
+        repairId: "repair-1",
+        anchorId: "anchor-1",
+        failureType: "missing_anchor",
+        locationLabel: "标题",
+        instruction:
+          "位置：## 标题“沙箱模式如何改变自主编码”｜问题：首现术语 Sandbox Mode 未补中英文对照｜修复目标：在标题本身建立该术语的双语锚点。"
+      }
+    ]
+  });
+  const source = "## How Sandbox Mode Changes Autonomous Coding";
+  const translated = "## 沙箱模式如何改变自主编码";
+
+  const normalized = normalizeExplicitRepairAnchorText(source, translated, slice);
+
+  assert.equal(normalized, "## 沙箱模式（Sandbox Mode）如何改变自主编码");
+});
+
+test("normalizeExplicitRepairAnchorText injects a named anchor back into a list item", () => {
+  const slice = createSlice({
+    requiredAnchors: [createAnchor("anchor-1", "Environment variables", "环境变量")],
+    pendingRepairs: [
+      {
+        repairId: "repair-1",
+        anchorId: "anchor-1",
+        failureType: "missing_anchor",
+        locationLabel: "列表项",
+        instruction:
+          "位置：第一段列表“包含秘密信息的环境变量”：Environment variables 首次出现需补中英文对照，不能只写中文。"
+      }
+    ]
+  });
+  const source = "- Environment variables containing secrets";
+  const translated = "- 包含秘密信息的环境变量";
+
+  const normalized = normalizeExplicitRepairAnchorText(source, translated, slice);
+
+  assert.equal(normalized, "- 包含秘密信息的环境变量（Environment variables）");
 });
