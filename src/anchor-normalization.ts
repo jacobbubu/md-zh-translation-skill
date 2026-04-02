@@ -175,11 +175,26 @@ export function normalizeExplicitRepairAnchorText(
     let translatedLine = translatedLines[index] ?? "";
 
     for (const target of targets) {
+      const sourceHeading = extractHeadingLikeLine(sourceLine);
+      const translatedHeading = extractHeadingLikeLine(translatedLine);
       const english =
         target.english ??
         resolveHeadingEnglishFromSource(target.chineseHint, sourceHeadingLines, translatedHeadingLines);
       if (!english) {
         continue;
+      }
+
+      if (
+        sourceHeading &&
+        translatedHeading &&
+        stripInlineMarkdownMarkers(translatedHeading.content).includes(target.chineseHint)
+      ) {
+        const normalizedHeading = normalizeHeadingRepairContent(translatedHeading.content, english);
+        if (normalizedHeading !== translatedHeading.content) {
+          translatedLine = translatedLine.replace(translatedHeading.content, normalizedHeading);
+          changed = true;
+          continue;
+        }
       }
 
       if (
@@ -221,6 +236,24 @@ function resolveHeadingEnglishFromSource(
   }
 
   return null;
+}
+
+function normalizeHeadingRepairContent(content: string, english: string): string {
+  if (!english || containsWholePhrase(content, english)) {
+    return content;
+  }
+
+  const parentheticalMatch = content.match(/（([^）]*[A-Za-z][^）]*)）(?!.*（)/);
+  if (!parentheticalMatch?.[1]) {
+    return `${content}（${english}）`;
+  }
+
+  const inner = parentheticalMatch[1].trim();
+  if (containsWholePhrase(inner, english)) {
+    return content;
+  }
+
+  return content.replace(parentheticalMatch[0], `（${inner}，${english}）`);
 }
 
 function normalizeSingleAnchor(
@@ -369,6 +402,25 @@ type HeadingLine = {
   content: string;
 };
 
+function extractHeadingLikeLine(rawLine: string): HeadingLine | null {
+  const trimmed = rawLine.trim();
+  if (!trimmed) {
+    return null;
+  }
+
+  const atxMatch = trimmed.match(/^#{1,6}[ \t]+(.+?)(?:[ \t]+#+)?$/);
+  if (atxMatch?.[1]) {
+    return { raw: rawLine, content: atxMatch[1].trim() };
+  }
+
+  const boldMatch = trimmed.match(/^\*\*(.+)\*\*$/);
+  if (boldMatch?.[1]) {
+    return { raw: rawLine, content: boldMatch[1].trim() };
+  }
+
+  return null;
+}
+
 type ExplicitRepairTarget = {
   chineseHint: string;
   english: string | null;
@@ -385,10 +437,12 @@ function parseExplicitRepairTarget(instruction: string): ExplicitRepairTarget | 
 
   const english =
     instruction.match(/关键术语“([^”]*[A-Za-z][^”]*)”/)?.[1]?.trim() ??
+    instruction.match(/括注“([^”]*[A-Za-z][^”]*)”/)?.[1]?.trim() ??
     instruction.match(/“([^”]*[A-Za-z][^”]*)”缺少/)?.[1]?.trim() ??
     null;
   const locationText =
-    instruction.match(/位置：[^“]*“([^”]+)”/)?.[1]?.trim() ??
+    instruction.match(/位置：[^。；\n“]*“([^”]+)”/)?.[1]?.trim() ??
+    instruction.match(/位置：(.+?)。问题[:：]/)?.[1]?.trim() ??
     instruction.match(/`([^`]+)`/)?.[1]?.trim() ??
     null;
   const chineseHint = locationText ? stripHeadingMarkers(stripInlineMarkdownMarkers(locationText).trim()) : null;
@@ -412,20 +466,9 @@ function extractHeadingLikeLines(text: string): HeadingLine[] {
   const headings: HeadingLine[] = [];
 
   for (const rawLine of text.split(/\r?\n/)) {
-    const trimmed = rawLine.trim();
-    if (!trimmed) {
-      continue;
-    }
-
-    const atxMatch = trimmed.match(/^#{1,6}[ \t]+(.+?)(?:[ \t]+#+)?$/);
-    if (atxMatch?.[1]) {
-      headings.push({ raw: rawLine, content: atxMatch[1].trim() });
-      continue;
-    }
-
-    const boldMatch = trimmed.match(/^\*\*(.+)\*\*$/);
-    if (boldMatch?.[1]) {
-      headings.push({ raw: rawLine, content: boldMatch[1].trim() });
+    const heading = extractHeadingLikeLine(rawLine);
+    if (heading) {
+      headings.push(heading);
     }
   }
 

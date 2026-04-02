@@ -287,3 +287,24 @@ test("normalizeExplicitRepairAnchorText falls back to the source ATX heading whe
 
   assert.equal(normalized, "### 凭证窃取（Credential Theft）");
 });
+
+test("normalizeExplicitRepairAnchorText preserves missing source heading qualifiers inside an existing heading parenthesis", () => {
+  const slice = createSlice({
+    pendingRepairs: [
+      {
+        repairId: "repair-1",
+        anchorId: null,
+        failureType: "missing_anchor",
+        locationLabel: "小标题",
+        instruction:
+          "位置：### 第 2 类：提示式（Prompted）。问题：缺少源文标题括注“Requires Permission”的对应信息。修复目标：补齐该标题的中英文对照，且不改动结构。"
+      }
+    ]
+  });
+  const source = "### Category 2: Prompted (Requires Permission)";
+  const translated = "### 第 2 类：提示式（Prompted）";
+
+  const normalized = normalizeExplicitRepairAnchorText(source, translated, slice);
+
+  assert.equal(normalized, "### 第 2 类：提示式（Prompted，Requires Permission）");
+});

@@ -3082,6 +3082,56 @@ test("translateMarkdownArticle restores an ATX heading anchor after repair when 
   assert.match(result.markdown, /### 凭证窃取（Credential Theft）/);
 });
 
+test("translateMarkdownArticle restores missing source heading qualifiers inside category-style headings", async () => {
+  const source = [
+    "# Title",
+    "",
+    "### Category 2: Prompted (Requires Permission)",
+    "",
+    "Body.",
+    ""
+  ].join("\n");
+
+  let auditCount = 0;
+  const result = await translateMarkdownArticle(source, {
+    executor: {
+      async execute(prompt, options) {
+        if (options.outputSchema && prompt.includes("【分段审校输入】")) {
+          auditCount += 1;
+          if (auditCount === 1) {
+            return createExecResult(
+              wrapPerSegmentAudits(prompt, [
+                {
+                  segment_index: 1,
+                  audit: createAudit(false, [
+                    "位置：### 第 2 类：提示式（Prompted）。问题：缺少源文标题括注“Requires Permission”的对应信息。修复目标：补齐该标题的中英文对照，且不改动结构。"
+                  ])
+                }
+              ])
+            );
+          }
+
+          return createExecResult(wrapPerSegmentAudits(prompt, [{ segment_index: 1, audit: createAudit(true) }]));
+        }
+
+        if (options.outputSchema || prompt.includes("只返回 JSON")) {
+          return createExecResult(JSON.stringify(createAudit(true)));
+        }
+
+        const currentTranslation = extractPromptSection(prompt, "【当前译文】");
+        if (currentTranslation !== null) {
+          return createExecResult(currentTranslation);
+        }
+
+        return createExecResult(["# Title", "", "### 第 2 类：提示式（Prompted）", "", "正文。", ""].join("\n"));
+      }
+    },
+    formatter: async (markdown) => markdown
+  });
+
+  assert.match(result.markdown, /### 第 2 类：提示式（Prompted，Requires Permission）/);
+});
+
 test("translateMarkdownArticle adds attribution guidance for caption-like segments", async () => {
   const source = [
     "# Title",
