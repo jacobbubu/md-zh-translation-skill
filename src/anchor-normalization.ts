@@ -45,7 +45,7 @@ export function normalizeSegmentAnchorText(text: string, slice: PromptSlice | nu
     );
   }
 
-  return normalized;
+  return normalizeRepeatedEnglishParenthesesWithLocalHints(normalized);
 }
 
 export function injectPlannedAnchorText(
@@ -454,6 +454,38 @@ function replaceWholePhraseOnce(text: string, needle: string, replacement: strin
 
   const pattern = new RegExp(`\\b${escapeRegExp(needle)}\\b`);
   return text.replace(pattern, replacement);
+}
+
+function normalizeRepeatedEnglishParenthesesWithLocalHints(text: string): string {
+  const localEnglishPrimary = new Map<string, string>();
+  const englishPrimaryPattern = /\b([A-Za-z][A-Za-z0-9.+/_ -]{1,})（([^（）\n]+)）/g;
+
+  for (const match of text.matchAll(englishPrimaryPattern)) {
+    const english = match[1]?.trim();
+    const explainer = match[2]?.trim();
+    if (!english || !explainer) {
+      continue;
+    }
+    if (english.toLowerCase() === explainer.toLowerCase()) {
+      continue;
+    }
+    localEnglishPrimary.set(english.toLowerCase(), `${english}（${explainer}）`);
+  }
+
+  return text.replace(englishPrimaryPattern, (raw, englishRaw, innerRaw) => {
+    const english = String(englishRaw).trim();
+    const inner = String(innerRaw).trim();
+    if (!english || !inner) {
+      return raw;
+    }
+
+    if (english.toLowerCase() !== inner.toLowerCase()) {
+      return raw;
+    }
+
+    const canonical = localEnglishPrimary.get(english.toLowerCase());
+    return canonical ?? english;
+  });
 }
 
 function resolveAnchorDisplay(anchor: AnchorLike): AnchorDisplay {

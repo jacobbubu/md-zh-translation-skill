@@ -105,6 +105,30 @@ test("normalizeSegmentAnchorText preserves english-primary tool anchors with a c
   assert.equal(normalized, "Linux 上的 bubblewrap（安全隔离组件）提供了隔离能力。");
 });
 
+test("normalizeSegmentAnchorText reuses a better local english-primary hint when a duplicate English parenthesis appears", () => {
+  const slice = createSlice({
+    requiredAnchors: []
+  });
+
+  const normalized = normalizeSegmentAnchorText(
+    "它会移除所有提示，但也会取消所有保护。Claude（Claude）可以访问任何文件。\n- Claude（AI 助手）在你的项目文件夹里创建一个文件？这需要批准。",
+    slice
+  );
+
+  assert.match(normalized, /Claude（AI 助手）可以访问任何文件。/);
+  assert.doesNotMatch(normalized, /Claude（Claude）/);
+});
+
+test("normalizeSegmentAnchorText collapses duplicate English parentheses when no better local hint exists", () => {
+  const slice = createSlice({
+    requiredAnchors: []
+  });
+
+  const normalized = normalizeSegmentAnchorText("Claude（Claude）可以访问任何文件。", slice);
+
+  assert.equal(normalized, "Claude可以访问任何文件。");
+});
+
 test("formatAnchorDisplay prefers english-primary formatting for single-token tool names", () => {
   assert.equal(formatAnchorDisplay(createAnchor("anchor-1", "bubblewrap", "安全隔离组件")), "bubblewrap（安全隔离组件）");
   assert.equal(formatAnchorDisplay(createAnchor("anchor-2", "bubblewrap", "bubblewrap 框架")), "bubblewrap（框架）");
