@@ -119,6 +119,19 @@ test("normalizeSegmentAnchorText reuses a better local english-primary hint when
   assert.doesNotMatch(normalized, /Claude（Claude）/);
 });
 
+test("normalizeSegmentAnchorText strips a trailing repeated english name from an english-primary explainer", () => {
+  const slice = createSlice({
+    requiredAnchors: [createAnchor("anchor-1", "Claude", "Anthropic 的 AI 助手 Claude")]
+  });
+
+  const normalized = normalizeSegmentAnchorText(
+    "这些内容默认会被阻止，即使 Claude（Anthropic 的 AI 助手 Claude）被指示要访问它们。",
+    slice
+  );
+
+  assert.equal(normalized, "这些内容默认会被阻止，即使 Claude（Anthropic 的 AI 助手）被指示要访问它们。");
+});
+
 test("normalizeSegmentAnchorText collapses duplicate English parentheses when no better local hint exists", () => {
   const slice = createSlice({
     requiredAnchors: []
@@ -329,4 +342,26 @@ test("normalizeExplicitRepairAnchorText injects a named anchor back into a headi
   const normalized = normalizeExplicitRepairAnchorText(source, translated, slice);
 
   assert.equal(normalized, "## 沙箱模式（Sandbox Mode）如何改变自主编码");
+});
+
+test("normalizeExplicitRepairAnchorText injects a named anchor back into a list item", () => {
+  const slice = createSlice({
+    requiredAnchors: [createAnchor("anchor-1", "Environment variables", "环境变量")],
+    pendingRepairs: [
+      {
+        repairId: "repair-1",
+        anchorId: "anchor-1",
+        failureType: "missing_anchor",
+        locationLabel: "列表项",
+        instruction:
+          "位置：第一段列表“包含秘密信息的环境变量”：Environment variables 首次出现需补中英文对照，不能只写中文。"
+      }
+    ]
+  });
+  const source = "- Environment variables containing secrets";
+  const translated = "- 包含秘密信息的环境变量";
+
+  const normalized = normalizeExplicitRepairAnchorText(source, translated, slice);
+
+  assert.equal(normalized, "- 包含秘密信息的环境变量（Environment variables）");
 });

@@ -210,6 +210,15 @@ export function normalizeExplicitRepairAnchorText(
         continue;
       }
 
+      if (matchingAnchor) {
+        const normalizedLine = injectAnchorIntoLine(translatedLine, matchingAnchor);
+        if (normalizedLine !== translatedLine) {
+          translatedLine = normalizedLine;
+          changed = true;
+          continue;
+        }
+      }
+
       translatedLine = translatedLine.replace(target.chineseHint, `${target.chineseHint}（${english}）`);
       changed = true;
     }
@@ -265,7 +274,8 @@ function resolvePromptAnchorForExplicitRepair(
   target: ExplicitRepairTarget,
   slice: PromptSlice
 ): PromptAnchor | null {
-  if (!target.english) {
+  const targetEnglish = target.english?.toLowerCase();
+  if (!targetEnglish) {
     return null;
   }
 
@@ -278,7 +288,7 @@ function resolvePromptAnchorForExplicitRepair(
   return (
     anchors.find(
       (anchor) =>
-        anchor.english === target.english &&
+        anchor.english.toLowerCase() === targetEnglish &&
         anchor.chineseHint !== target.english &&
         target.chineseHint.includes(anchor.chineseHint)
     ) ?? null
@@ -322,6 +332,10 @@ function normalizeSingleAnchor(
     const escapedChinese = escapeRegExp(chineseHint);
     const canonical = display.canonical;
 
+    normalized = normalized.replace(
+      new RegExp(`${escapedEnglish}（${escapedChinese}\\s+${escapedEnglish}）`, "g"),
+      canonical
+    );
     normalized = normalized.replace(
       new RegExp(`${escapedEnglish}\\s*${escapedChinese}（${escapedEnglish}）`, "g"),
       canonical
@@ -467,6 +481,7 @@ function parseExplicitRepairTarget(instruction: string): ExplicitRepairTarget | 
   const english =
     instruction.match(/关键术语“([^”]*[A-Za-z][^”]*)”/)?.[1]?.trim() ??
     instruction.match(/首现术语\s+([A-Za-z][A-Za-z0-9 .+/_-]*)\s+未补/)?.[1]?.trim() ??
+    instruction.match(/[：:]\s*([A-Za-z][A-Za-z0-9 .+/_-]*)\s+首次出现需补/)?.[1]?.trim() ??
     instruction.match(/括注“([^”]*[A-Za-z][^”]*)”/)?.[1]?.trim() ??
     instruction.match(/“([^”]*[A-Za-z][^”]*)”缺少/)?.[1]?.trim() ??
     null;
@@ -627,7 +642,8 @@ function resolveAnchorDisplay(anchor: AnchorLike): AnchorDisplay {
   }
 
   const strippedEnglishPrefix = stripLeadingEnglishHint(chineseHint, english);
-  const chineseDisplay = strippedEnglishPrefix ?? chineseHint;
+  const strippedEnglishSuffix = stripTrailingEnglishHint(strippedEnglishPrefix ?? chineseHint, english);
+  const chineseDisplay = strippedEnglishSuffix ?? strippedEnglishPrefix ?? chineseHint;
   if (shouldPreferEnglishPrimary(english, strippedEnglishPrefix)) {
     return {
       mode: "english-primary",
@@ -654,6 +670,20 @@ function stripLeadingEnglishHint(chineseHint: string, english: string): string |
 
   const suffix = chineseHint.slice(english.length).trim();
   return suffix.length > 0 ? suffix : null;
+}
+
+function stripTrailingEnglishHint(chineseHint: string, english: string): string | null {
+  if (!chineseHint.toLowerCase().endsWith(english.toLowerCase())) {
+    return null;
+  }
+
+  const prefix = chineseHint
+    .slice(0, Math.max(0, chineseHint.length - english.length))
+    .trim()
+    .replace(/[（(：:，,、\-–—\s]+$/u, "")
+    .trim();
+
+  return prefix.length > 0 ? prefix : null;
 }
 
 function shouldPreferEnglishPrimary(english: string, strippedEnglishPrefix: string | null): boolean {
