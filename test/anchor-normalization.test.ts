@@ -308,3 +308,25 @@ test("normalizeExplicitRepairAnchorText preserves missing source heading qualifi
 
   assert.equal(normalized, "### 第 2 类：提示式（Prompted，Requires Permission）");
 });
+
+test("normalizeExplicitRepairAnchorText injects a named anchor back into a heading line", () => {
+  const slice = createSlice({
+    requiredAnchors: [createAnchor("anchor-1", "Sandbox Mode", "沙箱模式")],
+    pendingRepairs: [
+      {
+        repairId: "repair-1",
+        anchorId: "anchor-1",
+        failureType: "missing_anchor",
+        locationLabel: "标题",
+        instruction:
+          "位置：## 标题“沙箱模式如何改变自主编码”｜问题：首现术语 Sandbox Mode 未补中英文对照｜修复目标：在标题本身建立该术语的双语锚点。"
+      }
+    ]
+  });
+  const source = "## How Sandbox Mode Changes Autonomous Coding";
+  const translated = "## 沙箱模式如何改变自主编码";
+
+  const normalized = normalizeExplicitRepairAnchorText(source, translated, slice);
+
+  assert.equal(normalized, "## 沙箱模式（Sandbox Mode）如何改变自主编码");
+});

@@ -177,7 +177,9 @@ export function normalizeExplicitRepairAnchorText(
     for (const target of targets) {
       const sourceHeading = extractHeadingLikeLine(sourceLine);
       const translatedHeading = extractHeadingLikeLine(translatedLine);
+      const matchingAnchor = resolvePromptAnchorForExplicitRepair(target, slice);
       const english =
+        matchingAnchor?.english ??
         target.english ??
         resolveHeadingEnglishFromSource(target.chineseHint, sourceHeadingLines, translatedHeadingLines);
       if (!english) {
@@ -189,7 +191,10 @@ export function normalizeExplicitRepairAnchorText(
         translatedHeading &&
         stripInlineMarkdownMarkers(translatedHeading.content).includes(target.chineseHint)
       ) {
-        const normalizedHeading = normalizeHeadingRepairContent(translatedHeading.content, english);
+        const normalizedHeading =
+          matchingAnchor && translatedHeading.content.includes(matchingAnchor.chineseHint)
+            ? injectAnchorIntoLine(translatedHeading.content, matchingAnchor)
+            : normalizeHeadingRepairContent(translatedHeading.content, english);
         if (normalizedHeading !== translatedHeading.content) {
           translatedLine = translatedLine.replace(translatedHeading.content, normalizedHeading);
           changed = true;
@@ -254,6 +259,30 @@ function normalizeHeadingRepairContent(content: string, english: string): string
   }
 
   return content.replace(parentheticalMatch[0], `（${inner}，${english}）`);
+}
+
+function resolvePromptAnchorForExplicitRepair(
+  target: ExplicitRepairTarget,
+  slice: PromptSlice
+): PromptAnchor | null {
+  if (!target.english) {
+    return null;
+  }
+
+  const anchors = dedupePromptAnchors([
+    ...slice.requiredAnchors,
+    ...slice.repeatAnchors,
+    ...slice.establishedAnchors
+  ]);
+
+  return (
+    anchors.find(
+      (anchor) =>
+        anchor.english === target.english &&
+        anchor.chineseHint !== target.english &&
+        target.chineseHint.includes(anchor.chineseHint)
+    ) ?? null
+  );
 }
 
 function normalizeSingleAnchor(
@@ -437,6 +466,7 @@ function parseExplicitRepairTarget(instruction: string): ExplicitRepairTarget | 
 
   const english =
     instruction.match(/关键术语“([^”]*[A-Za-z][^”]*)”/)?.[1]?.trim() ??
+    instruction.match(/首现术语\s+([A-Za-z][A-Za-z0-9 .+/_-]*)\s+未补/)?.[1]?.trim() ??
     instruction.match(/括注“([^”]*[A-Za-z][^”]*)”/)?.[1]?.trim() ??
     instruction.match(/“([^”]*[A-Za-z][^”]*)”缺少/)?.[1]?.trim() ??
     null;

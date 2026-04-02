@@ -3132,6 +3132,68 @@ test("translateMarkdownArticle restores missing source heading qualifiers inside
   assert.match(result.markdown, /### 第 2 类：提示式（Prompted，Requires Permission）/);
 });
 
+test("translateMarkdownArticle restores a named anchor inside an ATX heading after repair", async () => {
+  const source = [
+    "# Title",
+    "",
+    "## How Sandbox Mode Changes Autonomous Coding",
+    "",
+    "Body.",
+    ""
+  ].join("\n");
+
+  let auditCount = 0;
+  const result = await translateMarkdownArticle(source, {
+    executor: {
+      async execute(prompt, options) {
+        if (isDocumentAnalysisPrompt(prompt)) {
+          return createExecResult(
+            createAnchorCatalog([
+              {
+                english: "Sandbox Mode",
+                chineseHint: "沙箱模式",
+                familyKey: "sandbox-mode"
+              }
+            ])
+          );
+        }
+
+        if (options.outputSchema && prompt.includes("【分段审校输入】")) {
+          auditCount += 1;
+          if (auditCount === 1) {
+            return createExecResult(
+              wrapPerSegmentAudits(prompt, [
+                {
+                  segment_index: 1,
+                  audit: createAudit(false, [
+                    "位置：## 标题“沙箱模式如何改变自主编码”｜问题：首现术语 Sandbox Mode 未补中英文对照｜修复目标：在标题本身建立该术语的双语锚点。"
+                  ])
+                }
+              ])
+            );
+          }
+
+          return createExecResult(wrapPerSegmentAudits(prompt, [{ segment_index: 1, audit: createAudit(true) }]));
+        }
+
+        if (options.outputSchema || prompt.includes("只返回 JSON")) {
+          return createExecResult(JSON.stringify(createAudit(true)));
+        }
+
+        const currentTranslation = extractPromptSection(prompt, "【当前译文】");
+        if (currentTranslation !== null) {
+          return createExecResult(currentTranslation);
+        }
+
+        return createExecResult(["# Title", "", "## 沙箱模式如何改变自主编码", "", "正文。", ""].join("\n"));
+      }
+    },
+    formatter: async (markdown) => markdown
+  });
+
+  assert.match(result.markdown, /## 沙箱模式（Sandbox Mode）如何改变自主编码/);
+});
+
 test("translateMarkdownArticle adds attribution guidance for caption-like segments", async () => {
   const source = [
     "# Title",
