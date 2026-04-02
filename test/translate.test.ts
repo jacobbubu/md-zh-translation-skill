@@ -705,6 +705,54 @@ test("translateMarkdownArticle strips added inline code from plain command list 
   assert.doesNotMatch(result.markdown, /`sudo`/);
 });
 
+test("translateMarkdownArticle strips added inline code from multi-command phrases under Commands", async () => {
+  const source = [
+    "### Category 1: Auto-Allowed",
+    "",
+    "**Commands:**",
+    "",
+    "- git status, git log, git diff",
+    "- npm install, npm test, npm run",
+    "- ls, cat, echo, basic shell commands",
+    "- python script.py (runs code in project)"
+  ].join("\n");
+
+  class MultiCommandExecutor implements CodexExecutor {
+    async execute(prompt: string, options: CodexExecOptions): Promise<CodexExecResult> {
+      if (options.outputSchema || prompt.includes('"hard_checks"') || prompt.includes("只返回 JSON")) {
+        return createExecResult(wrapAuditForSegments(prompt, createAudit(true)));
+      }
+
+      const translated = [
+        "### 第 1 类：自动允许",
+        "",
+        "**命令（Commands）：**",
+        "",
+        "- `git status`、`git log`、`git diff`",
+        "- `npm install`、`npm test`、`npm run`",
+        "- ls、`cat`、`echo`、基础 shell 命令",
+        "- `python script.py`（在项目中运行代码）"
+      ].join("\n");
+
+      return createExecResult(translated);
+    }
+  }
+
+  const result = await translateMarkdownArticle(source, {
+    executor: new MultiCommandExecutor(),
+    formatter: async (markdown) => markdown
+  });
+
+  assert.match(result.markdown, /- git status、git log、git diff/);
+  assert.match(result.markdown, /- npm install、npm test、npm run/);
+  assert.match(result.markdown, /- ls、cat、echo、基础 shell 命令/);
+  assert.match(result.markdown, /- python script\.py（在项目中运行代码）/);
+  assert.doesNotMatch(result.markdown, /`git status`/);
+  assert.doesNotMatch(result.markdown, /`npm install`/);
+  assert.doesNotMatch(result.markdown, /`cat`/);
+  assert.doesNotMatch(result.markdown, /`python script\.py`/);
+});
+
 test("translateMarkdownArticle runs the hidden pipeline chunk by chunk for long Markdown sections", async () => {
   const source = [
     "# Title",

@@ -1255,16 +1255,37 @@ function collectPlainCommandTokens(
       continue;
     }
 
-    const bulletMatch = trimmed.match(/^(?:[-*+]|\d+[.)])\s+([A-Za-z][A-Za-z0-9+._/-]*)\b/);
-    const token = bulletMatch?.[1]?.trim();
-    if (!token || sourceInlineCodeTokens.has(token)) {
+    const bulletMatch = trimmed.match(/^(?:[-*+]|\d+[.)])\s+(.+)$/);
+    const body = bulletMatch?.[1]?.trim();
+    if (!body) {
       continue;
     }
 
-    tokens.add(token);
+    const commandPhrases = extractPlainCommandPhrases(body);
+    const leadingToken = body.match(/^([A-Za-z][A-Za-z0-9+._/-]*)\b/)?.[1]?.trim();
+    if (leadingToken && !sourceInlineCodeTokens.has(leadingToken)) {
+      tokens.add(leadingToken);
+    }
+    for (const phrase of commandPhrases) {
+      if (!sourceInlineCodeTokens.has(phrase)) {
+        tokens.add(phrase);
+      }
+    }
   }
 
   return tokens;
+}
+
+function extractPlainCommandPhrases(body: string): string[] {
+  const withoutTrailingExplanation = body.replace(/\s*\([^)]*\)\s*$/, "").trim();
+  if (!withoutTrailingExplanation) {
+    return [];
+  }
+
+  return withoutTrailingExplanation
+    .split(/\s*,\s*/)
+    .map((item) => item.trim())
+    .filter((item) => item.length > 0 && /[A-Za-z]/.test(item));
 }
 
 type ProtectedChunkSegment = {
