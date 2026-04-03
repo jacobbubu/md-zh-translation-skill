@@ -59,6 +59,7 @@ const AUDIT_REASONING_EFFORT = "medium";
 const REPAIR_REASONING_EFFORT = "low";
 const STYLE_REASONING_EFFORT = "low";
 type ReasoningEffort = "minimal" | "low" | "medium" | "high" | "xhigh";
+type StyleMode = "none" | "final";
 
 type AuditCheckKey =
   | "paragraph_match"
@@ -94,6 +95,7 @@ export type TranslateOptions = {
   sourcePathHint?: string;
   model?: string;
   postDraftModel?: string;
+  styleMode?: StyleMode;
   executor?: CodexExecutor;
   formatter?: typeof formatTranslatedBody;
   onProgress?: (message: string, stage: TranslateProgress) => void;
@@ -515,6 +517,7 @@ export async function translateMarkdownArticle(source: string, options: Translat
   const formatter = options.formatter ?? formatTranslatedBody;
   const draftModel = options.model ?? (process.env.TRANSLATION_MODEL?.trim() || DEFAULT_MODEL);
   const postDraftModel = options.postDraftModel ?? (process.env.POST_DRAFT_MODEL?.trim() || draftModel);
+  const styleMode = resolveStyleMode(options.styleMode);
   const postDraftReasoningEffort = process.env.POST_DRAFT_REASONING_EFFORT?.trim()
     ? (process.env.POST_DRAFT_REASONING_EFFORT.trim() as ReasoningEffort)
     : undefined;
@@ -568,15 +571,28 @@ export async function translateMarkdownArticle(source: string, options: Translat
       restoredChunks.push(chunkResult.body + chunk.separatorAfter);
       gateAudits.push(chunkResult.gateAudit);
       repairCyclesUsed += chunkResult.repairCyclesUsed;
-      styleApplied = styleApplied || chunkResult.styleApplied;
       nextLocalSpanIndex = chunkResult.nextLocalSpanIndex;
       setChunkFinalBody(state, chunkId, chunkResult.body);
+    }
+
+    let translatedBody = restoredChunks.join("");
+    if (styleMode === "final") {
+      const finalStyleResult = await applyFinalStylePolish(protectedBody, translatedBody, {
+        cwd,
+        executor,
+        model: postDraftModel,
+        options,
+        reasoningEffort: postDraftReasoningEffort,
+        sourceSpans: spans
+      });
+      translatedBody = finalStyleResult.body;
+      styleApplied = finalStyleResult.styleApplied;
     }
 
     report(options, "format", "Formatting translated Markdown.");
     let formattedBody: string;
     try {
-      formattedBody = await formatter(restoredChunks.join(""), sourcePathHint);
+      formattedBody = await formatter(translatedBody, sourcePathHint);
     } catch (error) {
       throw new FormattingError(error instanceof Error ? error.message : String(error));
     }
@@ -597,6 +613,15 @@ export async function translateMarkdownArticle(source: string, options: Translat
     }
     throw error instanceof Error ? error : new Error(String(error));
   }
+}
+
+function resolveStyleMode(optionStyleMode: TranslateOptions["styleMode"]): StyleMode {
+  if (optionStyleMode === "none" || optionStyleMode === "final") {
+    return optionStyleMode;
+  }
+
+  const raw = process.env.MDZH_STYLE_MODE?.trim().toLowerCase();
+  return raw === "final" ? "final" : "none";
 }
 
 function mergeGateAudits(audits: readonly GateAudit[]): GateAudit {
@@ -643,7 +668,6 @@ type ChunkTranslationContext = {
 type ChunkTranslationResult = {
   body: string;
   repairCyclesUsed: number;
-  styleApplied: boolean;
   gateAudit: GateAudit;
   nextLocalSpanIndex: number;
 };
@@ -1119,88 +1143,74 @@ async function translateProtectedChunk(
     );
   }
 
-  const hardPassProtectedSource = rebuildChunkFromSegmentStates(segments, draftedSegments, "protectedSource");
-  const hardPassProtectedChunk = rebuildChunkFromSegmentStates(segments, draftedSegments, "protectedBody");
   const hardPassBody = rebuildChunkFromSegmentStates(segments, draftedSegments, "restoredBody");
-  const accumulatedChunkSpans = collectAccumulatedChunkSpans(segments, draftedSegments);
-  const chunkSpans = collectChunkSpans(hardPassProtectedChunk, context.spanIndex, accumulatedChunkSpans);
-  let restoredChunkBody = hardPassBody;
-  let styleApplied = false;
-
-  if (bundledAudit.segments.length > 0) {
-    const chunkStylePromptContext = buildChunkStylePromptContext(
-      context.state,
-      chunk,
-      plan,
-      context.sourcePathHint,
-      chunk.source
-    );
-
-    report(
-      context.options,
-      "style",
-      `Chunk ${chunkPromptContext.chunkIndex}/${plan.chunks.length}${chunkLabel}: applying style polish after hard gate pass.`
-    );
-    const styleResult = await context.executor.execute(
-      withChunkContext(buildStylePolishPrompt(hardPassProtectedSource, hardPassProtectedChunk), chunkStylePromptContext),
-      {
-        cwd: context.cwd,
-        model: context.postDraftModel,
-        reasoningEffort: context.postDraftReasoningEffort ?? STYLE_REASONING_EFFORT,
-        onStderr: (stderrChunk) =>
-          reportChunkProgress(context.options, "style", chunkPromptContext.chunkIndex - 1, plan, chunkLabel, stderrChunk)
-      }
-    );
-
-    try {
-      const normalizedStyleText = stripAddedInlineCodeFromPlainPaths(
-        hardPassProtectedSource,
-        styleResult.text
-      );
-      const normalizedSurfaceStyleText = normalizeSourceSurfaceAnchorText(
-        hardPassProtectedSource,
-        normalizedStyleText,
-        chunkStylePromptContext.stateSlice
-      );
-      const restoredInlineStyleText = restoreInlineCodeFromSourceShape(
-        hardPassProtectedSource,
-        normalizedSurfaceStyleText
-      );
-      restoredChunkBody = restoreMarkdownSpans(restoredInlineStyleText, chunkSpans);
-      if (looksLikeMetaTaskResponse(restoredChunkBody)) {
-        report(
-          context.options,
-          "style",
-          `Chunk ${chunkPromptContext.chunkIndex}/${plan.chunks.length}${chunkLabel}: style polish returned task-management or refusal text; falling back to the hard-pass translation.`
-        );
-        restoredChunkBody = hardPassBody;
-      } else {
-        styleApplied = true;
-        for (const draftedSegment of draftedSegments) {
-          markSegmentStyled(context.state, draftedSegment.segmentId);
-        }
-      }
-    } catch (error) {
-      if (!(error instanceof HardGateError)) {
-        throw error;
-      }
-      report(
-        context.options,
-        "style",
-        `Chunk ${chunkPromptContext.chunkIndex}/${plan.chunks.length}${chunkLabel}: style polish changed protected Markdown spans; falling back to the hard-pass translation.`
-      );
-    }
-  }
-
-  markChunkPhase(context.state, context.chunkId, styleApplied ? "styled" : "completed");
+  markChunkPhase(context.state, context.chunkId, "completed");
 
   return {
-    body: restoredChunkBody,
+    body: hardPassBody,
     repairCyclesUsed,
-    styleApplied,
     gateAudit: mergeGateAudits(bundledAudit.segments),
     nextLocalSpanIndex
   };
+}
+
+async function applyFinalStylePolish(
+  sourceProtectedBody: string,
+  translatedBody: string,
+  context: {
+    cwd: string;
+    executor: CodexExecutor;
+    model: string;
+    options: TranslateOptions;
+    reasoningEffort: ReasoningEffort | undefined;
+    sourceSpans: readonly ProtectedSpan[];
+  }
+): Promise<{ body: string; styleApplied: boolean }> {
+  const reprotectableSourceSpans = context.sourceSpans.filter((span) =>
+    ["link_destination", "image_destination", "autolink", "html_attribute"].includes(span.kind)
+  );
+  const canonicalTranslatedBody = reprotectMarkdownSpans(translatedBody, [...reprotectableSourceSpans]);
+  const { protectedBody: protectedTranslatedBody, spans } = protectMarkdownSpans(canonicalTranslatedBody);
+  const finalSpans = [...reprotectableSourceSpans, ...spans];
+  report(context.options, "style", "Applying final style polish after all chunks passed.");
+  const styleResult = await context.executor.execute(
+    buildStylePolishPrompt(sourceProtectedBody, protectedTranslatedBody),
+    {
+      cwd: context.cwd,
+      model: context.model,
+      reasoningEffort: context.reasoningEffort ?? STYLE_REASONING_EFFORT,
+      onStderr: (stderrChunk) => report(context.options, "style", stderrChunk.trim())
+    }
+  );
+
+  try {
+    const normalizedStyleText = stripAddedInlineCodeFromPlainPaths(sourceProtectedBody, styleResult.text);
+    const restoredInlineStyleText = restoreInlineCodeFromSourceShape(
+      sourceProtectedBody,
+      normalizedStyleText
+    );
+    const restoredBody = restoreMarkdownSpans(restoredInlineStyleText, finalSpans);
+    if (looksLikeMetaTaskResponse(restoredBody)) {
+      report(
+        context.options,
+        "style",
+        "Final style polish returned task-management or refusal text; falling back to the hard-pass translation."
+      );
+      return { body: translatedBody, styleApplied: false };
+    }
+
+    return { body: restoredBody, styleApplied: true };
+  } catch (error) {
+    if (!(error instanceof HardGateError)) {
+      throw error;
+    }
+    report(
+      context.options,
+      "style",
+      "Final style polish changed protected Markdown spans; falling back to the hard-pass translation."
+    );
+    return { body: translatedBody, styleApplied: false };
+  }
 }
 
 function looksLikeMetaTaskResponse(text: string): boolean {

@@ -266,6 +266,9 @@ function protectLinkDestinations(
   register: (kind: ProtectedKind, raw: string, extras?: Partial<ProtectedSpan>) => string
 ): string {
   return input.replace(/(!?\[[^\]\n]*\])\(([^()\n\s][^)\n]*)\)/g, (_match, label: string, destination: string) => {
+    if (looksLikePlaceholder(destination)) {
+      return `${label}(${destination})`;
+    }
     const kind: ProtectedKind = label.startsWith("![") ? "image_destination" : "link_destination";
     const labelText = label.slice(label.startsWith("![") ? 2 : 1, -1);
     return `${label}(${register(kind, destination, { labelText })})`;
@@ -277,6 +280,9 @@ function protectAutolinks(
   register: (kind: ProtectedKind, raw: string) => string
 ): string {
   return input.replace(/<((https?:\/\/|mailto:)[^>\s]+)>/gi, (_match, raw: string) => {
+    if (looksLikePlaceholder(raw)) {
+      return `<${raw}>`;
+    }
     return `<${register("autolink", raw)}>`;
   });
 }
@@ -287,9 +293,16 @@ function protectHtmlAttributes(
 ): string {
   return input.replace(/\b(href|src|poster)=("([^"]*)"|'([^']*)')/gi, (_match, attribute: string, quoted: string, doubleQuoted?: string, singleQuoted?: string) => {
     const rawValue = doubleQuoted ?? singleQuoted ?? "";
+    if (looksLikePlaceholder(rawValue)) {
+      return `${attribute}=${quoted}`;
+    }
     const quote = quoted[0] ?? '"';
     return `${attribute}=${quote}${register("html_attribute", rawValue)}${quote}`;
   });
+}
+
+function looksLikePlaceholder(value: string): boolean {
+  return /^@@MDZH_[A-Z_]+_\d{4,}@@$/.test(value.trim());
 }
 
 function protectHtmlBlocks(

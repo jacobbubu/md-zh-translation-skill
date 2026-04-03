@@ -260,7 +260,7 @@ test("parseGateAudit normalizes corner quotes in audit text", () => {
   assert.deepEqual(parsed.must_fix, ["第 2 类“Commands”小节中“docker”“sudo”两条命令需去掉行内代码。"]);
 });
 
-test("translateMarkdownArticle repairs once and then runs style polish", async () => {
+test("translateMarkdownArticle repairs once and then runs final style polish when enabled", async () => {
   const source = "# Title\n\nBody";
   const firstAudit = JSON.stringify(createAudit(false, ["标题首现术语缺少中英对照"]));
   const secondAudit = JSON.stringify(createAudit(true));
@@ -276,6 +276,7 @@ test("translateMarkdownArticle repairs once and then runs style polish", async (
   const result = await translateMarkdownArticle(source, {
     executor,
     formatter: async (markdown) => markdown,
+    styleMode: "final",
     onProgress: (message) => progress.push(message)
   });
 
@@ -283,6 +284,23 @@ test("translateMarkdownArticle repairs once and then runs style polish", async (
   assert.equal(result.styleApplied, true);
   assert.equal(result.markdown, "# 标题（Title）\n\n更自然的正文");
   assert.ok(progress.some((message) => message.includes("repair cycle 1")));
+});
+
+test("translateMarkdownArticle skips style polish by default", async () => {
+  const source = "# Title\n\nBody";
+  const executor = new StubExecutor([
+    "# 标题\n\n正文",
+    JSON.stringify(createAudit(true))
+  ]);
+
+  const result = await translateMarkdownArticle(source, {
+    executor,
+    formatter: async (markdown) => markdown
+  });
+
+  assert.equal(result.styleApplied, false);
+  assert.equal(result.markdown, "# 标题\n\n正文");
+  assert.equal(executor.prompts.some((prompt) => prompt.includes("只做“风格与可读性润色”")), false);
 });
 
 test("translateMarkdownArticle fails after two repair cycles when the gate never passes", async () => {
@@ -378,6 +396,7 @@ test("translateMarkdownArticle falls back to the hard-pass translation when styl
   const result = await translateMarkdownArticle(source, {
     executor,
     formatter: async (markdown) => markdown,
+    styleMode: "final",
     onProgress: (message) => progress.push(message)
   });
 
@@ -466,6 +485,7 @@ test("translateMarkdownArticle falls back to the hard-pass translation when styl
   const result = await translateMarkdownArticle(source, {
     executor: new MetaStyleExecutor(),
     formatter: async (markdown) => markdown,
+    styleMode: "final",
     onProgress: (message) => progress.push(message)
   });
 
@@ -509,6 +529,7 @@ test("translateMarkdownArticle falls back to the hard-pass translation when styl
   const result = await translateMarkdownArticle(source, {
     executor: new AgentsRuleStyleExecutor(),
     formatter: async (markdown) => markdown,
+    styleMode: "final",
     onProgress: (message) => progress.push(message)
   });
 
@@ -552,6 +573,7 @@ test("translateMarkdownArticle falls back to the hard-pass translation when styl
   const result = await translateMarkdownArticle(source, {
     executor: new MissingProjectStyleExecutor(),
     formatter: async (markdown) => markdown,
+    styleMode: "final",
     onProgress: (message) => progress.push(message)
   });
 
@@ -595,6 +617,7 @@ test("translateMarkdownArticle falls back to the hard-pass translation when styl
   const result = await translateMarkdownArticle(source, {
     executor: new MissingProjectOnlyStyleExecutor(),
     formatter: async (markdown) => markdown,
+    styleMode: "final",
     onProgress: (message) => progress.push(message)
   });
 
@@ -884,7 +907,7 @@ test("translateMarkdownArticle allocates unique local markdown-link placeholders
   );
 });
 
-test("translateMarkdownArticle canonicalizes expanded URL spans before chunk-level style polish", async () => {
+test("translateMarkdownArticle canonicalizes expanded URL spans before final style polish", async () => {
   const source = [
     "# Docs",
     "",
@@ -933,7 +956,8 @@ test("translateMarkdownArticle canonicalizes expanded URL spans before chunk-lev
   const executor = new CanonicalChunkExecutor();
   const result = await translateMarkdownArticle(source, {
     executor,
-    formatter: async (markdown) => markdown
+    formatter: async (markdown) => markdown,
+    styleMode: "final"
   });
 
   assert.match(result.markdown, /^# Docs\n\nRead \[docs\]\(https:\/\/example\.com\/docs\)\./);
@@ -941,7 +965,7 @@ test("translateMarkdownArticle canonicalizes expanded URL spans before chunk-lev
   assert.match(result.markdown, /See \[guide\]\(https:\/\/example\.com\/guide\)\.\n$/);
 });
 
-test("translateMarkdownArticle canonicalizes expanded URL spans before chunk-level style polish even when draft changes destination formatting", async () => {
+test("translateMarkdownArticle canonicalizes expanded URL spans before final style polish even when draft changes destination formatting", async () => {
   const source = [
     "## How Sandbox Mode Changes Autonomous Coding",
     "",
@@ -980,7 +1004,8 @@ test("translateMarkdownArticle canonicalizes expanded URL spans before chunk-lev
 
   const result = await translateMarkdownArticle(source, {
     executor: new DraftDestinationFormattingExecutor(),
-    formatter: async (markdown) => markdown
+    formatter: async (markdown) => markdown,
+    styleMode: "final"
   });
 
   assert.match(result.markdown, /\[bubblewrap（安全隔离组件）]\( https:\/\/example\.com\/bubblewrap "bubblewrap" \)/);
@@ -1026,7 +1051,8 @@ test("translateMarkdownArticle restores style-polish output that expands markdow
 
   const result = await translateMarkdownArticle(source, {
     executor: new ExpandedStyleLinkExecutor(),
-    formatter: async (markdown) => markdown
+    formatter: async (markdown) => markdown,
+    styleMode: "final"
   });
 
   assert.equal(
@@ -1035,7 +1061,7 @@ test("translateMarkdownArticle restores style-polish output that expands markdow
   );
 });
 
-test("translateMarkdownArticle keeps translatable strong emphasis and raw inline code visible at chunk-level style polish", async () => {
+test("translateMarkdownArticle keeps translatable strong emphasis and raw inline code visible at final style polish", async () => {
   const source = [
     "# Title",
     "",
@@ -1077,7 +1103,8 @@ test("translateMarkdownArticle keeps translatable strong emphasis and raw inline
   const executor = new InlineMarkupExecutor();
   const result = await translateMarkdownArticle(source, {
     executor,
-    formatter: async (markdown) => markdown
+    formatter: async (markdown) => markdown,
+    styleMode: "final"
   });
 
   assert.match(result.markdown, /> 为什么这会被拦截？ `~\/\.bashrc` 属于敏感文件。/);
@@ -1096,7 +1123,7 @@ test("translateMarkdownArticle passes raw inline code through before segment aud
   assert.equal(result.markdown, "With sandbox: 访问 `~/.ssh` 会被阻止。\n");
 });
 
-test("translateMarkdownArticle keeps inline markdown links visible at chunk-level style polish", async () => {
+test("translateMarkdownArticle keeps inline markdown links visible at final style polish", async () => {
   const source = [
     "# Title",
     "",
@@ -1133,7 +1160,8 @@ test("translateMarkdownArticle keeps inline markdown links visible at chunk-leve
   const executor = new InlineLinkExecutor();
   const result = await translateMarkdownArticle(source, {
     executor,
-    formatter: async (markdown) => markdown
+    formatter: async (markdown) => markdown,
+    styleMode: "final"
   });
 
   assert.match(result.markdown, /\[bubblewrap \]\(https:\/\/example\.com\/bubblewrap\)/);
@@ -1264,7 +1292,8 @@ test("translateMarkdownArticle reuses a Codex thread within a segment", async ()
 
   await translateMarkdownArticle(source, {
     executor,
-    formatter: async (markdown) => markdown
+    formatter: async (markdown) => markdown,
+    styleMode: "final"
   });
 
   assert.equal(calls[0]?.reuseSession, true);
@@ -1317,7 +1346,8 @@ test("translateMarkdownArticle routes post-draft stages to the configured post-d
       executor,
       formatter: async (markdown) => markdown,
       model: "gpt-5.4-mini",
-      postDraftModel: "gpt-5.4"
+      postDraftModel: "gpt-5.4",
+      styleMode: "final"
     });
 
     const draftCall = calls.find(
@@ -1378,7 +1408,8 @@ test("translateMarkdownArticle runs chunk-level audit with structured output", a
 
   const result = await translateMarkdownArticle(source, {
     executor,
-    formatter: async (markdown) => markdown
+    formatter: async (markdown) => markdown,
+    styleMode: "final"
   });
 
   assert.equal(result.markdown, "# 标题\n\n正文");
