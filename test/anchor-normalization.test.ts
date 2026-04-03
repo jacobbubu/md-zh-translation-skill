@@ -239,6 +239,18 @@ test("normalizeHeadingLikeAnchorText restores a missing english anchor inside a 
   assert.match(normalized, /告诉 Claude：/);
 });
 
+test("normalizeHeadingLikeAnchorText keeps a single trailing colon when restoring a bold pseudo-heading anchor", () => {
+  const slice = createSlice({
+    requiredAnchors: [createAnchor("anchor-1", "Paths:", "路径")]
+  });
+  const source = "**Paths:**";
+  const translated = "**路径：**";
+
+  const normalized = normalizeHeadingLikeAnchorText(source, translated, slice);
+
+  assert.equal(normalized, "**路径（Paths）：**");
+});
+
 test("injectPlannedAnchorText injects a missing anchor into a heading-like line", () => {
   const slice = createSlice({
     requiredAnchors: [createAnchor("anchor-1", "System File Access", "系统文件访问")]
@@ -342,6 +354,27 @@ test("normalizeExplicitRepairAnchorText restores a heading-like anchor from a st
   const normalized = normalizeExplicitRepairAnchorText(source, translated, slice);
 
   assert.equal(normalized, "**测试 2：系统文件访问（System File Access）**");
+});
+
+test("normalizeExplicitRepairAnchorText keeps a single trailing colon when restoring a heading-like anchor", () => {
+  const slice = createSlice({
+    pendingRepairs: [
+      {
+        repairId: "repair-1",
+        anchorId: null,
+        failureType: "missing_anchor",
+        locationLabel: "分段标题",
+        instruction:
+          "位置：分段标题“**路径：**”；问题：首次出现的关键术语“Paths:”缺少中英文对照；修复目标：在标题本身补齐该术语的英文锚定。"
+      }
+    ]
+  });
+  const source = "**Paths:**";
+  const translated = "**路径：**";
+
+  const normalized = normalizeExplicitRepairAnchorText(source, translated, slice);
+
+  assert.equal(normalized, "**路径（Paths）：**");
 });
 
 test("normalizeExplicitRepairAnchorText falls back to the source ATX heading when the repair target omits english", () => {

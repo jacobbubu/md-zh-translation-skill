@@ -127,7 +127,7 @@ export function injectPlannedAnchorText(
     const sourceLine = sourceLines[index] ?? "";
     let translatedLine = translatedLines[index] ?? "";
     const lineAnchors = coalesceSourceLineAnchors(
-      requiredAnchors.filter((anchor) => containsWholePhrase(sourceLine, anchor.english))
+      requiredAnchors.filter((anchor) => containsSourceAnchorPhrase(sourceLine, anchor.english))
     );
 
     for (const anchor of lineAnchors) {
@@ -176,23 +176,24 @@ export function normalizeHeadingLikeAnchorText(
     const sourceLine = sourceHeadingLines[index]!;
     const translatedLine = translatedHeadingLines[index]!;
     const lineAnchors = coalesceSourceLineAnchors(
-      requiredAnchors.filter((anchor) => containsWholePhrase(sourceLine.content, anchor.english))
+      requiredAnchors.filter((anchor) => containsSourceAnchorPhrase(sourceLine.content, anchor.english))
     );
 
     let normalizedLine = translatedLine.raw;
     for (const anchor of lineAnchors) {
+      const headingEnglish = normalizeHeadingAnchorEnglishForLine(anchor.english, translatedLine.content);
       if (
         !anchor.chineseHint ||
-        anchor.chineseHint.toLowerCase() === anchor.english.toLowerCase() ||
+        anchor.chineseHint.toLowerCase() === headingEnglish.toLowerCase() ||
         !normalizedLine.includes(anchor.chineseHint) ||
-        containsWholePhrase(normalizedLine, anchor.english)
+        containsWholePhrase(normalizedLine, headingEnglish)
       ) {
         continue;
       }
 
       normalizedLine = normalizedLine.replace(
         anchor.chineseHint,
-        `${anchor.chineseHint}（${anchor.english}）`
+        `${anchor.chineseHint}（${headingEnglish}）`
       );
     }
 
@@ -259,9 +260,9 @@ export function normalizeExplicitRepairAnchorText(
       }
 
       if (
-        !containsWholePhrase(sourceLine, english) ||
+        !containsSourceAnchorPhrase(sourceLine, english) ||
         !translatedLine.includes(target.chineseHint) ||
-        containsWholePhrase(translatedLine, english)
+        containsWholePhrase(translatedLine, normalizeHeadingAnchorEnglishForLine(english, translatedLine))
       ) {
         continue;
       }
@@ -309,21 +310,22 @@ function resolveHeadingEnglishFromSource(
 }
 
 function normalizeHeadingRepairContent(content: string, english: string): string {
-  if (!english || containsWholePhrase(content, english)) {
+  const normalizedEnglish = normalizeHeadingAnchorEnglishForLine(english, content);
+  if (!normalizedEnglish || containsWholePhrase(content, normalizedEnglish)) {
     return content;
   }
 
   const parentheticalMatch = content.match(/（([^）]*[A-Za-z][^）]*)）(?!.*（)/);
   if (!parentheticalMatch?.[1]) {
-    return `${content}（${english}）`;
+    return injectHeadingEnglishBeforeTrailingColon(content, normalizedEnglish);
   }
 
   const inner = parentheticalMatch[1].trim();
-  if (containsWholePhrase(inner, english)) {
+  if (containsWholePhrase(inner, normalizedEnglish)) {
     return content;
   }
 
-  return content.replace(parentheticalMatch[0], `（${inner}，${english}）`);
+  return content.replace(parentheticalMatch[0], `（${inner}，${normalizedEnglish}）`);
 }
 
 function resolvePromptAnchorForExplicitRepair(
@@ -603,7 +605,9 @@ function parseExplicitRepairTarget(instruction: string): ExplicitRepairTarget | 
     instruction.match(/位置：(.+?)。问题[:：]/)?.[1]?.trim() ??
     instruction.match(/`([^`]+)`/)?.[1]?.trim() ??
     null;
-  const chineseHint = locationText ? stripHeadingMarkers(stripInlineMarkdownMarkers(locationText).trim()) : null;
+  const chineseHint = locationText
+    ? normalizeExplicitRepairChineseHint(stripHeadingMarkers(stripInlineMarkdownMarkers(locationText).trim()))
+    : null;
 
   if (!chineseHint) {
     return null;
@@ -905,6 +909,50 @@ function normalizeAcronymCompoundParentheses(text: string, display: AnchorDispla
   );
 
   return normalized;
+}
+
+function normalizeHeadingAnchorEnglishForLine(english: string, translatedHeadingContent: string): string {
+  const trimmedEnglish = english.trim();
+  const strippedEnglish = trimmedEnglish.replace(/[：:]+$/, "").trim();
+  if (strippedEnglish && strippedEnglish !== trimmedEnglish && /[：:]\s*$/.test(translatedHeadingContent.trim())) {
+    return strippedEnglish;
+  }
+
+  return trimmedEnglish;
+}
+
+function normalizeAnchorEnglishForSourceMatch(english: string): string {
+  return english.trim().replace(/[：:]+$/, "").trim();
+}
+
+function containsSourceAnchorPhrase(haystack: string, needle: string): boolean {
+  if (containsWholePhrase(haystack, needle)) {
+    return true;
+  }
+
+  const normalizedNeedle = normalizeAnchorEnglishForSourceMatch(needle);
+  return normalizedNeedle.length > 0 && normalizedNeedle !== needle && containsWholePhrase(haystack, normalizedNeedle);
+}
+
+function normalizeExplicitRepairChineseHint(text: string): string {
+  return text
+    .replace(/（[^）]*[A-Za-z][^）]*）(?=[：:])/g, "")
+    .replace(/[：:]{2,}/g, "：")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function injectHeadingEnglishBeforeTrailingColon(content: string, english: string): string {
+  const trimmed = content.trimEnd();
+  const trailingColonMatch = trimmed.match(/([：:])$/);
+  if (!trailingColonMatch?.[1]) {
+    return `${content}（${english}）`;
+  }
+
+  const colon = trailingColonMatch[1];
+  const withoutColon = trimmed.slice(0, -colon.length);
+  const trailingWhitespace = content.slice(trimmed.length);
+  return `${withoutColon}（${english}）${colon}${trailingWhitespace}`;
 }
 
 function findMatchingParenIndex(

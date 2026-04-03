@@ -3166,6 +3166,65 @@ test("translateMarkdownArticle restores a structured heading-like anchor after r
   assert.match(result.markdown, /\*\*测试 2：系统文件访问（System File Access）\*\*/);
 });
 
+test("translateMarkdownArticle restores a heading-like anchor with a single trailing colon after repair", async () => {
+  const source = [
+    "# Title",
+    "",
+    "**Paths:**",
+    "",
+    "- Absolute: /home/user/projects",
+    ""
+  ].join("\n");
+
+  let auditCount = 0;
+  const result = await translateMarkdownArticle(source, {
+    executor: {
+      async execute(prompt, options) {
+        if (options.outputSchema && prompt.includes("【分段审校输入】")) {
+          auditCount += 1;
+          if (auditCount === 1) {
+            return createExecResult(
+              wrapPerSegmentAudits(prompt, [
+                {
+                  segment_index: 1,
+                  audit: createAudit(false, [
+                    "位置：分段标题“路径（Paths：）：”。问题：标点有误，去掉括号内外多余的冒号，恢复为与原文 `Paths:` 对应的单一冒号。"
+                  ])
+                }
+              ])
+            );
+          }
+
+          return createExecResult(wrapPerSegmentAudits(prompt, [{ segment_index: 1, audit: createAudit(true) }]));
+        }
+
+        if (options.outputSchema || prompt.includes("只返回 JSON")) {
+          return createExecResult(JSON.stringify(createAudit(true)));
+        }
+
+        const currentTranslation = extractPromptSection(prompt, "【当前译文】");
+        if (currentTranslation !== null) {
+          return createExecResult(currentTranslation);
+        }
+
+        return createExecResult(
+          [
+            "# Title",
+            "",
+            "**路径：**",
+            "",
+            "- 绝对路径：/home/user/projects",
+            ""
+          ].join("\n")
+        );
+      }
+    },
+    formatter: async (markdown) => markdown
+  });
+
+  assert.match(result.markdown, /\*\*路径（Paths）：\*\*/);
+});
+
 test("translateMarkdownArticle restores an ATX heading anchor after repair when must_fix only names the translated heading", async () => {
   const source = [
     "# Title",
