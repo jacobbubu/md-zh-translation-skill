@@ -182,6 +182,8 @@ export function normalizeHeadingLikeAnchorText(
       }
     }
 
+    normalizedLine = stripRepeatedEnglishSubanchorParentheticals(normalizedLine);
+
     if (normalizedLine !== translatedHeading.raw) {
       normalized = normalized.replace(translatedHeading.raw, normalizedLine);
     }
@@ -192,9 +194,15 @@ export function normalizeHeadingLikeAnchorText(
     const translatedLine = translatedHeadingLines[index]!;
     let normalizedLine = translatedLine.raw;
 
-    const lineAnchors = coalesceSourceLineAnchors(
-      requiredAnchors.filter((anchor) => containsSourceAnchorPhrase(sourceLine.content, anchor.english))
+    const allHeadingAnchors = requiredAnchors.filter((anchor) =>
+      containsSourceAnchorPhrase(sourceLine.content, anchor.english)
     );
+    const lineAnchors = coalesceHeadingLineAnchors(allHeadingAnchors);
+    const shadowedAnchors = getShadowedHeadingLineAnchors(allHeadingAnchors);
+
+    for (const shadowedAnchor of shadowedAnchors) {
+      normalizedLine = stripShadowedHeadingAnchor(normalizedLine, shadowedAnchor);
+    }
 
     for (const anchor of lineAnchors) {
       const headingEnglish = normalizeHeadingAnchorEnglishForLine(anchor.english, translatedLine.content);
@@ -563,6 +571,61 @@ function coalesceSourceLineAnchors(anchors: readonly PromptAnchor[]): PromptAnch
           containsWholePhrase(candidate.english, anchor.english)
       )
   );
+}
+
+function coalesceHeadingLineAnchors(anchors: readonly PromptAnchor[]): PromptAnchor[] {
+  return anchors.filter(
+    (anchor) =>
+      !anchors.some(
+        (candidate) =>
+          candidate.anchorId !== anchor.anchorId &&
+          candidate.english.length > anchor.english.length &&
+          containsWholePhrase(candidate.english, anchor.english)
+      )
+  );
+}
+
+function getShadowedHeadingLineAnchors(anchors: readonly PromptAnchor[]): PromptAnchor[] {
+  return anchors.filter((anchor) =>
+    anchors.some(
+      (candidate) =>
+        candidate.anchorId !== anchor.anchorId &&
+        candidate.english.length > anchor.english.length &&
+        containsWholePhrase(candidate.english, anchor.english)
+    )
+  );
+}
+
+function stripShadowedHeadingAnchor(content: string, anchor: PromptAnchor): string {
+  const escapedEnglish = escapeRegExp(anchor.english.trim());
+  return content
+    .replace(new RegExp(`（${escapedEnglish}（[^）]+））`, "g"), " ")
+    .replace(new RegExp(`（${escapedEnglish}）`, "g"), " ")
+    .replace(/[ ]{2,}/g, " ")
+    .replace(/（\s*）/g, "")
+    .replace(/\s+([：:）])/g, "$1");
+}
+
+function stripRepeatedEnglishSubanchorParentheticals(content: string): string {
+  const stripRepeated = (input: string, pattern: RegExp): string =>
+    input.replace(pattern, (raw: string, englishRaw: string, ...args: unknown[]) => {
+      const offset = typeof args.at(-2) === "number" ? (args.at(-2) as number) : -1;
+      const english = String(englishRaw).trim();
+      if (!english || offset < 0) {
+        return raw;
+      }
+
+      const prefix = input.slice(0, offset);
+      return containsWholePhrase(prefix, english) ? " " : raw;
+    });
+
+  return stripRepeated(
+    stripRepeated(content, /（([A-Za-z][A-Za-z0-9.+/_-]*)（[^（）\n]+））/g),
+    /（([A-Za-z][A-Za-z0-9.+/_-]*)）/g
+  )
+    .replace(/[ ]{2,}/g, " ")
+    .replace(/\s+([：:）])/g, "$1")
+    .trimEnd();
 }
 
 function shouldSkipAnchorInjectionForCommandPhrase(sourceLine: string, anchor: PromptAnchor): boolean {

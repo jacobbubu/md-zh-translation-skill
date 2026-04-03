@@ -263,6 +263,25 @@ test("normalizeHeadingLikeAnchorText skips full english back-reference for opera
   assert.equal(normalized, "**编辑配置：**");
 });
 
+test("normalizeHeadingLikeAnchorText skips shorter child anchors when a longer heading anchor already covers them", () => {
+  const slice = createSlice({
+    requiredAnchors: [
+      createAnchor(
+        "anchor-1",
+        "React/Next.js Web Project Configuration Example",
+        "React/Next.js Web 项目配置示例"
+      ),
+      createAnchor("anchor-2", "Next.js", "Next.js 框架", "nextjs")
+    ]
+  });
+  const source = "## React/Next.js Web Project Configuration Example";
+  const translated = "## React/Next.js（Next.js（框架））Web 项目配置示例";
+
+  const normalized = normalizeHeadingLikeAnchorText(source, translated, slice);
+
+  assert.equal(normalized, "## React/Next.js Web 项目配置示例");
+});
+
 test("injectPlannedAnchorText injects a missing anchor into a heading-like line", () => {
   const slice = createSlice({
     requiredAnchors: [createAnchor("anchor-1", "System File Access", "系统文件访问")]

@@ -3269,6 +3269,51 @@ test("translateMarkdownArticle strips full english back-reference from operation
   assert.match(result.markdown, /\*\*编辑配置：\*\*/);
 });
 
+test("translateMarkdownArticle skips duplicate child anchors inside a composite heading", async () => {
+  const source = [
+    "# Title",
+    "",
+    "## React/Next.js Web Project Configuration Example",
+    "",
+    "Body.",
+    ""
+  ].join("\n");
+
+  const result = await translateMarkdownArticle(source, {
+    executor: {
+      async execute(prompt, options) {
+        if (options.outputSchema && prompt.includes("【分段审校输入】")) {
+          return createExecResult(wrapPerSegmentAudits(prompt, [{ segment_index: 1, audit: createAudit(true) }]));
+        }
+
+        if (options.outputSchema || prompt.includes("只返回 JSON")) {
+          return createExecResult(JSON.stringify(createAudit(true)));
+        }
+
+        const currentTranslation = extractPromptSection(prompt, "【当前译文】");
+        if (currentTranslation !== null) {
+          return createExecResult(currentTranslation);
+        }
+
+        return createExecResult(
+          [
+            "# Title",
+            "",
+            "## React/Next.js（Next.js（框架））Web 项目配置示例",
+            "",
+            "正文。",
+            ""
+          ].join("\n")
+        );
+      }
+    },
+    formatter: async (markdown) => markdown
+  });
+
+  assert.match(result.markdown, /^## React\/Next\.js Web 项目配置示例$/m);
+  assert.doesNotMatch(result.markdown, /Next\.js（Next\.js（框架））/);
+});
+
 test("translateMarkdownArticle restores an ATX heading anchor after repair when must_fix only names the translated heading", async () => {
   const source = [
     "# Title",
