@@ -3225,6 +3225,50 @@ test("translateMarkdownArticle restores a heading-like anchor with a single trai
   assert.match(result.markdown, /\*\*路径（Paths）：\*\*/);
 });
 
+test("translateMarkdownArticle strips full english back-reference from operational headings", async () => {
+  const source = [
+    "# Title",
+    "",
+    "**Edit configuration:**",
+    "",
+    "```\n/config\n```",
+    ""
+  ].join("\n");
+
+  const result = await translateMarkdownArticle(source, {
+    executor: {
+      async execute(prompt, options) {
+        if (options.outputSchema && prompt.includes("【分段审校输入】")) {
+          return createExecResult(wrapPerSegmentAudits(prompt, [{ segment_index: 1, audit: createAudit(true) }]));
+        }
+
+        if (options.outputSchema || prompt.includes("只返回 JSON")) {
+          return createExecResult(JSON.stringify(createAudit(true)));
+        }
+
+        const currentTranslation = extractPromptSection(prompt, "【当前译文】");
+        if (currentTranslation !== null) {
+          return createExecResult(currentTranslation);
+        }
+
+        return createExecResult(
+          [
+            "# Title",
+            "",
+            "**编辑配置（Edit configuration）：**",
+            "",
+            "```\n/config\n```",
+            ""
+          ].join("\n")
+        );
+      }
+    },
+    formatter: async (markdown) => markdown
+  });
+
+  assert.match(result.markdown, /\*\*编辑配置：\*\*/);
+});
+
 test("translateMarkdownArticle restores an ATX heading anchor after repair when must_fix only names the translated heading", async () => {
   const source = [
     "# Title",

@@ -251,6 +251,18 @@ test("normalizeHeadingLikeAnchorText keeps a single trailing colon when restorin
   assert.equal(normalized, "**路径（Paths）：**");
 });
 
+test("normalizeHeadingLikeAnchorText skips full english back-reference for operational headings", () => {
+  const slice = createSlice({
+    requiredAnchors: [createAnchor("anchor-1", "Edit configuration:", "编辑配置")]
+  });
+  const source = "**Edit configuration:**";
+  const translated = "**编辑配置（Edit configuration）：**";
+
+  const normalized = normalizeHeadingLikeAnchorText(source, translated, slice);
+
+  assert.equal(normalized, "**编辑配置：**");
+});
+
 test("injectPlannedAnchorText injects a missing anchor into a heading-like line", () => {
   const slice = createSlice({
     requiredAnchors: [createAnchor("anchor-1", "System File Access", "系统文件访问")]
@@ -375,6 +387,27 @@ test("normalizeExplicitRepairAnchorText keeps a single trailing colon when resto
   const normalized = normalizeExplicitRepairAnchorText(source, translated, slice);
 
   assert.equal(normalized, "**路径（Paths）：**");
+});
+
+test("normalizeExplicitRepairAnchorText strips full english back-reference for operational headings", () => {
+  const slice = createSlice({
+    pendingRepairs: [
+      {
+        repairId: "repair-1",
+        anchorId: null,
+        failureType: "missing_anchor",
+        locationLabel: "分段标题",
+        instruction:
+          "当前分段标题“**编辑配置（Edit configuration）：**”中对通用短语做了整句英文括注；修复目标是去掉这类过宽的英文重复锚定，只保留必要的中文标题表达。"
+      }
+    ]
+  });
+  const source = "**Edit configuration:**";
+  const translated = "**编辑配置（Edit configuration）：**";
+
+  const normalized = normalizeExplicitRepairAnchorText(source, translated, slice);
+
+  assert.equal(normalized, "**编辑配置：**");
 });
 
 test("normalizeExplicitRepairAnchorText falls back to the source ATX heading when the repair target omits english", () => {

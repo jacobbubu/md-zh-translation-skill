@@ -160,28 +160,48 @@ export function normalizeHeadingLikeAnchorText(
   const requiredAnchors = dedupePromptAnchors(slice.requiredAnchors).sort(
     (left, right) => right.english.length - left.english.length
   );
-  if (requiredAnchors.length === 0) {
-    return text;
-  }
-
   const sourceHeadingLines = extractHeadingLikeLines(source);
   const translatedHeadingLines = extractHeadingLikeLines(text);
   if (sourceHeadingLines.length === 0 || translatedHeadingLines.length === 0) {
     return text;
   }
+  const operationalSourceHeadings = sourceHeadingLines
+    .filter((heading) => shouldSkipWholeHeadingAnchorInjectionFromSource(heading.content))
+    .map((heading) => heading.content);
 
   let normalized = text;
+
+  for (const translatedHeading of translatedHeadingLines) {
+    let normalizedLine = translatedHeading.raw;
+
+    for (const operationalHeading of operationalSourceHeadings) {
+      const strippedOperationalLine = stripOperationalHeadingAnchor(normalizedLine, operationalHeading);
+      if (strippedOperationalLine !== normalizedLine) {
+        normalizedLine = strippedOperationalLine;
+        break;
+      }
+    }
+
+    if (normalizedLine !== translatedHeading.raw) {
+      normalized = normalized.replace(translatedHeading.raw, normalizedLine);
+    }
+  }
 
   for (let index = 0; index < Math.min(sourceHeadingLines.length, translatedHeadingLines.length); index += 1) {
     const sourceLine = sourceHeadingLines[index]!;
     const translatedLine = translatedHeadingLines[index]!;
+    let normalizedLine = translatedLine.raw;
+
     const lineAnchors = coalesceSourceLineAnchors(
       requiredAnchors.filter((anchor) => containsSourceAnchorPhrase(sourceLine.content, anchor.english))
     );
 
-    let normalizedLine = translatedLine.raw;
     for (const anchor of lineAnchors) {
       const headingEnglish = normalizeHeadingAnchorEnglishForLine(anchor.english, translatedLine.content);
+      if (shouldSkipWholeHeadingAnchorInjection(sourceLine.content, anchor.english)) {
+        normalizedLine = stripOperationalHeadingAnchor(normalizedLine, headingEnglish);
+        continue;
+      }
       if (
         !anchor.chineseHint ||
         anchor.chineseHint.toLowerCase() === headingEnglish.toLowerCase() ||
@@ -234,6 +254,18 @@ export function normalizeExplicitRepairAnchorText(
     for (const target of targets) {
       const sourceHeading = extractHeadingLikeLine(sourceLine);
       const translatedHeading = extractHeadingLikeLine(translatedLine);
+
+      if (sourceHeading && translatedHeading) {
+        if (shouldSkipWholeHeadingAnchorInjectionFromSource(sourceHeading.content)) {
+          const strippedHeading = stripOperationalHeadingAnchor(translatedHeading.content, sourceHeading.content);
+          if (strippedHeading !== translatedHeading.content) {
+            translatedLine = translatedLine.replace(translatedHeading.content, strippedHeading);
+            changed = true;
+            continue;
+          }
+        }
+      }
+
       const matchingAnchor = resolvePromptAnchorForExplicitRepair(target, slice);
       const english =
         matchingAnchor?.english ??
@@ -243,19 +275,28 @@ export function normalizeExplicitRepairAnchorText(
         continue;
       }
 
-      if (
-        sourceHeading &&
-        translatedHeading &&
-        stripInlineMarkdownMarkers(translatedHeading.content).includes(target.chineseHint)
-      ) {
-        const normalizedHeading =
-          matchingAnchor && translatedHeading.content.includes(matchingAnchor.chineseHint)
-            ? injectAnchorIntoLine(translatedHeading.content, matchingAnchor)
-            : normalizeHeadingRepairContent(translatedHeading.content, english);
-        if (normalizedHeading !== translatedHeading.content) {
-          translatedLine = translatedLine.replace(translatedHeading.content, normalizedHeading);
-          changed = true;
-          continue;
+      if (sourceHeading && translatedHeading) {
+        if (
+          stripInlineMarkdownMarkers(translatedHeading.content).includes(target.chineseHint)
+        ) {
+          if (shouldSkipWholeHeadingAnchorInjection(sourceHeading.content, english)) {
+            const strippedHeading = stripOperationalHeadingAnchor(translatedHeading.content, english);
+            if (strippedHeading !== translatedHeading.content) {
+              translatedLine = translatedLine.replace(translatedHeading.content, strippedHeading);
+              changed = true;
+              continue;
+            }
+          }
+
+          const normalizedHeading =
+            matchingAnchor && translatedHeading.content.includes(matchingAnchor.chineseHint)
+              ? injectAnchorIntoLine(translatedHeading.content, matchingAnchor)
+              : normalizeHeadingRepairContent(translatedHeading.content, english);
+          if (normalizedHeading !== translatedHeading.content) {
+            translatedLine = translatedLine.replace(translatedHeading.content, normalizedHeading);
+            changed = true;
+            continue;
+          }
         }
       }
 
@@ -603,6 +644,7 @@ function parseExplicitRepairTarget(instruction: string): ExplicitRepairTarget | 
   const locationText =
     instruction.match(/位置：[^。；\n“]*“([^”]+)”/)?.[1]?.trim() ??
     instruction.match(/位置：(.+?)。问题[:：]/)?.[1]?.trim() ??
+    instruction.match(/当前(?:分段)?标题“([^”]+)”/)?.[1]?.trim() ??
     instruction.match(/`([^`]+)`/)?.[1]?.trim() ??
     null;
   const chineseHint = locationText
@@ -914,7 +956,8 @@ function normalizeAcronymCompoundParentheses(text: string, display: AnchorDispla
 function normalizeHeadingAnchorEnglishForLine(english: string, translatedHeadingContent: string): string {
   const trimmedEnglish = english.trim();
   const strippedEnglish = trimmedEnglish.replace(/[：:]+$/, "").trim();
-  if (strippedEnglish && strippedEnglish !== trimmedEnglish && /[：:]\s*$/.test(translatedHeadingContent.trim())) {
+  const normalizedHeadingContent = stripInlineMarkdownMarkers(translatedHeadingContent).trim();
+  if (strippedEnglish && strippedEnglish !== trimmedEnglish && /[：:]\s*$/.test(normalizedHeadingContent)) {
     return strippedEnglish;
   }
 
@@ -954,6 +997,64 @@ function injectHeadingEnglishBeforeTrailingColon(content: string, english: strin
   const trailingWhitespace = content.slice(trimmed.length);
   return `${withoutColon}（${english}）${colon}${trailingWhitespace}`;
 }
+
+function shouldSkipWholeHeadingAnchorInjection(sourceHeadingContent: string, english: string): boolean {
+  const normalizedSource = normalizeAnchorEnglishForSourceMatch(stripInlineMarkdownMarkers(sourceHeadingContent));
+  const normalizedEnglish = normalizeAnchorEnglishForSourceMatch(english);
+  if (!normalizedSource || !normalizedEnglish || normalizedSource !== normalizedEnglish) {
+    return false;
+  }
+
+  const firstToken = normalizedSource.split(/\s+/)[0]?.toLowerCase() ?? "";
+  return OPERATIONAL_HEADING_VERBS.has(firstToken);
+}
+
+function shouldSkipWholeHeadingAnchorInjectionFromSource(sourceHeadingContent: string): boolean {
+  const normalizedSource = normalizeAnchorEnglishForSourceMatch(stripInlineMarkdownMarkers(sourceHeadingContent));
+  if (!normalizedSource) {
+    return false;
+  }
+
+  const firstToken = normalizedSource.split(/\s+/)[0]?.toLowerCase() ?? "";
+  return OPERATIONAL_HEADING_VERBS.has(firstToken);
+}
+
+function stripOperationalHeadingAnchor(content: string, english: string): string {
+  const normalizedEnglish = normalizeHeadingAnchorEnglishForLine(english, content);
+  const variants = [normalizedEnglish, english.trim()].filter(Boolean);
+  let normalized = content;
+
+  for (const variant of variants) {
+    const escapedVariant = escapeRegExp(variant);
+    normalized = normalized.replace(new RegExp(`（${escapedVariant}[：:]*）(?=[：:])`, "g"), "");
+    normalized = normalized.replace(new RegExp(`（${escapedVariant}[：:]*）`, "g"), "");
+  }
+
+  return normalized.replace(/[ ]{2,}/g, " ").replace(/：：+/g, "：").replace(/::+/g, ":");
+}
+
+const OPERATIONAL_HEADING_VERBS = new Set([
+  "view",
+  "edit",
+  "disable",
+  "enable",
+  "check",
+  "reset",
+  "show",
+  "list",
+  "configure",
+  "set",
+  "get",
+  "change",
+  "update",
+  "open",
+  "close",
+  "run",
+  "create",
+  "delete",
+  "remove",
+  "install"
+]);
 
 function findMatchingParenIndex(
   text: string,
