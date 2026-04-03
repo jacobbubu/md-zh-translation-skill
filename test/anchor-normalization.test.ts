@@ -133,6 +133,19 @@ test("normalizeSegmentAnchorText strips a trailing repeated english name from an
   assert.equal(normalized, "这些内容默认会被阻止，即使 Claude（Anthropic 的 AI 助手）被指示要访问它们。");
 });
 
+test("normalizeSegmentAnchorText strips embedded repeated english from an english-primary explainer", () => {
+  const slice = createSlice({
+    requiredAnchors: [createAnchor("anchor-1", "claude-code-sandbox", "社区claude-code-sandbox（工具）")]
+  });
+
+  const normalized = normalizeSegmentAnchorText(
+    "**选项 1：claude-code-sandbox（社区claude-code-sandbox（工具））**",
+    slice
+  );
+
+  assert.equal(normalized, "**选项 1：claude-code-sandbox（社区工具）**");
+});
+
 test("normalizeSourceSurfaceAnchorText keeps the source surface form when a longer family variant appears in translation", () => {
   const slice = createSlice({
     requiredAnchors: [createAnchor("anchor-1", "Claude", "Anthropic 的 AI 助手", "claude-family")],
@@ -160,7 +173,11 @@ test("formatAnchorDisplay prefers english-primary formatting for single-token to
   assert.equal(formatAnchorDisplay(createAnchor("anchor-1", "bubblewrap", "安全隔离组件")), "bubblewrap（安全隔离组件）");
   assert.equal(formatAnchorDisplay(createAnchor("anchor-2", "bubblewrap", "bubblewrap 框架")), "bubblewrap（框架）");
   assert.equal(
-    formatAnchorDisplay(createAnchor("anchor-3", "Prompt injection attacks", "提示注入攻击")),
+    formatAnchorDisplay(createAnchor("anchor-3", "claude-code-sandbox", "社区claude-code-sandbox（工具）")),
+    "claude-code-sandbox（社区工具）"
+  );
+  assert.equal(
+    formatAnchorDisplay(createAnchor("anchor-4", "Prompt injection attacks", "提示注入攻击")),
     "提示注入攻击（Prompt injection attacks）"
   );
 });

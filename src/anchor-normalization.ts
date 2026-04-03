@@ -401,6 +401,7 @@ function normalizeSingleAnchor(
       canonical
     );
     normalized = normalized.replace(new RegExp(`${escapedEnglish}（${escapedEnglish}）`, "g"), canonical);
+    normalized = normalizeEmbeddedEnglishPrimaryParentheses(normalized, english, canonical);
 
     if (isRepeatOrEstablished) {
       normalized = normalized.replace(new RegExp(`${escapedEnglish}（${escapedChinese}）`, "g"), english);
@@ -752,7 +753,11 @@ function resolveAnchorDisplay(anchor: AnchorLike): AnchorDisplay {
 
   const strippedEnglishPrefix = stripLeadingEnglishHint(chineseHint, english);
   const strippedEnglishSuffix = stripTrailingEnglishHint(strippedEnglishPrefix ?? chineseHint, english);
-  const chineseDisplay = strippedEnglishSuffix ?? strippedEnglishPrefix ?? chineseHint;
+  const chineseDisplay =
+    sanitizeEnglishPrimaryExplainer(strippedEnglishSuffix ?? strippedEnglishPrefix ?? chineseHint, english) ??
+    strippedEnglishSuffix ??
+    strippedEnglishPrefix ??
+    chineseHint;
   if (shouldPreferEnglishPrimary(english, strippedEnglishPrefix)) {
     return {
       mode: "english-primary",
@@ -793,6 +798,97 @@ function stripTrailingEnglishHint(chineseHint: string, english: string): string 
     .trim();
 
   return prefix.length > 0 ? prefix : null;
+}
+
+function sanitizeEnglishPrimaryExplainer(chineseHint: string, english: string): string | null {
+  const embeddedPattern = new RegExp(escapeRegExp(english), "gi");
+  let normalized = chineseHint.replace(embeddedPattern, "").trim();
+  normalized = normalized
+    .replace(/([^\s（(])（([^（）\n]+)）/gu, "$1$2")
+    .replace(/([^\s(])\(([^()\n]+)\)/g, "$1$2")
+    .replace(/[（(]\s*[）)]/g, "")
+    .replace(/\s{2,}/g, " ")
+    .replace(/^[（(：:，,、\-–—\s]+/u, "")
+    .replace(/[）)：:，,、\-–—\s]+$/u, "")
+    .trim();
+
+  if (!normalized || normalized.toLowerCase() === english.toLowerCase()) {
+    return null;
+  }
+
+  return normalized;
+}
+
+function normalizeEmbeddedEnglishPrimaryParentheses(
+  text: string,
+  english: string,
+  canonical: string
+): string {
+  let cursor = 0;
+  let normalized = text;
+
+  while (cursor < normalized.length) {
+    const start = normalized.indexOf(`${english}（`, cursor);
+    if (start === -1) {
+      break;
+    }
+
+    if (!isWholePhraseBoundary(normalized, start, english.length)) {
+      cursor = start + english.length;
+      continue;
+    }
+
+    const openIndex = start + english.length;
+    const closeIndex = findMatchingParenIndex(normalized, openIndex, "（", "）");
+    if (closeIndex === -1) {
+      cursor = openIndex + 1;
+      continue;
+    }
+
+    const inner = normalized.slice(openIndex + 1, closeIndex).trim();
+    if (inner && inner.toLowerCase().includes(english.toLowerCase())) {
+      normalized = `${normalized.slice(0, start)}${canonical}${normalized.slice(closeIndex + 1)}`;
+      cursor = start + canonical.length;
+      continue;
+    }
+
+    cursor = closeIndex + 1;
+  }
+
+  return normalized;
+}
+
+function findMatchingParenIndex(
+  text: string,
+  openIndex: number,
+  openChar: string,
+  closeChar: string
+): number {
+  let depth = 0;
+
+  for (let index = openIndex; index < text.length; index += 1) {
+    if (text[index] === openChar) {
+      depth += 1;
+      continue;
+    }
+
+    if (text[index] === closeChar) {
+      depth -= 1;
+      if (depth === 0) {
+        return index;
+      }
+    }
+  }
+
+  return -1;
+}
+
+function isWholePhraseBoundary(text: string, start: number, length: number): boolean {
+  const before = start === 0 ? "" : text[start - 1] ?? "";
+  const after = text[start + length] ?? "";
+  const boundaryPattern = /[A-Za-z0-9.+/_-]/;
+
+  return !boundaryPattern.test(before) && !boundaryPattern.test(after);
 }
 
 function shouldPreferEnglishPrimary(english: string, strippedEnglishPrefix: string | null): boolean {
