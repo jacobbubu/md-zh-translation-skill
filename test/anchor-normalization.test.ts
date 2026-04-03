@@ -16,13 +16,15 @@ function createAnchor(
   anchorId: string,
   english: string,
   chineseHint: string,
-  familyId = anchorId
+  familyId = anchorId,
+  displayPolicy: PromptAnchor["displayPolicy"] = "auto"
 ): PromptAnchor {
   return {
     anchorId,
     english,
     chineseHint,
-    familyId
+    familyId,
+    displayPolicy
   };
 }
 
@@ -146,6 +148,32 @@ test("normalizeSegmentAnchorText strips embedded repeated english from an englis
   assert.equal(normalized, "**选项 1：claude-code-sandbox（社区工具）**");
 });
 
+test("normalizeSegmentAnchorText collapses duplicated acronym-compound anchors into a stable canonical form", () => {
+  const slice = createSlice({
+    requiredAnchors: [createAnchor("anchor-1", "SSH keys", "SSH 密钥", "ssh key", "acronym-compound")]
+  });
+
+  const normalized = normalizeSegmentAnchorText(
+    "- Claude，你在读取你的 SSH（SSH）密钥吗？同样需要批准。",
+    slice
+  );
+
+  assert.equal(normalized, "- Claude，你在读取你的 SSH 密钥（SSH keys）吗？同样需要批准。");
+});
+
+test("normalizeSegmentAnchorText collapses nested acronym-compound parentheses into a stable canonical form", () => {
+  const slice = createSlice({
+    requiredAnchors: [createAnchor("anchor-1", "SSH keys", "SSH 密钥", "ssh key", "acronym-compound")]
+  });
+
+  const normalized = normalizeSegmentAnchorText(
+    "- Claude，你在读取你的 SSH（SSH keys）密钥吗？同样需要批准。",
+    slice
+  );
+
+  assert.equal(normalized, "- Claude，你在读取你的 SSH 密钥（SSH keys）吗？同样需要批准。");
+});
+
 test("normalizeSourceSurfaceAnchorText keeps the source surface form when a longer family variant appears in translation", () => {
   const slice = createSlice({
     requiredAnchors: [createAnchor("anchor-1", "Claude", "Anthropic 的 AI 助手", "claude-family")],
@@ -177,7 +205,11 @@ test("formatAnchorDisplay prefers english-primary formatting for single-token to
     "claude-code-sandbox（社区工具）"
   );
   assert.equal(
-    formatAnchorDisplay(createAnchor("anchor-4", "Prompt injection attacks", "提示注入攻击")),
+    formatAnchorDisplay(createAnchor("anchor-4", "SSH keys", "SSH 密钥", "ssh key", "acronym-compound")),
+    "SSH 密钥（SSH keys）"
+  );
+  assert.equal(
+    formatAnchorDisplay(createAnchor("anchor-5", "Prompt injection attacks", "提示注入攻击")),
     "提示注入攻击（Prompt injection attacks）"
   );
 });

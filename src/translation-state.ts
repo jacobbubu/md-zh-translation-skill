@@ -29,6 +29,7 @@ export type SegmentPhase =
   | "failed";
 
 export type AnchorPositionKind = "heading" | "list" | "blockquote" | "lead_in" | "paragraph" | "other";
+export type AnchorDisplayPolicy = "auto" | "acronym-compound";
 
 export type AnchorOccurrence = {
   chunkId: string;
@@ -42,6 +43,7 @@ export type AnchorState = {
   english: string;
   chineseHint: string;
   familyId: string;
+  displayPolicy: AnchorDisplayPolicy;
   requiresBilingual: boolean;
   firstOccurrence: AnchorOccurrence;
   mentionSegmentIds: string[];
@@ -151,6 +153,7 @@ export type AnalysisAnchor = {
   english: string;
   chineseHint: string;
   familyKey: string;
+  displayPolicy?: AnchorDisplayPolicy;
   firstOccurrence: {
     chunkId: string;
     segmentId: string;
@@ -178,18 +181,21 @@ export type PromptSlice = {
     english: string;
     chineseHint: string;
     familyId: string;
+    displayPolicy: AnchorDisplayPolicy;
   }>;
   repeatAnchors: Array<{
     anchorId: string;
     english: string;
     chineseHint: string;
     familyId: string;
+    displayPolicy: AnchorDisplayPolicy;
   }>;
   establishedAnchors: Array<{
     anchorId: string;
     english: string;
     chineseHint: string;
     familyId: string;
+    displayPolicy: AnchorDisplayPolicy;
   }>;
   protectedSpanIds: string[];
   pendingRepairs: Array<{
@@ -436,6 +442,7 @@ function buildAnchorState(
     english: anchor.english.trim(),
     chineseHint: anchor.chineseHint.trim(),
     familyId: anchor.familyKey.trim() || normalizeFamilyKey(anchor.english),
+    displayPolicy: anchor.displayPolicy ?? inferAnchorDisplayPolicy(anchor.english.trim(), anchor.chineseHint.trim()),
     requiresBilingual: true,
     firstOccurrence: {
       chunkId: anchor.firstOccurrence.chunkId,
@@ -453,7 +460,8 @@ function toPromptAnchor(anchor: AnchorState) {
     anchorId: anchor.id,
     english: anchor.english,
     chineseHint: anchor.chineseHint,
-    familyId: anchor.familyId
+    familyId: anchor.familyId,
+    displayPolicy: anchor.displayPolicy
   };
 }
 
@@ -473,6 +481,22 @@ function containsAnchorText(source: string, english: string): boolean {
 
 function normalizeFamilyKey(english: string): string {
   return english.trim().toLowerCase();
+}
+
+function inferAnchorDisplayPolicy(english: string, chineseHint: string): AnchorDisplayPolicy {
+  const englishTokens = english.trim().split(/\s+/).filter(Boolean);
+  const firstEnglishToken = englishTokens[0] ?? "";
+  const acronymPattern = /^[A-Z][A-Z0-9.+/_-]{1,}$/;
+
+  if (
+    englishTokens.length >= 2 &&
+    acronymPattern.test(firstEnglishToken) &&
+    chineseHint.startsWith(firstEnglishToken)
+  ) {
+    return "acronym-compound";
+  }
+
+  return "auto";
 }
 
 function inferPositionKind(segment: SegmentState): AnchorPositionKind {

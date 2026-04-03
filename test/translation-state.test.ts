@@ -202,3 +202,64 @@ test("translation state coalesces a shorter required anchor when a longer same-s
     ["npm registry"]
   );
 });
+
+test("translation state infers acronym-compound display policy for acronym-led anchors", () => {
+  const state = createTranslationRunState({
+    sourcePathHint: "sample.md",
+    documentTitle: "Sample",
+    frontmatterPresent: false,
+    protectedSpans: [],
+    chunks: [
+      {
+        source: "- SSH keys\n- API tokens",
+        separatorAfter: "",
+        headingPath: ["Sample"],
+        segments: [
+          {
+            kind: "translatable",
+            source: "- SSH keys\n- API tokens",
+            separatorAfter: "",
+            spanIds: [],
+            headingHints: [],
+            specialNotes: []
+          }
+        ]
+      }
+    ]
+  });
+
+  const catalog: AnchorCatalog = {
+    anchors: [
+      {
+        english: "SSH keys",
+        chineseHint: "SSH 密钥",
+        familyKey: "ssh key",
+        firstOccurrence: {
+          chunkId: "chunk-1",
+          segmentId: "chunk-1-segment-1"
+        }
+      },
+      {
+        english: "API tokens",
+        chineseHint: "API 令牌",
+        familyKey: "api token",
+        firstOccurrence: {
+          chunkId: "chunk-1",
+          segmentId: "chunk-1-segment-1"
+        }
+      }
+    ],
+    ignoredTerms: []
+  };
+
+  applyAnchorCatalog(state, catalog);
+
+  const slice = buildSegmentTaskSlice(state, "chunk-1", "chunk-1-segment-1");
+  assert.deepEqual(
+    slice.requiredAnchors.map((anchor) => [anchor.english, anchor.displayPolicy]),
+    [
+      ["SSH keys", "acronym-compound"],
+      ["API tokens", "acronym-compound"]
+    ]
+  );
+});

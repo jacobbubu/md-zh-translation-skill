@@ -1,8 +1,8 @@
 import type { PromptSlice } from "./translation-state.js";
 
 export type PromptAnchor = PromptSlice["requiredAnchors"][number];
-type AnchorLike = Pick<PromptAnchor, "english" | "chineseHint">;
-type AnchorDisplayMode = "english-only" | "english-primary" | "chinese-primary";
+type AnchorLike = Pick<PromptAnchor, "english" | "chineseHint" | "displayPolicy">;
+type AnchorDisplayMode = "english-only" | "english-primary" | "chinese-primary" | "acronym-compound";
 type AnchorDisplay = {
   mode: AnchorDisplayMode;
   english: string;
@@ -368,7 +368,7 @@ function normalizeSingleAnchor(
   const escapedEnglish = escapeRegExp(english);
   let normalized = text;
 
-  if (display.mode === "chinese-primary") {
+  if (display.mode === "chinese-primary" || display.mode === "acronym-compound") {
     const escapedChinese = escapeRegExp(chineseHint);
     const canonical = display.canonical;
 
@@ -376,6 +376,9 @@ function normalizeSingleAnchor(
     normalized = normalized.replace(new RegExp(`${escapedEnglish}（${escapedEnglish}）`, "g"), canonical);
     normalized = normalized.replace(new RegExp(`${escapedChinese}（${escapedEnglish}）\\s*（${escapedEnglish}）`, "g"), canonical);
     normalized = normalized.replace(new RegExp(`${escapedChinese}（${escapedChinese}）`, "g"), canonical);
+    if (display.mode === "acronym-compound") {
+      normalized = normalizeAcronymCompoundParentheses(normalized, display);
+    }
 
     if (isRepeatOrEstablished) {
       normalized = normalized.replace(new RegExp(`${escapedChinese}（${escapedEnglish}）`, "g"), chineseHint);
@@ -758,6 +761,15 @@ function resolveAnchorDisplay(anchor: AnchorLike): AnchorDisplay {
     strippedEnglishSuffix ??
     strippedEnglishPrefix ??
     chineseHint;
+  if (anchor.displayPolicy === "acronym-compound") {
+    return {
+      mode: "acronym-compound",
+      english,
+      chineseDisplay: chineseHint,
+      canonical: `${chineseHint}（${english}）`,
+      repeatText: chineseHint
+    };
+  }
   if (shouldPreferEnglishPrimary(english, strippedEnglishPrefix)) {
     return {
       mode: "english-primary",
@@ -858,6 +870,43 @@ function normalizeEmbeddedEnglishPrimaryParentheses(
   return normalized;
 }
 
+function normalizeAcronymCompoundParentheses(text: string, display: AnchorDisplay): string {
+  const acronym = getLeadingAcronymToken(display.english);
+  if (!acronym) {
+    return text;
+  }
+
+  const chineseRemainder = stripLeadingAcronymFromChinese(display.chineseDisplay, acronym);
+  if (!chineseRemainder) {
+    return text;
+  }
+
+  const escapedAcronym = escapeRegExp(acronym);
+  const escapedChineseRemainder = escapeRegExp(chineseRemainder);
+  const escapedEnglish = escapeRegExp(display.english);
+  const canonical = display.canonical;
+  let normalized = text;
+
+  normalized = normalized.replace(
+    new RegExp(`${escapedAcronym}（${escapedAcronym}）\\s*${escapedChineseRemainder}`, "g"),
+    canonical
+  );
+  normalized = normalized.replace(
+    new RegExp(`${escapedAcronym}（${escapedEnglish}）\\s*${escapedChineseRemainder}`, "g"),
+    canonical
+  );
+  normalized = normalized.replace(
+    new RegExp(`${escapedAcronym}（${escapedAcronym}）\\s*${escapedChineseRemainder}（${escapedEnglish}）`, "g"),
+    canonical
+  );
+  normalized = normalized.replace(
+    new RegExp(`${escapeRegExp(display.chineseDisplay)}（${escapedAcronym}）`, "g"),
+    canonical
+  );
+
+  return normalized;
+}
+
 function findMatchingParenIndex(
   text: string,
   openIndex: number,
@@ -889,6 +938,24 @@ function isWholePhraseBoundary(text: string, start: number, length: number): boo
   const boundaryPattern = /[A-Za-z0-9.+/_-]/;
 
   return !boundaryPattern.test(before) && !boundaryPattern.test(after);
+}
+
+function getLeadingAcronymToken(english: string): string | null {
+  const [firstToken] = english.trim().split(/\s+/);
+  if (!firstToken) {
+    return null;
+  }
+
+  return /^[A-Z][A-Z0-9.+/_-]{1,}$/.test(firstToken) ? firstToken : null;
+}
+
+function stripLeadingAcronymFromChinese(chineseHint: string, acronym: string): string | null {
+  if (!chineseHint.startsWith(acronym)) {
+    return null;
+  }
+
+  const remainder = chineseHint.slice(acronym.length).trim();
+  return remainder.length > 0 ? remainder : null;
 }
 
 function shouldPreferEnglishPrimary(english: string, strippedEnglishPrefix: string | null): boolean {
