@@ -2,8 +2,12 @@ import type { PromptSlice } from "./translation-state.js";
 
 export type PromptAnchor = PromptSlice["requiredAnchors"][number];
 type AnchorLike = Pick<PromptAnchor, "english" | "chineseHint" | "displayPolicy">;
-type AnchorDisplayMode = "english-only" | "english-primary" | "chinese-primary" | "acronym-compound";
-type AnchorDisplay = {
+export type AnchorDisplayMode =
+  | "english-only"
+  | "english-primary"
+  | "chinese-primary"
+  | "acronym-compound";
+export type AnchorDisplay = {
   mode: AnchorDisplayMode;
   english: string;
   chineseDisplay: string;
@@ -17,6 +21,39 @@ export function coalesceRequiredAnchors(requiredAnchors: readonly PromptAnchor[]
 
 export function formatAnchorDisplay(anchor: AnchorLike): string {
   return resolveAnchorDisplay(anchor).canonical;
+}
+
+export function describeAnchorDisplay(anchor: AnchorLike): AnchorDisplay {
+  return resolveAnchorDisplay(anchor);
+}
+
+export function listAllowedAnchorDisplays(anchor: AnchorLike): string[] {
+  const display = resolveAnchorDisplay(anchor);
+  const allowed = new Set<string>();
+
+  if (display.canonical) {
+    allowed.add(display.canonical);
+  }
+
+  if (display.mode === "english-only" && display.english) {
+    allowed.add(display.english);
+  }
+
+  return [...allowed];
+}
+
+export function lineSatisfiesAnchorDisplay(text: string, anchor: AnchorLike): boolean {
+  const allowedDisplays = listAllowedAnchorDisplays(anchor);
+  if (allowedDisplays.some((display) => display && text.includes(display))) {
+    return true;
+  }
+
+  const display = resolveAnchorDisplay(anchor);
+  if (display.mode === "english-only" && display.english) {
+    return containsWholePhrase(text, display.english);
+  }
+
+  return false;
 }
 
 export function normalizeSegmentAnchorText(text: string, slice: PromptSlice | null): string {

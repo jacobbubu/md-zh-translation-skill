@@ -263,3 +263,49 @@ test("translation state infers acronym-compound display policy for acronym-led a
     ]
   );
 });
+
+test("translation state exposes canonical display metadata for english-primary anchors", () => {
+  const state = createTranslationRunState({
+    sourcePathHint: "sample.md",
+    documentTitle: "Sample",
+    frontmatterPresent: false,
+    protectedSpans: [],
+    chunks: [
+      {
+        source: "Filesystem permissions control what Claude can access.",
+        separatorAfter: "",
+        headingPath: ["Sample"],
+        segments: [
+          {
+            kind: "translatable",
+            source: "Filesystem permissions control what Claude can access.",
+            separatorAfter: "",
+            spanIds: [],
+            headingHints: [],
+            specialNotes: []
+          }
+        ]
+      }
+    ]
+  });
+
+  applyAnchorCatalog(state, {
+    anchors: [
+      {
+        english: "Claude",
+        chineseHint: "Anthropic 的 AI 助手",
+        familyKey: "claude-family",
+        firstOccurrence: {
+          chunkId: "chunk-1",
+          segmentId: "chunk-1-segment-1"
+        }
+      }
+    ],
+    ignoredTerms: []
+  });
+
+  const slice = buildSegmentTaskSlice(state, "chunk-1", "chunk-1-segment-1");
+  assert.equal(slice.requiredAnchors[0]?.displayMode, "english-primary");
+  assert.equal(slice.requiredAnchors[0]?.canonicalDisplay, "Claude（Anthropic 的 AI 助手）");
+  assert.deepEqual(slice.requiredAnchors[0]?.allowedDisplayForms, ["Claude（Anthropic 的 AI 助手）"]);
+});

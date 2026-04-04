@@ -1,5 +1,10 @@
 import type { ProtectedSpan } from "./markdown-protection.js";
-import { coalesceRequiredAnchors } from "./anchor-normalization.js";
+import {
+  coalesceRequiredAnchors,
+  describeAnchorDisplay,
+  listAllowedAnchorDisplays,
+  type AnchorDisplayMode
+} from "./anchor-normalization.js";
 
 export type AuditCheckKey =
   | "paragraph_match"
@@ -182,6 +187,9 @@ export type PromptSlice = {
     chineseHint: string;
     familyId: string;
     displayPolicy: AnchorDisplayPolicy;
+    displayMode?: AnchorDisplayMode;
+    canonicalDisplay?: string;
+    allowedDisplayForms?: string[];
   }>;
   repeatAnchors: Array<{
     anchorId: string;
@@ -189,6 +197,9 @@ export type PromptSlice = {
     chineseHint: string;
     familyId: string;
     displayPolicy: AnchorDisplayPolicy;
+    displayMode?: AnchorDisplayMode;
+    canonicalDisplay?: string;
+    allowedDisplayForms?: string[];
   }>;
   establishedAnchors: Array<{
     anchorId: string;
@@ -196,6 +207,9 @@ export type PromptSlice = {
     chineseHint: string;
     familyId: string;
     displayPolicy: AnchorDisplayPolicy;
+    displayMode?: AnchorDisplayMode;
+    canonicalDisplay?: string;
+    allowedDisplayForms?: string[];
   }>;
   protectedSpanIds: string[];
   pendingRepairs: Array<{
@@ -456,12 +470,16 @@ function buildAnchorState(
 }
 
 function toPromptAnchor(anchor: AnchorState) {
+  const display = describeAnchorDisplay(anchor);
   return {
     anchorId: anchor.id,
     english: anchor.english,
     chineseHint: anchor.chineseHint,
     familyId: anchor.familyId,
-    displayPolicy: anchor.displayPolicy
+    displayPolicy: anchor.displayPolicy,
+    displayMode: display.mode,
+    canonicalDisplay: display.canonical,
+    allowedDisplayForms: listAllowedAnchorDisplays(anchor)
   };
 }
 

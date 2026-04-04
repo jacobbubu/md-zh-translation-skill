@@ -11,8 +11,10 @@ import {
 } from "./internal/prompts/scheme-h.js";
 import { DefaultCodexExecutor, type CodexExecutor } from "./codex-exec.js";
 import {
+  describeAnchorDisplay,
   formatAnchorDisplay,
   injectPlannedAnchorText,
+  lineSatisfiesAnchorDisplay,
   normalizeExplicitRepairAnchorText,
   normalizeHeadingLikeAnchorText,
   normalizeSourceSurfaceAnchorText,
@@ -684,7 +686,9 @@ type DraftedSegmentState = {
 };
 
 function summarizePromptAnchor(anchor: PromptSlice["requiredAnchors"][number]): string {
-  return formatAnchorDisplay(anchor) || "未定中文";
+  const canonical = anchor.canonicalDisplay ?? formatAnchorDisplay(anchor);
+  const mode = anchor.displayMode ?? describeAnchorDisplay(anchor).mode;
+  return `${canonical || "未定中文"} [display=${mode}]`;
 }
 
 function buildSegmentPromptContext(
@@ -909,6 +913,15 @@ function inferRepairTargetEnglish(
   return null;
 }
 
+function extractExplicitRepairLocationText(instruction: string): string | null {
+  return (
+    instruction.match(/位置：[^。\n]*“([^”]+)”/)?.[1]?.trim() ??
+    instruction.match(/当前(?:分段)?标题“([^”]+)”/)?.[1]?.trim() ??
+    instruction.match(/`([^`]+)`/)?.[1]?.trim() ??
+    null
+  );
+}
+
 function buildStructuredSegmentAuditResult(
   state: TranslationRunState,
   draftedSegment: DraftedSegmentState,
@@ -946,9 +959,51 @@ function suppressCoveredAnchorMustFix(
   }
 
   const remainingMustFix = audit.must_fix.filter((instruction) => {
+    const anchors = [...slice.requiredAnchors, ...slice.repeatAnchors, ...slice.establishedAnchors];
+    const explicitLocationText = extractExplicitRepairLocationText(instruction);
+    if (inferRepairFailureType(audit, instruction) === "missing_anchor") {
+      const anchorId = inferRepairAnchorId(slice, draftedSegment.segment.source, instruction);
+      if (anchorId) {
+        const anchor = anchors.find((item) => item.anchorId === anchorId);
+        if (anchor && isAnchorDisplayAlreadySatisfied(draftedSegment, anchor)) {
+          return false;
+        }
+        if (
+          anchor &&
+          explicitLocationText &&
+          draftedSegment.restoredBody.includes(explicitLocationText) &&
+          lineSatisfiesAnchorDisplay(explicitLocationText, anchor)
+        ) {
+          return false;
+        }
+      }
+    }
+
     const targetEnglish = inferRepairTargetEnglish(slice, draftedSegment.segment.source, instruction);
     if (!targetEnglish) {
       return true;
+    }
+
+    if (
+      inferRepairFailureType(audit, instruction) === "missing_anchor" &&
+      explicitLocationText &&
+      draftedSegment.restoredBody.includes(explicitLocationText) &&
+      hasNonDuplicateBilingualLocationText(explicitLocationText, targetEnglish)
+    ) {
+      return false;
+    }
+
+    const matchedAnchor = anchors.find(
+      (anchor) =>
+        containsWholePhraseInText(targetEnglish, anchor.english) ||
+        containsWholePhraseInText(anchor.english, targetEnglish)
+    );
+    if (
+      inferRepairFailureType(audit, instruction) === "missing_anchor" &&
+      matchedAnchor &&
+      isAnchorDisplayAlreadySatisfied(draftedSegment, matchedAnchor)
+    ) {
+      return false;
     }
 
     return !isAnchorCoveredByLongerPhraseInSameLocation(draftedSegment, targetEnglish);
@@ -967,6 +1022,44 @@ function suppressCoveredAnchorMustFix(
     hard_checks: nextHardChecks,
     must_fix: remainingMustFix
   };
+}
+
+function isAnchorDisplayAlreadySatisfied(
+  draftedSegment: DraftedSegmentState,
+  anchor: PromptSlice["requiredAnchors"][number]
+): boolean {
+  const sourceLines = draftedSegment.segment.source.split(/\r?\n/);
+  const translatedLines = draftedSegment.restoredBody.split(/\r?\n/);
+  const firstRelevantIndex = sourceLines.findIndex((line) => lineContainsAnchorSourcePhrase(line, anchor.english));
+
+  if (firstRelevantIndex === -1) {
+    return false;
+  }
+
+  const translatedLine = translatedLines[firstRelevantIndex] ?? "";
+  return lineSatisfiesAnchorDisplay(translatedLine, anchor);
+}
+
+function lineContainsAnchorSourcePhrase(sourceLine: string, english: string): boolean {
+  if (containsWholePhraseInText(sourceLine, english)) {
+    return true;
+  }
+
+  const normalizedEnglish = english.trim().replace(/[：:]+$/, "").trim();
+  return normalizedEnglish.length > 0 && normalizedEnglish !== english && containsWholePhraseInText(sourceLine, normalizedEnglish);
+}
+
+function hasNonDuplicateBilingualLocationText(locationText: string, english: string): boolean {
+  if (!containsWholePhraseInText(locationText, english)) {
+    return false;
+  }
+
+  const inner = locationText.match(/（([^）]+)）/)?.[1]?.trim();
+  if (!inner) {
+    return false;
+  }
+
+  return inner.toLowerCase() !== english.trim().toLowerCase();
 }
 
 function isAnchorCoveredByLongerPhraseInSameLocation(
@@ -2683,6 +2776,7 @@ function withChunkContextAt(prompt: string, context: ChunkPromptContext, marker:
     stateSliceJson,
     "说明：当前输入只覆盖全文的一部分。请保持术语、专名、语气和上下文的一致性，不要补写未出现在当前分块中的段落。",
     "requiredAnchors 表示：这些专名、产品名、项目名或关键术语必须在当前分段本身建立首现双语锚点。",
+    "如果 stateSlice.requiredAnchors 给出了 canonicalDisplay 或 allowedDisplayForms，则这些形式就是当前分段可接受的合法锚定结果；像“Claude（Anthropic 的 AI 助手）”这类英文原名（中文说明）形式，视为已经完成首现锚定，不得再按“缺少英文对照”判错。",
     "repeatAnchors 表示：这些项目已经在全文前文完成首现锚定，即使它们在当前分块标题、加粗标题、列表项标题或正文里是本块第一次出现，也不得再补首现中英文对照。",
     "pendingRepairs 表示：这些修复任务已经绑定到当前分段，修复时必须就地完成，不要把锚点挪到别处。",
     "如果当前分段标题、加粗标题、列表项标题里包含冒号、括号限定语、枚举标签或英文补充说明，翻译时必须完整保留这些信息，不要只保留其中一部分。"

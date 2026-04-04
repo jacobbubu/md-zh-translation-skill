@@ -2452,6 +2452,66 @@ test("translateMarkdownArticle keeps the source surface form when Claude and Cla
   assert.doesNotMatch(result.markdown, /Claude Code（Claude）/);
 });
 
+test("translateMarkdownArticle exposes english-primary canonical displays in prompt context", async () => {
+  const source = [
+    "# Title",
+    "",
+    "Filesystem permissions control what Claude can access.",
+    "",
+    "Get this wrong and either security fails or Claude can’t work."
+  ].join("\n");
+
+  class ClaudeCanonicalAuditExecutor extends PromptAwareExecutor {
+    override async execute(prompt: string, options: CodexExecOptions): Promise<CodexExecResult> {
+      this.prompts.push(prompt);
+
+      if (isDocumentAnalysisPrompt(prompt)) {
+        return createExecResult(
+          createAnchorCatalog([
+            {
+              english: "Claude",
+              chineseHint: "Anthropic 的 AI 助手",
+              familyKey: "claude-family"
+            }
+          ])
+        );
+      }
+
+      if (options.outputSchema || prompt.includes("只返回 JSON")) {
+        return createExecResult(wrapAuditForSegments(prompt, createAudit(true)));
+      }
+
+      const currentTranslation = extractPromptSection(prompt, "【当前译文】");
+      if (currentTranslation !== null) {
+        return createExecResult(currentTranslation);
+      }
+
+      return createExecResult([
+        "# 标题",
+        "",
+        "文件系统权限决定了 Claude（Anthropic 的 AI 助手）可以访问什么。",
+        "",
+        "这里一旦配置错误，要么安全性失效，要么 Claude 无法正常工作。"
+      ].join("\n"));
+    }
+  }
+
+  const executor = new ClaudeCanonicalAuditExecutor();
+  const result = await translateMarkdownArticle(source, {
+    executor,
+    formatter: async (markdown) => markdown
+  });
+
+  assert.match(result.markdown, /Claude（Anthropic 的 AI 助手）可以访问什么/);
+  const draftPrompt = executor.prompts.find(
+    (prompt) => !isDocumentAnalysisPrompt(prompt) && !prompt.includes("只返回 JSON")
+  );
+  assert.ok(draftPrompt);
+  assert.match(draftPrompt, /Claude（Anthropic 的 AI 助手） \[display=english-primary]/);
+  assert.match(draftPrompt, /"canonicalDisplay": "Claude（Anthropic 的 AI 助手）"/);
+  assert.match(draftPrompt, /"allowedDisplayForms": \[\s*"Claude（Anthropic 的 AI 助手）"\s*]/);
+});
+
 test("translateMarkdownArticle tells repair when the same anchor is still missing in multiple locations", async () => {
   const source = [
     "## So, What Do AI Agents Need?",
