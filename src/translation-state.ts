@@ -187,6 +187,7 @@ export type PromptSlice = {
     chineseHint: string;
     familyId: string;
     displayPolicy: AnchorDisplayPolicy;
+    allowRepeatText?: boolean;
     displayMode?: AnchorDisplayMode;
     canonicalDisplay?: string;
     allowedDisplayForms?: string[];
@@ -197,6 +198,7 @@ export type PromptSlice = {
     chineseHint: string;
     familyId: string;
     displayPolicy: AnchorDisplayPolicy;
+    allowRepeatText?: boolean;
     displayMode?: AnchorDisplayMode;
     canonicalDisplay?: string;
     allowedDisplayForms?: string[];
@@ -207,6 +209,7 @@ export type PromptSlice = {
     chineseHint: string;
     familyId: string;
     displayPolicy: AnchorDisplayPolicy;
+    allowRepeatText?: boolean;
     displayMode?: AnchorDisplayMode;
     canonicalDisplay?: string;
     allowedDisplayForms?: string[];
@@ -320,14 +323,14 @@ export function buildSegmentTaskSlice(
   const requiredAnchors = coalesceRequiredAnchors(
     mentionedAnchors
     .filter((anchor) => anchor.firstOccurrence.segmentId === segmentId)
-    .map(toPromptAnchor)
+    .map((anchor) => toPromptAnchor(anchor, false))
   );
   const repeatAnchors = mentionedAnchors
     .filter((anchor) => anchor.firstOccurrence.order < segment.order)
-    .map(toPromptAnchor);
+    .map((anchor) => toPromptAnchor(anchor, true));
   const establishedAnchors = state.anchors
     .filter((anchor) => anchor.status === "established" && anchor.firstOccurrence.order < segment.order)
-    .map(toPromptAnchor)
+    .map((anchor) => toPromptAnchor(anchor, true))
     .slice(0, 24);
   const pendingRepairs = state.repairs
     .filter((task) => task.segmentId === segmentId && task.status === "pending")
@@ -469,7 +472,7 @@ function buildAnchorState(
   };
 }
 
-function toPromptAnchor(anchor: AnchorState) {
+function toPromptAnchor(anchor: AnchorState, allowRepeatText: boolean) {
   const display = describeAnchorDisplay(anchor);
   return {
     anchorId: anchor.id,
@@ -477,9 +480,13 @@ function toPromptAnchor(anchor: AnchorState) {
     chineseHint: anchor.chineseHint,
     familyId: anchor.familyId,
     displayPolicy: anchor.displayPolicy,
+    allowRepeatText,
     displayMode: display.mode,
     canonicalDisplay: display.canonical,
-    allowedDisplayForms: listAllowedAnchorDisplays(anchor)
+    allowedDisplayForms: listAllowedAnchorDisplays({
+      ...anchor,
+      allowRepeatText
+    })
   };
 }
 

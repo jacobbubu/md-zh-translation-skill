@@ -309,3 +309,74 @@ test("translation state exposes canonical display metadata for english-primary a
   assert.equal(slice.requiredAnchors[0]?.canonicalDisplay, "Claude（Anthropic 的 AI 助手）");
   assert.deepEqual(slice.requiredAnchors[0]?.allowedDisplayForms, ["Claude（Anthropic 的 AI 助手）"]);
 });
+
+test("translation state allows bare repeat text for established english-primary anchors", () => {
+  const state = createTranslationRunState({
+    sourcePathHint: "sample.md",
+    documentTitle: "Sample",
+    frontmatterPresent: false,
+    protectedSpans: [],
+    chunks: [
+      {
+        source: "Claude can access files.\n\n- When Claude tries to access a file.\n- When Claude attempts a network request.",
+        separatorAfter: "",
+        headingPath: ["Sample"],
+        segments: [
+          {
+            kind: "translatable",
+            source: "Claude can access files.",
+            separatorAfter: "\n\n",
+            spanIds: [],
+            headingHints: [],
+            specialNotes: []
+          },
+          {
+            kind: "translatable",
+            source: "- When Claude tries to access a file.\n- When Claude attempts a network request.",
+            separatorAfter: "",
+            spanIds: [],
+            headingHints: [],
+            specialNotes: []
+          }
+        ]
+      }
+    ]
+  });
+
+  applyAnchorCatalog(state, {
+    anchors: [
+      {
+        english: "Claude",
+        chineseHint: "Anthropic 的 AI 助手",
+        familyKey: "claude-family",
+        firstOccurrence: {
+          chunkId: "chunk-1",
+          segmentId: "chunk-1-segment-1"
+        }
+      }
+    ],
+    ignoredTerms: []
+  });
+
+  applySegmentAudit(state, {
+    segmentId: "chunk-1-segment-1",
+    hardChecks: {
+      paragraph_match: { pass: true, problem: "" },
+      first_mention_bilingual: { pass: true, problem: "" },
+      numbers_units_logic: { pass: true, problem: "" },
+      chinese_punctuation: { pass: true, problem: "" },
+      unit_conversion_boundary: { pass: true, problem: "" },
+      protected_span_integrity: { pass: true, problem: "" }
+    },
+    repairTasks: [],
+    rawMustFix: []
+  });
+
+  const slice = buildSegmentTaskSlice(state, "chunk-1", "chunk-1-segment-2");
+  assert.equal(slice.repeatAnchors[0]?.displayMode, "english-primary");
+  assert.equal(slice.repeatAnchors[0]?.canonicalDisplay, "Claude（Anthropic 的 AI 助手）");
+  assert.deepEqual(slice.repeatAnchors[0]?.allowedDisplayForms, [
+    "Claude（Anthropic 的 AI 助手）",
+    "Claude"
+  ]);
+});

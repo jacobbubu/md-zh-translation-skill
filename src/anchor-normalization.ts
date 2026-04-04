@@ -1,7 +1,9 @@
 import type { PromptSlice } from "./translation-state.js";
 
 export type PromptAnchor = PromptSlice["requiredAnchors"][number];
-type AnchorLike = Pick<PromptAnchor, "english" | "chineseHint" | "displayPolicy">;
+type AnchorLike = Pick<PromptAnchor, "english" | "chineseHint" | "displayPolicy"> & {
+  allowRepeatText?: boolean;
+};
 export type AnchorDisplayMode =
   | "english-only"
   | "english-primary"
@@ -33,6 +35,10 @@ export function listAllowedAnchorDisplays(anchor: AnchorLike): string[] {
 
   if (display.canonical) {
     allowed.add(display.canonical);
+  }
+
+  if ((display.mode === "english-only" || anchor.allowRepeatText) && display.repeatText) {
+    allowed.add(display.repeatText);
   }
 
   if (display.mode === "english-only" && display.english) {
