@@ -34,7 +34,12 @@ export type SegmentPhase =
   | "failed";
 
 export type AnchorPositionKind = "heading" | "list" | "blockquote" | "lead_in" | "paragraph" | "other";
-export type AnchorDisplayPolicy = "auto" | "acronym-compound";
+export type AnchorDisplayPolicy =
+  | "auto"
+  | "acronym-compound"
+  | "english-only"
+  | "english-primary"
+  | "chinese-primary";
 
 export type AnchorOccurrence = {
   chunkId: string;
@@ -48,6 +53,7 @@ export type AnchorState = {
   english: string;
   chineseHint: string;
   familyId: string;
+  sourceForms: string[];
   displayPolicy: AnchorDisplayPolicy;
   requiresBilingual: boolean;
   firstOccurrence: AnchorOccurrence;
@@ -159,6 +165,7 @@ export type AnalysisAnchor = {
   chineseHint: string;
   familyKey: string;
   displayPolicy?: AnchorDisplayPolicy;
+  sourceForms?: string[];
   firstOccurrence: {
     chunkId: string;
     segmentId: string;
@@ -186,6 +193,7 @@ export type PromptSlice = {
     english: string;
     chineseHint: string;
     familyId: string;
+    requiresBilingual: boolean;
     displayPolicy: AnchorDisplayPolicy;
     allowRepeatText?: boolean;
     displayMode?: AnchorDisplayMode;
@@ -197,6 +205,7 @@ export type PromptSlice = {
     english: string;
     chineseHint: string;
     familyId: string;
+    requiresBilingual: boolean;
     displayPolicy: AnchorDisplayPolicy;
     allowRepeatText?: boolean;
     displayMode?: AnchorDisplayMode;
@@ -208,6 +217,7 @@ export type PromptSlice = {
     english: string;
     chineseHint: string;
     familyId: string;
+    requiresBilingual: boolean;
     displayPolicy: AnchorDisplayPolicy;
     allowRepeatText?: boolean;
     displayMode?: AnchorDisplayMode;
@@ -451,7 +461,11 @@ function buildAnchorState(
   }
 
   const mentionSegmentIds = state.segments
-    .filter((segment) => segment.kind === "translatable" && containsAnchorText(segment.source, anchor.english))
+    .filter(
+      (segment) =>
+        segment.kind === "translatable" &&
+        containsAnyAnchorText(segment.source, anchor.sourceForms ?? [anchor.english])
+    )
     .map((segment) => segment.id);
 
   return {
@@ -459,8 +473,11 @@ function buildAnchorState(
     english: anchor.english.trim(),
     chineseHint: anchor.chineseHint.trim(),
     familyId: anchor.familyKey.trim() || normalizeFamilyKey(anchor.english),
+    sourceForms: (anchor.sourceForms ?? [anchor.english]).map((item) => item.trim()).filter(Boolean),
     displayPolicy: anchor.displayPolicy ?? inferAnchorDisplayPolicy(anchor.english.trim(), anchor.chineseHint.trim()),
-    requiresBilingual: true,
+    requiresBilingual:
+      (anchor.displayPolicy ?? inferAnchorDisplayPolicy(anchor.english.trim(), anchor.chineseHint.trim())) !==
+      "english-only",
     firstOccurrence: {
       chunkId: anchor.firstOccurrence.chunkId,
       segmentId: anchor.firstOccurrence.segmentId,
@@ -479,6 +496,7 @@ function toPromptAnchor(anchor: AnchorState, allowRepeatText: boolean) {
     english: anchor.english,
     chineseHint: anchor.chineseHint,
     familyId: anchor.familyId,
+    requiresBilingual: anchor.requiresBilingual,
     displayPolicy: anchor.displayPolicy,
     allowRepeatText,
     displayMode: display.mode,
@@ -499,9 +517,15 @@ function markAnchorsEstablished(state: TranslationRunState, segmentId: string): 
 }
 
 function containsAnchorText(source: string, english: string): boolean {
+  return containsAnyAnchorText(source, [english]);
+}
+
+function containsAnyAnchorText(source: string, forms: readonly string[]): boolean {
   const normalizedSource = source.toLowerCase();
-  const normalizedEnglish = english.trim().toLowerCase();
-  return normalizedEnglish.length > 0 && normalizedSource.includes(normalizedEnglish);
+  return forms.some((form) => {
+    const normalizedForm = form.trim().toLowerCase();
+    return normalizedForm.length > 0 && normalizedSource.includes(normalizedForm);
+  });
 }
 
 function normalizeFamilyKey(english: string): string {

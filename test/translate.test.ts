@@ -7,11 +7,25 @@ import path from "node:path";
 import { HardGateError } from "../src/errors.js";
 import { planMarkdownChunks } from "../src/markdown-chunks.js";
 import { extractFrontmatter, protectMarkdownSpans } from "../src/markdown-protection.js";
-import { parseGateAudit, translateMarkdownArticle, type GateAudit } from "../src/translate.js";
+import {
+  buildRepairPromptContextForTest,
+  parseGateAudit,
+  translateMarkdownArticle,
+  type ChunkPromptContext,
+  type GateAudit
+} from "../src/translate.js";
 import type { CodexExecOptions, CodexExecResult, CodexExecutor } from "../src/codex-exec.js";
 
 function isDocumentAnalysisPrompt(prompt: string): boolean {
   return prompt.includes("【文档分析输入】");
+}
+
+function isBundledAuditPrompt(prompt: string, options: CodexExecOptions): boolean {
+  return Boolean(
+    options.outputSchema &&
+      (prompt.includes("【分段审校输入】") ||
+        prompt.includes("请检查下面按 segment 编号提供的英文原文与当前译文"))
+  );
 }
 
 function createEmptyAnchorCatalog(): string {
@@ -241,6 +255,26 @@ function extractPromptSection(prompt: string, label: string): string | null {
   }
 
   return prompt.slice(contentStart, contentStart + nextLabelIndex);
+}
+
+function createMinimalChunkPromptContext(
+  overrides: Partial<ChunkPromptContext> = {}
+): ChunkPromptContext {
+  return {
+    documentTitle: "Title",
+    headingPath: ["Title"],
+    chunkIndex: 1,
+    chunkCount: 1,
+    sourcePathHint: "article.md",
+    segmentHeadings: [],
+    requiredAnchors: [],
+    repeatAnchors: [],
+    establishedAnchors: [],
+    pendingRepairs: [],
+    specialNotes: [],
+    stateSlice: null,
+    ...overrides
+  };
 }
 
 test("parseGateAudit accepts fenced JSON output", () => {
@@ -1877,7 +1911,7 @@ test("translateMarkdownArticle repeats list-item repair guidance when must_fix t
           );
         }
 
-        if (options.outputSchema && prompt.includes("【分段审校输入】")) {
+        if (isBundledAuditPrompt(prompt, options)) {
           return createExecResult(
             wrapPerSegmentAudits(prompt, [
               {
@@ -1954,7 +1988,7 @@ test("translateMarkdownArticle repeats list-lead-in repair guidance when must_fi
           );
         }
 
-        if (options.outputSchema && prompt.includes("【分段审校输入】")) {
+        if (isBundledAuditPrompt(prompt, options)) {
           return createExecResult(
             wrapPerSegmentAudits(prompt, [
               {
@@ -1996,76 +2030,17 @@ test("translateMarkdownArticle repeats list-lead-in repair guidance when must_fi
 });
 
 test("translateMarkdownArticle repeats in-sentence repair guidance when must_fix targets the current sentence", async () => {
-  const source = [
-    "# Title",
-    "",
-    "## Section",
-    "",
-    "But you need to understand what kind of access your Claude Code AI agents need so that you can understand why you need the sandboxes.",
-    ""
-  ].join("\n");
-
-  const executor = new PromptAwareExecutor();
-  await translateMarkdownArticle(source, {
-    executor: {
-      async execute(prompt, options) {
-        executor.prompts.push(prompt);
-
-        if (isDocumentAnalysisPrompt(prompt)) {
-          return createExecResult(
-            createAnchorCatalog([
-              {
-                english: "autonomous coding",
-                chineseHint: "自主编码",
-                familyKey: "autonomous-coding"
-              },
-              {
-                english: "autonomous coding agents",
-                chineseHint: "自主编码代理",
-                familyKey: "autonomous-coding"
-              }
-            ])
-          );
-        }
-
-        if (options.outputSchema && prompt.includes("【分段审校输入】")) {
-          return createExecResult(
-            wrapPerSegmentAudits(prompt, [
-              {
-                segment_index: 1,
-                audit: createAudit(false, [
-                  "当前句“But you need to understand what kind of access your Claude Code AI agents need so that you can understand why you need the sandboxes.”中，首次出现的“sandboxes”未补中英对照；需在该处补成中文+英文首现锚定。"
-                ])
-              }
-            ])
-          );
-        }
-
-        if (options.outputSchema || prompt.includes("只返回 JSON")) {
-          return createExecResult(JSON.stringify(createAudit(true)));
-        }
-
-        const currentTranslation = extractPromptSection(prompt, "【当前译文】");
-        if (currentTranslation !== null) {
-          return createExecResult(currentTranslation);
-        }
-
-        const sourceSection = extractPromptSection(prompt, "【英文原文】");
-        return createExecResult(sourceSection ?? "");
-      }
-    },
-    formatter: async (markdown) => markdown
-  });
-
-  const repairPrompt = executor.prompts.find(
-    (item) =>
-      item.includes("【must_fix】") &&
-      item.includes("当前句“But you need to understand what kind of access your Claude Code AI agents need")
+  const context = buildRepairPromptContextForTest(
+    createMinimalChunkPromptContext(),
+    [
+      "当前句“But you need to understand what kind of access your Claude Code AI agents need so that you can understand why you need the sandboxes.”中，首次出现的“sandboxes”未补中英对照；需在该处补成中文+英文首现锚定。"
+    ]
   );
-  assert.ok(repairPrompt);
-  assert.match(repairPrompt, /本次 must_fix 明确指向当前句或该句的正文说明/);
-  assert.match(repairPrompt, /必须直接在这同一句本身补齐缺失的首现中英文对照或中文说明/);
-  assert.match(repairPrompt, /不要把修复转移到同一分段的前一句、后一句、标题、列表项或总结句里/);
+
+  const notes = context.specialNotes.join("\n");
+  assert.match(notes, /本次 must_fix 明确指向当前句或该句的正文说明/);
+  assert.match(notes, /必须直接在这同一句本身补齐缺失的首现中英文对照或中文说明/);
+  assert.match(notes, /不要把修复转移到同一分段的前一句、后一句、标题、列表项或总结句里/);
 });
 
 test("translateMarkdownArticle repeats explicit English target guidance when must_fix names a quoted term", async () => {
@@ -2087,7 +2062,7 @@ test("translateMarkdownArticle repeats explicit English target guidance when mus
       async execute(prompt, options) {
         executor.prompts.push(prompt);
 
-        if (options.outputSchema && prompt.includes("【分段审校输入】")) {
+        if (isBundledAuditPrompt(prompt, options)) {
           return createExecResult(
             wrapPerSegmentAudits(prompt, [
               {
@@ -2143,7 +2118,7 @@ test("translateMarkdownArticle repeats blockquote-specific repair guidance when 
       async execute(prompt, options) {
         executor.prompts.push(prompt);
 
-        if (options.outputSchema && prompt.includes("【分段审校输入】")) {
+        if (isBundledAuditPrompt(prompt, options)) {
           return createExecResult(
             wrapPerSegmentAudits(prompt, [
               {
@@ -2244,115 +2219,31 @@ test("translateMarkdownArticle normalizes an explicit quote-segment anchor targe
 });
 
 test("translateMarkdownArticle repeats paragraph-specific repair guidance when must_fix targets a numbered paragraph", async () => {
-  const source = [
-    "# Title",
-    "",
-    "It removes all prompts but also eliminates all protection. Claude can access any file, run any command, and connect to any server.",
-    "",
-    "> I like to call this autonomous coding without guardrails.",
-    ""
-  ].join("\n");
-
-  const executor = new PromptAwareExecutor();
-  await translateMarkdownArticle(source, {
-    executor: {
-      async execute(prompt, options) {
-        executor.prompts.push(prompt);
-
-        if (options.outputSchema && prompt.includes("【分段审校输入】")) {
-          return createExecResult(
-            wrapPerSegmentAudits(prompt, [
-              {
-                segment_index: 1,
-                audit: createAudit(false, [
-                  "位置：第4段“Claude 可以访问任何文件、运行任何命令，并连接到任何服务器。”问题：产品名“Claude”在全文当前分块首次出现时未做中英文对照。修复目标：在该首次出现处补最小必要的中英文锚定，并与后文保持一致。"
-                ])
-              }
-            ])
-          );
-        }
-
-        if (options.outputSchema || prompt.includes("只返回 JSON")) {
-          return createExecResult(JSON.stringify(createAudit(true)));
-        }
-
-        const currentTranslation = extractPromptSection(prompt, "【当前译文】");
-        if (currentTranslation !== null) {
-          return createExecResult(currentTranslation);
-        }
-
-        const sourceSection = extractPromptSection(prompt, "【英文原文】");
-        return createExecResult(sourceSection ?? "");
-      }
-    },
-    formatter: async (markdown) => markdown
-  });
-
-  const repairPrompt = executor.prompts.find(
-    (item) =>
-      item.includes("【must_fix】") &&
-      item.includes("位置：第4段“Claude 可以访问任何文件、运行任何命令，并连接到任何服务器。”")
+  const context = buildRepairPromptContextForTest(
+    createMinimalChunkPromptContext(),
+    [
+      "位置：第4段“Claude 可以访问任何文件、运行任何命令，并连接到任何服务器。”问题：产品名“Claude”在全文当前分块首次出现时未做中英文对照。修复目标：在该首次出现处补最小必要的中英文锚定，并与后文保持一致。"
+    ]
   );
-  assert.ok(repairPrompt);
-  assert.match(repairPrompt, /本次 must_fix 明确点名了某一具体段落/);
-  assert.match(repairPrompt, /必须直接在被点名的那一段本身补齐缺失的首现中英文对照或中文说明/);
-  assert.match(repairPrompt, /修复时应把该段视为唯一有效落点/);
+
+  const notes = context.specialNotes.join("\n");
+  assert.match(notes, /本次 must_fix 明确点名了某一具体段落/);
+  assert.match(notes, /必须直接在被点名的那一段本身补齐缺失的首现中英文对照或中文说明/);
+  assert.match(notes, /修复时应把该段视为唯一有效落点/);
 });
 
 test("translateMarkdownArticle repeats sentence-local repair guidance when must_fix quotes a specific sentence inside a paragraph", async () => {
-  const source = [
-    "## Filesystem Permissions (Critical )",
-    "",
-    "Filesystem permissions control what Claude can access.",
-    "",
-    "Get this wrong and either security fails or Claude can’t work.",
-    ""
-  ].join("\n");
-
-  const executor = new PromptAwareExecutor();
-  await translateMarkdownArticle(source, {
-    executor: {
-      async execute(prompt, options) {
-        executor.prompts.push(prompt);
-
-        if (options.outputSchema && prompt.includes("【分段审校输入】")) {
-          return createExecResult(
-            wrapPerSegmentAudits(prompt, [
-              {
-                segment_index: 1,
-                audit: createAudit(false, [
-                  "位置：第4段“文件系统权限决定了 Claude 可以访问什么。”问题：产品名“Claude”在正文句内首次出现时未做中英文对照。修复目标：在该句内补最小必要的中英文锚定，不要把修复转移到别处。"
-                ])
-              }
-            ])
-          );
-        }
-
-        if (options.outputSchema || prompt.includes("只返回 JSON")) {
-          return createExecResult(JSON.stringify(createAudit(true)));
-        }
-
-        const currentTranslation = extractPromptSection(prompt, "【当前译文】");
-        if (currentTranslation !== null) {
-          return createExecResult(currentTranslation);
-        }
-
-        const sourceSection = extractPromptSection(prompt, "【英文原文】");
-        return createExecResult(sourceSection ?? "");
-      }
-    },
-    formatter: async (markdown) => markdown
-  });
-
-  const repairPrompt = executor.prompts.find(
-    (item) =>
-      item.includes("【must_fix】") &&
-      item.includes("位置：第4段“文件系统权限决定了 Claude 可以访问什么。”")
+  const context = buildRepairPromptContextForTest(
+    createMinimalChunkPromptContext(),
+    [
+      "位置：第4段“文件系统权限决定了 Claude 可以访问什么。”问题：产品名“Claude”在正文句内首次出现时未做中英文对照。修复目标：在该句内补最小必要的中英文锚定，不要把修复转移到别处。"
+    ]
   );
-  assert.ok(repairPrompt);
-  assert.match(repairPrompt, /本次 must_fix 已经通过“位置：……“某句””的形式明确摘录了具体句子/);
-  assert.match(repairPrompt, /必须把这句视为唯一有效落点/);
-  assert.match(repairPrompt, /不要把锚定转移到同段其他句子、标题、列表项、引用外说明或后续段落/);
+
+  const notes = context.specialNotes.join("\n");
+  assert.match(notes, /本次 must_fix 已经通过“位置：……“某句””的形式明确摘录了具体句子/);
+  assert.match(notes, /必须把这句视为唯一有效落点/);
+  assert.match(notes, /不要把锚定转移到同段其他句子、标题、列表项、引用外说明或后续段落/);
 });
 
 test("translateMarkdownArticle keeps sentence-local Claude repairs away from earlier Claude Code anchors", async () => {
@@ -2489,11 +2380,11 @@ test("translateMarkdownArticle keeps the source surface form when Claude and Cla
     formatter: async (markdown) => markdown
   });
 
-  assert.match(result.markdown, /告诉 Claude（Anthropic 的 AI 助手）：/);
+  assert.match(result.markdown, /告诉 Claude/);
   assert.doesNotMatch(result.markdown, /Claude Code（Claude）/);
 });
 
-test("translateMarkdownArticle exposes english-primary canonical displays in prompt context", async () => {
+test("translateMarkdownArticle exposes known-entity bare english displays in prompt context", async () => {
   const source = [
     "# Title",
     "",
@@ -2530,7 +2421,7 @@ test("translateMarkdownArticle exposes english-primary canonical displays in pro
       return createExecResult([
         "# 标题",
         "",
-        "文件系统权限决定了 Claude（Anthropic 的 AI 助手）可以访问什么。",
+        "文件系统权限决定了 Claude 可以访问什么。",
         "",
         "这里一旦配置错误，要么安全性失效，要么 Claude 无法正常工作。"
       ].join("\n"));
@@ -2543,14 +2434,13 @@ test("translateMarkdownArticle exposes english-primary canonical displays in pro
     formatter: async (markdown) => markdown
   });
 
-  assert.match(result.markdown, /Claude（Anthropic 的 AI 助手）可以访问什么/);
   const draftPrompt = executor.prompts.find(
     (prompt) => !isDocumentAnalysisPrompt(prompt) && !prompt.includes("只返回 JSON")
   );
   assert.ok(draftPrompt);
-  assert.match(draftPrompt, /Claude（Anthropic 的 AI 助手） \[display=english-primary]/);
-  assert.match(draftPrompt, /"canonicalDisplay": "Claude（Anthropic 的 AI 助手）"/);
-  assert.match(draftPrompt, /"allowedDisplayForms": \[\s*"Claude（Anthropic 的 AI 助手）"\s*]/);
+  assert.match(draftPrompt, /Claude \[display=english-only]/);
+  assert.match(draftPrompt, /"canonicalDisplay": "Claude"/);
+  assert.match(draftPrompt, /"allowedDisplayForms": \[\s*"Claude"\s*]/);
 });
 
 test("translateMarkdownArticle tells repair when the same anchor is still missing in multiple locations", async () => {

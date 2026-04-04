@@ -44,6 +44,7 @@ import {
   markSegmentStyled,
   setChunkFinalBody,
   type AnchorCatalog,
+  type AnalysisAnchor,
   type AuditCheckKey as StateAuditCheckKey,
   type ChunkSeed,
   type PromptSlice,
@@ -52,6 +53,12 @@ import {
   type SegmentAuditResult as StateSegmentAuditResult,
   type TranslationRunState
 } from "./translation-state.js";
+import {
+  buildKnownEntityCatalog,
+  loadKnownEntities,
+  mergeAnchorCatalogs,
+  writeKnownEntityCandidatesIfRequested
+} from "./known-entities.js";
 
 const DEFAULT_MODEL = "gpt-5.4-mini";
 const MAX_REPAIR_CYCLES = 2;
@@ -182,6 +189,14 @@ const ANCHOR_CATALOG_SCHEMA = {
           english: { type: "string" },
           chineseHint: { type: "string" },
           familyKey: { type: "string" },
+          displayPolicy: {
+            type: "string",
+            enum: ["auto", "acronym-compound", "english-only", "english-primary", "chinese-primary"]
+          },
+          sourceForms: {
+            type: "array",
+            items: { type: "string" }
+          },
           firstOccurrence: {
             type: "object",
             additionalProperties: false,
@@ -385,7 +400,7 @@ function parseAnchorCatalog(text: string): AnchorCatalog {
       throw new HardGateError(`Anchor catalog anchors[${index}] has an invalid shape.`);
     }
 
-    return {
+    const parsedAnchor: AnalysisAnchor = {
       english: anchor.english.trim(),
       chineseHint: anchor.chineseHint.trim(),
       familyKey: anchor.familyKey.trim(),
@@ -394,6 +409,22 @@ function parseAnchorCatalog(text: string): AnchorCatalog {
         segmentId: String((firstOccurrence as Record<string, unknown>).segmentId)
       }
     };
+
+    if (typeof anchor.displayPolicy === "string") {
+      parsedAnchor.displayPolicy = anchor.displayPolicy as NonNullable<AnalysisAnchor["displayPolicy"]>;
+    }
+
+    if (Array.isArray(anchor.sourceForms)) {
+      const sourceForms = anchor.sourceForms
+        .filter((item): item is string => typeof item === "string")
+        .map((item) => item.trim())
+        .filter(Boolean);
+      if (sourceForms.length > 0) {
+        parsedAnchor.sourceForms = sourceForms;
+      }
+    }
+
+    return parsedAnchor;
   });
 
   const ignoredTerms = data.ignoredTerms.map((item, index) => {
@@ -478,6 +509,8 @@ async function analyzeDocumentForAnchors(
   state: TranslationRunState,
   context: Pick<ChunkTranslationContext, "executor" | "postDraftModel" | "cwd" | "options" | "postDraftReasoningEffort">
 ): Promise<AnchorCatalog> {
+  const knownEntities = loadKnownEntities();
+  const formalCatalog = buildKnownEntityCatalog(state, knownEntities);
   const prompt = buildDocumentAnalysisPrompt(buildDocumentAnalysisInput(state));
   try {
     const result = await context.executor.execute(prompt, {
@@ -493,14 +526,16 @@ async function analyzeDocumentForAnchors(
         }
       }
     });
-    return parseAnchorCatalog(result.text);
+    const discoveredCatalog = parseAnchorCatalog(result.text);
+    await writeKnownEntityCandidatesIfRequested(discoveredCatalog, knownEntities);
+    return mergeAnchorCatalogs(formalCatalog, discoveredCatalog);
   } catch (error) {
     report(
       context.options,
       "analyze",
       `Document anchor analysis failed, falling back to an empty catalog: ${error instanceof Error ? error.message : String(error)}`
     );
-    return { anchors: [], ignoredTerms: [] };
+    return formalCatalog;
   }
 }
 
@@ -2095,6 +2130,13 @@ function buildRepairPromptContext(
   };
 }
 
+export function buildRepairPromptContextForTest(
+  promptContext: ChunkPromptContext,
+  mustFix: readonly string[]
+): ChunkPromptContext {
+  return buildRepairPromptContext(promptContext, mustFix);
+}
+
 function collectDuplicatePendingAnchorGroups(promptContext: ChunkPromptContext): string[][] {
   const pendingRepairs = promptContext.stateSlice?.pendingRepairs ?? [];
   const groups = new Map<string, Set<string>>();
@@ -2749,7 +2791,7 @@ function isTranslatableMarkdownStructureBlock(content: string): boolean {
   return /(\*\*[^*\n]+?\*\*|__[^_\n]+?__|\*[^*\n]+?\*|_[^_\n]+?_)/.test(content) || /\B--[A-Za-z0-9][A-Za-z0-9-]*/.test(content);
 }
 
-type ChunkPromptContext = {
+export type ChunkPromptContext = {
   documentTitle: string | null;
   headingPath: string[];
   chunkIndex: number;
@@ -2794,8 +2836,8 @@ function withChunkContextAt(prompt: string, context: ChunkPromptContext, marker:
     "【状态切片(JSON)】",
     stateSliceJson,
     "说明：当前输入只覆盖全文的一部分。请保持术语、专名、语气和上下文的一致性，不要补写未出现在当前分块中的段落。",
-    "requiredAnchors 表示：这些专名、产品名、项目名或关键术语必须在当前分段本身建立首现双语锚点。",
-    "如果 stateSlice.requiredAnchors 给出了 canonicalDisplay 或 allowedDisplayForms，则这些形式就是当前分段可接受的合法锚定结果；像“Claude（Anthropic 的 AI 助手）”这类英文原名（中文说明）形式，视为已经完成首现锚定，不得再按“缺少英文对照”判错。",
+    "requiredAnchors 表示：这些专名、产品名、项目名或关键术语必须在当前分段本身建立或保持合法的首现显示形式。",
+    "如果 stateSlice.requiredAnchors 给出了 canonicalDisplay 或 allowedDisplayForms，则这些形式就是当前分段可接受的合法锚定结果；像“Claude（Anthropic 的 AI 助手）”这类英文原名（中文说明）形式，或像“Claude”这类允许裸英文首现的形式，都视为已经完成首现锚定，不得再按“缺少英文对照”判错。",
     "repeatAnchors 表示：这些项目已经在全文前文完成首现锚定，即使它们在当前分块标题、加粗标题、列表项标题或正文里是本块第一次出现，也不得再补首现中英文对照。",
     "pendingRepairs 表示：这些修复任务已经绑定到当前分段，修复时必须就地完成，不要把锚点挪到别处。",
     "如果当前分段标题、加粗标题、列表项标题里包含冒号、括号限定语、枚举标签或英文补充说明，翻译时必须完整保留这些信息，不要只保留其中一部分。"

@@ -1021,6 +1021,16 @@ function resolveAnchorDisplay(anchor: AnchorLike): AnchorDisplay {
   const english = anchor.english.trim();
   const chineseHint = anchor.chineseHint.trim();
 
+  if (anchor.displayPolicy === "english-only") {
+    return {
+      mode: "english-only",
+      english,
+      chineseDisplay: "",
+      canonical: english,
+      repeatText: english
+    };
+  }
+
   if (!english || !chineseHint || chineseHint.toLowerCase() === english.toLowerCase()) {
     return {
       mode: "english-only",
@@ -1045,6 +1055,24 @@ function resolveAnchorDisplay(anchor: AnchorLike): AnchorDisplay {
       chineseDisplay: chineseHint,
       canonical: `${chineseHint}（${english}）`,
       repeatText: chineseHint
+    };
+  }
+  if (anchor.displayPolicy === "english-primary") {
+    return {
+      mode: "english-primary",
+      english,
+      chineseDisplay,
+      canonical: `${english}（${chineseDisplay}）`,
+      repeatText: english
+    };
+  }
+  if (anchor.displayPolicy === "chinese-primary") {
+    return {
+      mode: "chinese-primary",
+      english,
+      chineseDisplay,
+      canonical: `${chineseDisplay}（${english}）`,
+      repeatText: chineseDisplay
     };
   }
   if (shouldPreferEnglishPrimary(english, strippedEnglishPrefix)) {

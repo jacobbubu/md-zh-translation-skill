@@ -24,6 +24,7 @@ function createAnchor(
     english,
     chineseHint,
     familyId,
+    requiresBilingual: displayPolicy !== "english-only",
     displayPolicy
   };
 }
