@@ -282,6 +282,18 @@ test("normalizeHeadingLikeAnchorText skips shorter child anchors when a longer h
   assert.equal(normalized, "## React/Next.js Web 项目配置示例");
 });
 
+test("normalizeHeadingLikeAnchorText restores the canonical bilingual display for an exact ATX heading anchor", () => {
+  const slice = createSlice({
+    requiredAnchors: [createAnchor("anchor-1", "Accidental Destructive Operations", "意外的破坏性操作")]
+  });
+  const source = "### Accidental Destructive Operations";
+  const translated = "### 误删破坏（Accidental Destructive Operations）";
+
+  const normalized = normalizeHeadingLikeAnchorText(source, translated, slice);
+
+  assert.equal(normalized, "### 意外的破坏性操作（Accidental Destructive Operations）");
+});
+
 test("injectPlannedAnchorText injects a missing anchor into a heading-like line", () => {
   const slice = createSlice({
     requiredAnchors: [createAnchor("anchor-1", "System File Access", "系统文件访问")]
@@ -490,6 +502,28 @@ test("normalizeExplicitRepairAnchorText injects a named anchor back into a headi
   const normalized = normalizeExplicitRepairAnchorText(source, translated, slice);
 
   assert.equal(normalized, "## 沙箱模式（Sandbox Mode）如何改变自主编码");
+});
+
+test("normalizeExplicitRepairAnchorText restores the canonical bilingual display for an exact ATX heading anchor", () => {
+  const slice = createSlice({
+    requiredAnchors: [createAnchor("anchor-1", "Accidental Destructive Operations", "意外的破坏性操作")],
+    pendingRepairs: [
+      {
+        repairId: "repair-1",
+        anchorId: "anchor-1",
+        failureType: "missing_anchor",
+        locationLabel: "小标题",
+        instruction:
+          "位置：第 4 段标题“### 误删破坏（Accidental Destructive Operations）”；问题：英文括注与前文已建立的锚点不一致；修复目标：改回与既有锚点一致的双语形式。"
+      }
+    ]
+  });
+  const source = "### Accidental Destructive Operations";
+  const translated = "### 误删破坏（Accidental Destructive Operations）";
+
+  const normalized = normalizeExplicitRepairAnchorText(source, translated, slice);
+
+  assert.equal(normalized, "### 意外的破坏性操作（Accidental Destructive Operations）");
 });
 
 test("normalizeExplicitRepairAnchorText injects a named anchor back into a list item", () => {

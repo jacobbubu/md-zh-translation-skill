@@ -3424,6 +3424,68 @@ test("translateMarkdownArticle restores an ATX heading anchor after repair when 
   assert.match(result.markdown, /### 凭证窃取（Credential Theft）/);
 });
 
+test("translateMarkdownArticle restores the canonical bilingual display for an exact ATX heading after repair", async () => {
+  const source = [
+    "# Title",
+    "",
+    "### Accidental Destructive Operations",
+    "",
+    "Body.",
+    ""
+  ].join("\n");
+
+  let auditCount = 0;
+  const result = await translateMarkdownArticle(source, {
+    executor: {
+      async execute(prompt, options) {
+        if (isDocumentAnalysisPrompt(prompt)) {
+          return createExecResult(
+            createAnchorCatalog([
+              {
+                english: "Accidental Destructive Operations",
+                chineseHint: "意外的破坏性操作",
+                familyKey: "accidental-destructive-operations"
+              }
+            ])
+          );
+        }
+
+        if (options.outputSchema && prompt.includes("【分段审校输入】")) {
+          auditCount += 1;
+          if (auditCount === 1) {
+            return createExecResult(
+              wrapPerSegmentAudits(prompt, [
+                {
+                  segment_index: 1,
+                  audit: createAudit(false, [
+                    "位置：第 4 段标题“### 误删破坏（Accidental Destructive Operations）”；问题：英文括注与前文已建立的锚点不一致；修复目标：改回与既有锚点一致的双语形式。"
+                  ])
+                }
+              ])
+            );
+          }
+
+          return createExecResult(wrapPerSegmentAudits(prompt, [{ segment_index: 1, audit: createAudit(true) }]));
+        }
+
+        if (options.outputSchema || prompt.includes("只返回 JSON")) {
+          return createExecResult(JSON.stringify(createAudit(true)));
+        }
+
+        const currentTranslation = extractPromptSection(prompt, "【当前译文】");
+        if (currentTranslation !== null) {
+          return createExecResult(currentTranslation);
+        }
+
+        return createExecResult(["# Title", "", "### 误删破坏（Accidental Destructive Operations）", "", "正文。", ""].join("\n"));
+      }
+    },
+    formatter: async (markdown) => markdown
+  });
+
+  assert.match(result.markdown, /### 意外的破坏性操作（Accidental Destructive Operations）/);
+});
+
 test("translateMarkdownArticle restores missing source heading qualifiers inside category-style headings", async () => {
   const source = [
     "# Title",
