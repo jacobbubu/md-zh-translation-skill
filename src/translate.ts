@@ -1355,6 +1355,7 @@ function stripAddedInlineCodeFromPlainPaths(source: string, translated: string):
   }
 
   const plainCommandTokens = collectPlainCommandTokens(sourceWithoutInlineCode, sourceInlineCodeTokens);
+  const plainFlagTokens = collectPlainFlagTokens(sourceWithoutInlineCode);
 
   let normalized = translated;
   for (const token of plainPathTokens) {
@@ -1363,6 +1364,11 @@ function stripAddedInlineCodeFromPlainPaths(source: string, translated: string):
   }
 
   for (const token of plainCommandTokens) {
+    const escapedToken = token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    normalized = normalized.replace(new RegExp("`" + escapedToken + "`", "g"), token);
+  }
+
+  for (const token of plainFlagTokens) {
     const escapedToken = token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
     normalized = normalized.replace(new RegExp("`" + escapedToken + "`", "g"), token);
   }
@@ -1524,6 +1530,19 @@ function collectPlainCommandTokens(
       if (!sourceInlineCodeTokens.has(phrase)) {
         tokens.add(phrase);
       }
+    }
+  }
+
+  return tokens;
+}
+
+function collectPlainFlagTokens(sourceWithoutInlineCode: string): Set<string> {
+  const tokens = new Set<string>();
+
+  for (const match of sourceWithoutInlineCode.matchAll(/(^|[^\w`])(--[A-Za-z0-9][A-Za-z0-9-]*)(?=$|[^\w-])/gm)) {
+    const token = match[2]?.trim();
+    if (token) {
+      tokens.add(token);
     }
   }
 

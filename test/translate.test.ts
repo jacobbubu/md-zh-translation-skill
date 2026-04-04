@@ -798,7 +798,7 @@ test("translateMarkdownArticle restores inline code only at source locations whe
       const translated = [
         "## Claude Code 权限问题",
         "",
-        "如果你使用 --dangerously-skip-permissions 标志，就会移除安全护栏。",
+        "如果你使用 `--dangerously-skip-permissions` 标志，就会移除安全护栏。",
         "",
         "这个 --dangerously-skip-permissions 标志是为了缓解这种疲劳而存在的逃生舱。"
       ].join("\n");
@@ -819,6 +819,47 @@ test("translateMarkdownArticle restores inline code only at source locations whe
   assert.match(result.markdown, /如果你使用 --dangerously-skip-permissions 标志/);
   assert.match(result.markdown, /这个 `--dangerously-skip-permissions` 标志是为了缓解这种疲劳而存在的逃生舱/);
   assert.doesNotMatch(result.markdown, /如果你使用 `--dangerously-skip-permissions` 标志/);
+});
+
+test("translateMarkdownArticle strips added inline code from plain flags inside blockquotes", async () => {
+  const source = [
+    "# Title",
+    "",
+    "> If you use the --dangerously-skip-permissions flag, you remove safety guardrails.",
+    "",
+    "The `--dangerously-skip-permissions` flag exists as an escape hatch from this fatigue."
+  ].join("\n");
+
+  class MixedFlagQuoteExecutor implements CodexExecutor {
+    async execute(prompt: string, options: CodexExecOptions): Promise<CodexExecResult> {
+      if (isDocumentAnalysisPrompt(prompt)) {
+        return createExecResult(createEmptyAnchorCatalog());
+      }
+
+      if (options.outputSchema || prompt.includes('"hard_checks"') || prompt.includes("只返回 JSON")) {
+        return createExecResult(wrapAuditForSegments(prompt, createAudit(true)));
+      }
+
+      const translated = [
+        "# Title",
+        "",
+        "> 如果你使用 `--dangerously-skip-permissions` 标志，就会移除安全护栏。",
+        "",
+        "这个 --dangerously-skip-permissions 标志是为了缓解这种疲劳而存在的逃生舱。"
+      ].join("\n");
+
+      return createExecResult(translated);
+    }
+  }
+
+  const result = await translateMarkdownArticle(source, {
+    executor: new MixedFlagQuoteExecutor(),
+    formatter: async (markdown) => markdown
+  });
+
+  assert.match(result.markdown, /> 如果你使用 --dangerously-skip-permissions 标志/);
+  assert.match(result.markdown, /这个 `--dangerously-skip-permissions` 标志是为了缓解这种疲劳而存在的逃生舱/);
+  assert.doesNotMatch(result.markdown, /> 如果你使用 `--dangerously-skip-permissions` 标志/);
 });
 
 test("translateMarkdownArticle runs the hidden pipeline chunk by chunk for long Markdown sections", async () => {
