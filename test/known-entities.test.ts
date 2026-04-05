@@ -8,6 +8,7 @@ import {
   buildKnownEntityCatalog,
   loadKnownEntities,
   mergeAnchorCatalogs,
+  normalizeDiscoveredAnchorCatalog,
   writeKnownEntityCandidatesIfRequested
 } from "../src/known-entities.js";
 import {
@@ -213,6 +214,79 @@ test("mergeAnchorCatalogs keeps formal known entities ahead of discovered duplic
 
   assert.equal(merged.anchors.length, 1);
   assert.equal(merged.anchors[0]?.displayPolicy, "english-only");
+});
+
+test("normalizeDiscoveredAnchorCatalog promotes a heading surface over an earlier paraphrase", () => {
+  const state = createTranslationRunState({
+    sourcePathHint: "sample.md",
+    documentTitle: "Sample",
+    frontmatterPresent: false,
+    protectedSpans: [],
+    chunks: [
+      {
+        source: "- Accidental destruction can happen when cleanup commands are misunderstood.\n",
+        separatorAfter: "\n\n",
+        headingPath: ["Sample"],
+        segments: [
+          {
+            kind: "translatable",
+            source: "- Accidental destruction can happen when cleanup commands are misunderstood.\n",
+            separatorAfter: "\n\n",
+            spanIds: [],
+            headingHints: [],
+            specialNotes: []
+          }
+        ]
+      },
+      {
+        source: [
+          "### Accidental Destructive Operations",
+          "",
+          "Filesystem isolation prevents modifications outside the designated safe zone."
+        ].join("\n"),
+        separatorAfter: "",
+        headingPath: ["Sample"],
+        segments: [
+          {
+            kind: "translatable",
+            source: [
+              "### Accidental Destructive Operations",
+              "",
+              "Filesystem isolation prevents modifications outside the designated safe zone."
+            ].join("\n"),
+            separatorAfter: "",
+            spanIds: [],
+            headingHints: ["Accidental Destructive Operations"],
+            specialNotes: []
+          }
+        ]
+      }
+    ]
+  });
+
+  const normalized = normalizeDiscoveredAnchorCatalog(state, {
+    anchors: [
+      {
+        english: "Accidental destruction",
+        chineseHint: "意外破坏",
+        familyKey: "accidental destruction",
+        displayPolicy: "chinese-primary",
+        sourceForms: ["Accidental destruction", "Accidental Destructive Operations"],
+        firstOccurrence: {
+          chunkId: "chunk-1",
+          segmentId: "chunk-1-segment-1"
+        }
+      }
+    ],
+    ignoredTerms: []
+  });
+
+  assert.equal(normalized.anchors[0]?.english, "Accidental Destructive Operations");
+  assert.equal(normalized.anchors[0]?.familyKey, "accidental destructive operations");
+  assert.deepEqual(normalized.anchors[0]?.firstOccurrence, {
+    chunkId: "chunk-2",
+    segmentId: "chunk-2-segment-1"
+  });
 });
 
 test("writeKnownEntityCandidatesIfRequested persists unknown anchors into a candidate file", async () => {

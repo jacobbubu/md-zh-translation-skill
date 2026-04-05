@@ -125,6 +125,16 @@ export function mergeAnchorCatalogs(
   };
 }
 
+export function normalizeDiscoveredAnchorCatalog(
+  state: TranslationRunState,
+  catalog: AnchorCatalog
+): AnchorCatalog {
+  return {
+    anchors: catalog.anchors.map((anchor) => promoteHeadingSurfaceForm(state, anchor)),
+    ignoredTerms: [...catalog.ignoredTerms]
+  };
+}
+
 export async function writeKnownEntityCandidatesIfRequested(
   catalog: AnchorCatalog,
   knownEntities: KnownEntitiesFile = loadKnownEntities()
@@ -222,6 +232,93 @@ function mapAnchorPolicyToKnownPolicy(
 
 function dedupeForms(surfaceForms: string[], aliases: string[], preferredEnglish: string): string[] {
   return [...new Set([...surfaceForms, ...aliases, preferredEnglish].map((item) => item.trim()).filter(Boolean))];
+}
+
+function promoteHeadingSurfaceForm(
+  state: TranslationRunState,
+  anchor: AnalysisAnchor
+): AnalysisAnchor {
+  const sourceForms = dedupeForms(anchor.sourceForms ?? [], [], anchor.english);
+  const distinctHeadingMatches = findDistinctHeadingMatches(state, sourceForms, anchor.english);
+  if (distinctHeadingMatches.length === 0) {
+    return {
+      ...anchor,
+      sourceForms
+    };
+  }
+
+  const selectedMatch = distinctHeadingMatches.sort((left, right) => {
+    if (left.order !== right.order) {
+      return left.order - right.order;
+    }
+    return right.form.length - left.form.length;
+  })[0];
+
+  if (!selectedMatch) {
+    return {
+      ...anchor,
+      sourceForms
+    };
+  }
+
+  const nextFamilyKey =
+    anchor.familyKey.trim().toLowerCase() === anchor.english.trim().toLowerCase()
+      ? selectedMatch.form.trim().toLowerCase()
+      : anchor.familyKey;
+
+  return {
+    ...anchor,
+    english: selectedMatch.form,
+    familyKey: nextFamilyKey,
+    sourceForms,
+    firstOccurrence: {
+      chunkId: selectedMatch.chunkId,
+      segmentId: selectedMatch.segmentId
+    }
+  };
+}
+
+function findDistinctHeadingMatches(
+  state: TranslationRunState,
+  sourceForms: readonly string[],
+  currentEnglish: string
+): Array<{ form: string; chunkId: string; segmentId: string; order: number }> {
+  const current = currentEnglish.trim().toLowerCase();
+  const matches: Array<{ form: string; chunkId: string; segmentId: string; order: number }> = [];
+
+  for (const segment of state.segments) {
+    if (segment.kind !== "translatable" || segment.headingHints.length === 0) {
+      continue;
+    }
+
+    for (const headingHint of segment.headingHints) {
+      for (const form of sourceForms) {
+        const normalizedForm = form.trim();
+        if (!normalizedForm || normalizedForm.toLowerCase() === current) {
+          continue;
+        }
+        if (!containsWholePhrase(headingHint, normalizedForm)) {
+          continue;
+        }
+        matches.push({
+          form: normalizedForm,
+          chunkId: segment.chunkId,
+          segmentId: segment.id,
+          order: segment.order
+        });
+      }
+    }
+  }
+
+  const seen = new Set<string>();
+  return matches.filter((match) => {
+    const key = `${match.segmentId}::${match.form.toLowerCase()}`;
+    if (seen.has(key)) {
+      return false;
+    }
+    seen.add(key);
+    return true;
+  });
 }
 
 function findFirstOccurrence(

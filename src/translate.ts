@@ -57,6 +57,7 @@ import {
   buildKnownEntityCatalog,
   loadKnownEntities,
   mergeAnchorCatalogs,
+  normalizeDiscoveredAnchorCatalog,
   writeKnownEntityCandidatesIfRequested
 } from "./known-entities.js";
 
@@ -543,7 +544,7 @@ async function analyzeDocumentForAnchors(
         }
       }
     });
-    const discoveredCatalog = parseAnchorCatalog(result.text);
+    const discoveredCatalog = normalizeDiscoveredAnchorCatalog(state, parseAnchorCatalog(result.text));
     report(
       context.options,
       "analyze",
