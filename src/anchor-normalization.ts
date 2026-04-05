@@ -591,12 +591,14 @@ function normalizeSingleAnchor(
     const escapedChinese = escapeRegExp(chineseHint);
     const canonical = display.canonical;
 
-    normalized = normalized.replace(new RegExp(`${escapedEnglish}（${escapedChinese}）`, "g"), canonical);
-    normalized = normalized.replace(new RegExp(`${escapedEnglish}（${escapedEnglish}）`, "g"), canonical);
-    normalized = normalized.replace(new RegExp(`${escapedChinese}（${escapedEnglish}）\\s*（${escapedEnglish}）`, "g"), canonical);
+    normalized = normalized.replace(new RegExp(`${escapedEnglish}（${escapedChinese}）`, "gi"), canonical);
+    normalized = normalized.replace(new RegExp(`${escapedEnglish}（${escapedEnglish}）`, "gi"), canonical);
+    normalized = normalized.replace(new RegExp(`${escapedChinese}（${escapedEnglish}）\\s*（${escapedEnglish}）`, "gi"), canonical);
     normalized = normalized.replace(new RegExp(`${escapedChinese}（${escapedChinese}）`, "g"), canonical);
     if (display.mode === "acronym-compound") {
       normalized = normalizeAcronymCompoundParentheses(normalized, display);
+    } else {
+      normalized = normalizeChinesePrimaryAdjacentParentheses(normalized, display);
     }
 
     if (isRepeatOrEstablished) {
@@ -644,6 +646,35 @@ function normalizeSingleAnchor(
 function collapseRepeatedEnglishParentheses(text: string, english: string): string {
   const escapedEnglish = escapeRegExp(english);
   return text.replace(new RegExp(`（${escapedEnglish}）\\s*（${escapedEnglish}）`, "g"), `（${english}）`);
+}
+
+function normalizeChinesePrimaryAdjacentParentheses(text: string, display: AnchorDisplay): string {
+  const escapedChinese = escapeRegExp(display.chineseDisplay);
+  const escapedEnglish = escapeRegExp(display.english);
+  let normalized = text;
+
+  normalized = normalized.replace(
+    new RegExp(`${escapedChinese}（${escapedEnglish}）\\s*（${escapedEnglish}）`, "gi"),
+    display.canonical
+  );
+
+  normalized = normalized.replace(
+    new RegExp(`${escapedChinese}（${escapedEnglish}）\\s*（([^（）\\n]+)）`, "g"),
+    (_raw: string, trailingRaw: string) => {
+      const trailing = String(trailingRaw).trim();
+      if (!trailing) {
+        return display.canonical;
+      }
+
+      if (trailing.toLowerCase() === display.english.toLowerCase()) {
+        return display.canonical;
+      }
+
+      return `${display.chineseDisplay}（${display.english}，${trailing}）`;
+    }
+  );
+
+  return normalized;
 }
 
 function injectAnchorIntoLine(text: string, anchor: PromptAnchor): string {

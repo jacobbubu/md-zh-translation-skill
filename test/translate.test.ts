@@ -468,7 +468,7 @@ test("translateMarkdownArticle normalizes bilingual anchor text before gate audi
 
       if (options.outputSchema || prompt.includes('"hard_checks"') || prompt.includes("只返回 JSON")) {
         const currentTranslation = extractPromptSection(prompt, "【当前译文】") ?? "";
-        assert.match(currentTranslation, /提示注入攻击（Prompt injection attacks）/);
+        assert.match(currentTranslation, /提示注入攻击（prompt injection attacks）/i);
         return createExecResult(wrapAuditForSegments(prompt, createAudit(true)));
       }
 
@@ -485,7 +485,62 @@ test("translateMarkdownArticle normalizes bilingual anchor text before gate audi
     formatter: async (markdown) => markdown
   });
 
-  assert.match(result.markdown, /提示注入攻击（Prompt injection attacks）/);
+  assert.match(result.markdown, /提示注入攻击（prompt injection attacks）/i);
+});
+
+test("translateMarkdownArticle collapses duplicate concept anchor parentheses before gate audit", async () => {
+  const source = [
+    "**Protection Against Attack Vectors**",
+    "",
+    "- Prompt injection attacks (malicious instructions in code comments)",
+    ""
+  ].join("\n");
+
+  class ConceptDedupExecutor implements CodexExecutor {
+    async execute(prompt: string, options: CodexExecOptions): Promise<CodexExecResult> {
+      if (isDocumentAnalysisPrompt(prompt)) {
+        return createExecResult(
+          createAnchorCatalog([
+            {
+              english: "Prompt injection attacks",
+              chineseHint: "提示注入攻击",
+              familyKey: "prompt-injection",
+              chunkId: "chunk-1",
+              segmentId: "chunk-1-segment-1"
+            }
+          ])
+        );
+      }
+
+      if (options.outputSchema || prompt.includes('"hard_checks"') || prompt.includes("只返回 JSON")) {
+        const currentTranslation = extractPromptSection(prompt, "【当前译文】") ?? "";
+        assert.match(currentTranslation, /提示注入攻击（prompt injection attacks，代码注释中的恶意指令）/i);
+        assert.doesNotMatch(currentTranslation, /（prompt injection attacks）/i);
+        return createExecResult(wrapAuditForSegments(prompt, createAudit(true)));
+      }
+
+      const currentTranslation = extractPromptSection(prompt, "【当前译文】");
+      if (currentTranslation !== null) {
+        return createExecResult(currentTranslation);
+      }
+
+      return createExecResult(
+        [
+          "**Protection Against Attack Vectors（针对攻击向量的防护）**",
+          "",
+          "- Prompt injection attacks（提示注入攻击）（prompt injection attacks）（代码注释中的恶意指令）",
+          ""
+        ].join("\n")
+      );
+    }
+  }
+
+  const result = await translateMarkdownArticle(source, {
+    executor: new ConceptDedupExecutor(),
+    formatter: async (markdown) => markdown
+  });
+
+  assert.match(result.markdown, /提示注入攻击（prompt injection attacks，代码注释中的恶意指令）/i);
 });
 
 test("translateMarkdownArticle falls back to the hard-pass translation when style polish returns meta task text", async () => {
@@ -1808,6 +1863,30 @@ test("translateMarkdownArticle adds heading-specific bilingual guidance for head
   assert.match(prompt, /【当前分段附加规则】/);
   assert.match(prompt, /当前分段包含标题或加粗标题/);
   assert.match(prompt, /必须直接在标题本身补齐中英文对照/);
+});
+
+test("translateMarkdownArticle does not add heading bilingual guidance for generic heading-like labels without required anchors", async () => {
+  const source = [
+    "# Title",
+    "",
+    "**Permission types:**",
+    "",
+    "`Read(path)` - Read file contents",
+    ""
+  ].join("\n");
+
+  const executor = new PromptAwareExecutor();
+  await translateMarkdownArticle(source, {
+    executor,
+    formatter: async (markdown) => markdown
+  });
+
+  const prompt = executor.prompts.find(
+    (item) => !isDocumentAnalysisPrompt(item) && item.includes("Permission types:")
+  );
+  assert.ok(prompt);
+  assert.match(prompt, /当前分段包含标题或加粗标题。请保留标题层级/);
+  assert.doesNotMatch(prompt, /必须直接在标题本身补齐中英文对照/);
 });
 
 test("translateMarkdownArticle repeats heading-only repair guidance when must_fix targets the title", async () => {

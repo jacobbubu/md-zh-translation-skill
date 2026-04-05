@@ -63,6 +63,22 @@ test("normalizeSegmentAnchorText flips english-first duplicated anchors into Chi
   );
 });
 
+test("normalizeSegmentAnchorText collapses duplicate chinese-primary anchors into a single bilingual parenthesis", () => {
+  const slice = createSlice({
+    requiredAnchors: [createAnchor("anchor-1", "Prompt injection attacks", "提示注入攻击")]
+  });
+
+  const normalized = normalizeSegmentAnchorText(
+    "提示注入攻击（Prompt injection attacks）（prompt injection attacks）（代码注释中的恶意指令）",
+    slice
+  );
+
+  assert.equal(
+    normalized,
+    "提示注入攻击（Prompt injection attacks，代码注释中的恶意指令）"
+  );
+});
+
 test("normalizeSegmentAnchorText removes repeated english parentheses for already established anchors", () => {
   const slice = createSlice({
     establishedAnchors: [createAnchor("anchor-1", "sandbox mode", "沙箱模式")]
