@@ -254,12 +254,33 @@ function containsWholePhrase(text: string, phrase: string): boolean {
     return text.includes(trimmed);
   }
 
-  const pattern = new RegExp(`(^|[^A-Za-z0-9.+/_-])${escapeRegExp(trimmed)}($|[^A-Za-z0-9.+/_-])`, "i");
+  const boundaryClass = buildBoundaryClass(trimmed);
+  const pattern = new RegExp(`(^|[^${boundaryClass}])${escapeRegExp(trimmed)}($|[^${boundaryClass}])`, "i");
   return pattern.test(text);
 }
 
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function buildBoundaryClass(phrase: string): string {
+  let allowed = "A-Za-z0-9";
+  if (phrase.includes(".")) {
+    allowed += "\\.";
+  }
+  if (phrase.includes("+")) {
+    allowed += "\\+";
+  }
+  if (phrase.includes("/")) {
+    allowed += "/";
+  }
+  if (phrase.includes("_")) {
+    allowed += "_";
+  }
+  if (phrase.includes("-")) {
+    allowed += "-";
+  }
+  return allowed;
 }
 
 function normalizeId(english: string): string {

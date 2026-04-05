@@ -1004,7 +1004,8 @@ function buildStructuredSegmentAuditResult(
 ): StateSegmentAuditResult {
   const chunkId = draftedSegment.segmentId.split("-segment-")[0] ?? `chunk-${draftedSegment.segment.index + 1}`;
   const slice = buildSegmentTaskSlice(state, chunkId, draftedSegment.segmentId);
-  const filteredAudit = suppressCoveredAnchorMustFix(state, draftedSegment, slice, audit);
+  const expandedAudit = expandMissingAnchorMustFixes(audit);
+  const filteredAudit = suppressCoveredAnchorMustFix(state, draftedSegment, slice, expandedAudit);
   const repairTasks: RepairTask[] = filteredAudit.must_fix.map((instruction, index) => ({
     id: `${draftedSegment.segmentId}-repair-${state.repairs.length + index + 1}`,
     segmentId: draftedSegment.segmentId,
@@ -1021,6 +1022,42 @@ function buildStructuredSegmentAuditResult(
     repairTasks,
     rawMustFix: filteredAudit.must_fix
   };
+}
+
+function expandMissingAnchorMustFixes(audit: GateAudit): GateAudit {
+  if (audit.hard_checks.first_mention_bilingual.pass) {
+    return audit;
+  }
+
+  const locationHints = extractBacktickedLocationHints(audit.hard_checks.first_mention_bilingual.problem);
+  if (locationHints.length === 0) {
+    return audit;
+  }
+
+  const existingLocations = new Set(
+    audit.must_fix.flatMap((instruction) => extractBacktickedLocationHints(instruction)).map((item) => item.toLowerCase())
+  );
+  const missingInstructions = locationHints
+    .filter((location) => !existingLocations.has(location.toLowerCase()))
+    .map(
+      (location) =>
+        `位置：\`${location}\`。问题：首次出现的工具/专名未完整建立中英文对照。修复目标：在该位置本身补齐首现锚定。`
+    );
+
+  if (missingInstructions.length === 0) {
+    return audit;
+  }
+
+  return {
+    ...audit,
+    must_fix: [...audit.must_fix, ...missingInstructions]
+  };
+}
+
+function extractBacktickedLocationHints(text: string): string[] {
+  const matches = [...text.matchAll(/`([^`\n]+)`/g)];
+  const values = matches.map((match) => match[1]?.trim()).filter((value): value is string => Boolean(value));
+  return [...new Set(values)];
 }
 
 function suppressCoveredAnchorMustFix(

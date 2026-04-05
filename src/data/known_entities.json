@@ -90,6 +90,28 @@
       "notes": "同位置若被 npm registry 覆盖，可不单独补锚。"
     },
     {
+      "id": "pip",
+      "surface_forms": ["pip"],
+      "aliases": [],
+      "category": "package",
+      "display_policy": "bare_english_ok",
+      "preferred_english": "pip",
+      "preferred_chinese_hint": "Python 包管理工具",
+      "family_id": "pip",
+      "notes": "常见包管理工具名，允许裸英文首现。"
+    },
+    {
+      "id": "cargo",
+      "surface_forms": ["cargo"],
+      "aliases": [],
+      "category": "package",
+      "display_policy": "bare_english_ok",
+      "preferred_english": "cargo",
+      "preferred_chinese_hint": "Rust 包管理工具",
+      "family_id": "cargo",
+      "notes": "常见包管理工具名，允许裸英文首现。"
+    },
+    {
       "id": "ssh-keys",
       "surface_forms": ["SSH keys", "SSH key"],
       "aliases": [],
@@ -110,6 +132,17 @@
       "preferred_chinese_hint": "API 令牌",
       "family_id": "api",
       "notes": "缩写复合术语。"
+    },
+    {
+      "id": "aws-credentials",
+      "surface_forms": ["AWS credentials"],
+      "aliases": [],
+      "category": "credential",
+      "display_policy": "acronym_compound",
+      "preferred_english": "AWS credentials",
+      "preferred_chinese_hint": "AWS 凭据",
+      "family_id": "aws",
+      "notes": "缩写复合凭据名。"
     },
     {
       "id": "sandbox-mode",

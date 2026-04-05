@@ -3742,6 +3742,92 @@ test("translateMarkdownArticle suppresses a short-anchor must_fix when a longer 
   assert.equal(repairPrompt, undefined);
 });
 
+test("translateMarkdownArticle synthesizes missing first-mention repair tasks when audit omits one of multiple locations", async () => {
+  const source = [
+    "### Category 1: Auto-Allowed (No Prompts)",
+    "",
+    "- npm/pip/cargo package registries (default allowlist)",
+    "- ~/.aws/credentials (AWS credentials)",
+    ""
+  ].join("\n");
+
+  class MultiLocationAuditExecutor extends PromptAwareExecutor {
+    readonly repairPrompts: string[] = [];
+
+    override async execute(prompt: string, options: CodexExecOptions): Promise<CodexExecResult> {
+      if (isDocumentAnalysisPrompt(prompt)) {
+        return createExecResult(createEmptyAnchorCatalog());
+      }
+
+      if (options.outputSchema && prompt.includes("【分段审校输入】")) {
+        return createExecResult(
+          wrapPerSegmentAudits(prompt, [
+            {
+              segment_index: 1,
+              audit: createAudit(
+                false,
+                ["第 10 块，`~/.aws/credentials (AWS credentials)`：`AWS credentials` 首次出现未完成中英文对照，需在该条目内补齐首现锚定。"],
+                {
+                  first_mention_bilingual: {
+                    pass: false,
+                    problem:
+                      "第 10 块 / `npm/pip/cargo package registries (default allowlist)` 与 `~/.aws/credentials (AWS credentials)` 两处首次出现的工具/专名未完整建立中英文对照。"
+                  }
+                }
+              )
+            }
+          ])
+        );
+      }
+
+      if (options.outputSchema || prompt.includes("只返回 JSON")) {
+        return createExecResult(JSON.stringify(createAudit(true)));
+      }
+
+      if (prompt.includes("【must_fix】")) {
+        this.repairPrompts.push(prompt);
+        return createExecResult(extractPromptSection(prompt, "【当前译文】") ?? "");
+      }
+
+      return createExecResult([
+        "### 第 1 类：自动允许（无需提示）",
+        "",
+        "- npm/pip/cargo 包注册表（默认允许列表）",
+        "- ~/.aws/credentials（AWS 凭据）",
+        ""
+      ].join("\n"));
+    }
+  }
+
+  const tempDir = await mkdtemp(path.join(tmpdir(), "mdzh-multi-location-repair-"));
+  const debugStatePath = path.join(tempDir, "state.json");
+  const previousDebugStatePath = process.env.MDZH_DEBUG_STATE_PATH;
+  process.env.MDZH_DEBUG_STATE_PATH = debugStatePath;
+
+  const executor = new MultiLocationAuditExecutor();
+  try {
+    const result = await translateMarkdownArticle(source, {
+      executor,
+      formatter: async (markdown) => markdown
+    });
+
+    assert.ok(result.markdown.length > 0);
+    const savedState = JSON.parse(await readFile(debugStatePath, "utf8")) as {
+      anchors: Array<{ english: string }>;
+    };
+    assert.ok(
+      savedState.anchors.some((anchor) => anchor.english === "cargo")
+    );
+  } finally {
+    if (previousDebugStatePath === undefined) {
+      delete process.env.MDZH_DEBUG_STATE_PATH;
+    } else {
+      process.env.MDZH_DEBUG_STATE_PATH = previousDebugStatePath;
+    }
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});
+
 test("translateMarkdownArticle adds structure guidance for translatable emphasis and command flags", async () => {
   const source = [
     "# Title",

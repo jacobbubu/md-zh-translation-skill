@@ -76,7 +76,9 @@ test("buildKnownEntityCatalog applies formal display policies for promoted entit
           "",
           "Enable YOLO mode when needed.",
           "",
-          "A supply chain attacks example can appear in RAG docs and PyPI docs."
+          "A supply chain attacks example can appear in RAG docs and PyPI docs.",
+          "",
+          "pip and cargo can also access AWS credentials when allowed."
         ].join("\n"),
         separatorAfter: "",
         headingPath: ["Sample"],
@@ -88,7 +90,9 @@ test("buildKnownEntityCatalog applies formal display policies for promoted entit
               "",
               "Enable YOLO mode when needed.",
               "",
-              "A supply chain attacks example can appear in RAG docs and PyPI docs."
+              "A supply chain attacks example can appear in RAG docs and PyPI docs.",
+              "",
+              "pip and cargo can also access AWS credentials when allowed."
             ].join("\n"),
             separatorAfter: "",
             spanIds: [],
@@ -123,6 +127,52 @@ test("buildKnownEntityCatalog applies formal display policies for promoted entit
   const promptInjection = slice.requiredAnchors.find((anchor) => anchor.english === "prompt injection attacks");
   assert.ok(promptInjection);
   assert.equal(promptInjection.displayPolicy, "chinese-primary");
+
+  const pip = slice.requiredAnchors.find((anchor) => anchor.english === "pip");
+  assert.ok(pip);
+  assert.equal(pip.displayPolicy, "english-only");
+
+  const cargo = slice.requiredAnchors.find((anchor) => anchor.english === "cargo");
+  assert.ok(cargo);
+  assert.equal(cargo.displayPolicy, "english-only");
+
+  const awsCredentials = slice.requiredAnchors.find((anchor) => anchor.english === "AWS credentials");
+  assert.ok(awsCredentials);
+  assert.equal(awsCredentials.displayPolicy, "acronym-compound");
+});
+
+test("buildKnownEntityCatalog matches slash-delimited bare-english tools as separate formal entities", () => {
+  const state = createTranslationRunState({
+    sourcePathHint: "sample.md",
+    documentTitle: "Sample",
+    frontmatterPresent: false,
+    protectedSpans: [],
+    chunks: [
+      {
+        source: "- npm/pip/cargo package registries (default allowlist)\n",
+        separatorAfter: "",
+        headingPath: ["Sample"],
+        segments: [
+          {
+            kind: "translatable",
+            source: "- npm/pip/cargo package registries (default allowlist)\n",
+            separatorAfter: "",
+            spanIds: [],
+            headingHints: [],
+            specialNotes: []
+          }
+        ]
+      }
+    ]
+  });
+
+  const catalog = buildKnownEntityCatalog(state);
+  applyAnchorCatalog(state, catalog);
+  const slice = buildSegmentTaskSlice(state, "chunk-1", "chunk-1-segment-1");
+
+  assert.ok(slice.requiredAnchors.some((anchor) => anchor.english === "npm"));
+  assert.ok(slice.requiredAnchors.some((anchor) => anchor.english === "pip"));
+  assert.ok(slice.requiredAnchors.some((anchor) => anchor.english === "cargo"));
 });
 
 test("mergeAnchorCatalogs keeps formal known entities ahead of discovered duplicates", () => {
