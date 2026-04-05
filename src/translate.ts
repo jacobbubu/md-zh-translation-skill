@@ -519,10 +519,17 @@ async function analyzeDocumentForAnchors(
   state: TranslationRunState,
   context: Pick<ChunkTranslationContext, "executor" | "postDraftModel" | "cwd" | "options" | "postDraftReasoningEffort">
 ): Promise<AnchorCatalog> {
+  report(context.options, "analyze", "Loading formal known_entities.");
   const knownEntities = loadKnownEntities();
   const formalCatalog = buildKnownEntityCatalog(state, knownEntities);
+  report(
+    context.options,
+    "analyze",
+    `Matched ${formalCatalog.anchors.length} formal known_entities in source.`
+  );
   const prompt = buildDocumentAnalysisPrompt(buildDocumentAnalysisInput(state));
   try {
+    report(context.options, "analyze", "Starting model-based anchor discovery.");
     const result = await context.executor.execute(prompt, {
       cwd: context.cwd,
       model: context.postDraftModel,
@@ -537,13 +544,36 @@ async function analyzeDocumentForAnchors(
       }
     });
     const discoveredCatalog = parseAnchorCatalog(result.text);
-    await writeKnownEntityCandidatesIfRequested(discoveredCatalog, knownEntities);
-    return mergeAnchorCatalogs(formalCatalog, discoveredCatalog);
+    report(
+      context.options,
+      "analyze",
+      `Model-based anchor discovery finished: ${discoveredCatalog.anchors.length} anchors, ${discoveredCatalog.ignoredTerms.length} ignored term(s).`
+    );
+    const candidateWrite = await writeKnownEntityCandidatesIfRequested(discoveredCatalog, knownEntities);
+    if (candidateWrite.written) {
+      report(
+        context.options,
+        "analyze",
+        `Wrote ${candidateWrite.count} known_entity candidate(s) to ${candidateWrite.outputPath}.`
+      );
+    }
+    const mergedCatalog = mergeAnchorCatalogs(formalCatalog, discoveredCatalog);
+    report(
+      context.options,
+      "analyze",
+      `Merged formal and discovered anchors: ${mergedCatalog.anchors.length} total.`
+    );
+    return mergedCatalog;
   } catch (error) {
     report(
       context.options,
       "analyze",
       `Document anchor analysis failed, falling back to an empty catalog: ${error instanceof Error ? error.message : String(error)}`
+    );
+    report(
+      context.options,
+      "analyze",
+      `Using ${formalCatalog.anchors.length} formal known_entities only.`
     );
     return formalCatalog;
   }

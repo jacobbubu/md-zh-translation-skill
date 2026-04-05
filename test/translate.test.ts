@@ -4067,3 +4067,51 @@ test("translateMarkdownArticle exports debug state when MDZH_DEBUG_STATE_PATH is
     await rm(tempDir, { recursive: true, force: true });
   }
 });
+
+test("translateMarkdownArticle reports known-entity analysis stages to progress hooks", async () => {
+  const tempDir = await mkdtemp(path.join(tmpdir(), "mdzh-known-entity-progress-"));
+  const candidatePath = path.join(tempDir, "known_entities_candidates.json");
+  const previous = process.env.MDZH_KNOWN_ENTITIES_CANDIDATES_PATH;
+  process.env.MDZH_KNOWN_ENTITIES_CANDIDATES_PATH = candidatePath;
+
+  class KnownEntityProgressExecutor extends PromptAwareExecutor {
+    override async execute(prompt: string, options: CodexExecOptions): Promise<CodexExecResult> {
+      if (isDocumentAnalysisPrompt(prompt)) {
+        return createExecResult(
+          createAnchorCatalog([
+            {
+              english: "Seatbelt",
+              chineseHint: "macOS 沙箱框架",
+              familyKey: "seatbelt"
+            }
+          ])
+        );
+      }
+
+      return super.execute(prompt, options);
+    }
+  }
+
+  try {
+    const progress: string[] = [];
+    await translateMarkdownArticle("Tell Claude to use sandbox mode with Seatbelt.\n", {
+      executor: new KnownEntityProgressExecutor(),
+      formatter: async (markdown) => markdown,
+      onProgress: (message) => progress.push(message)
+    });
+
+    assert.ok(progress.some((message) => message.includes("Loading formal known_entities.")));
+    assert.ok(progress.some((message) => message.includes("Matched 2 formal known_entities in source.")));
+    assert.ok(progress.some((message) => message.includes("Starting model-based anchor discovery.")));
+    assert.ok(progress.some((message) => message.includes("Model-based anchor discovery finished: 1 anchors, 0 ignored term(s).")));
+    assert.ok(progress.some((message) => message.includes("Wrote 1 known_entity candidate(s) to")));
+    assert.ok(progress.some((message) => message.includes("Merged formal and discovered anchors: 3 total.")));
+  } finally {
+    if (previous === undefined) {
+      delete process.env.MDZH_KNOWN_ENTITIES_CANDIDATES_PATH;
+    } else {
+      process.env.MDZH_KNOWN_ENTITIES_CANDIDATES_PATH = previous;
+    }
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});

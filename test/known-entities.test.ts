@@ -172,7 +172,7 @@ test("writeKnownEntityCandidatesIfRequested persists unknown anchors into a cand
   process.env.MDZH_KNOWN_ENTITIES_CANDIDATES_PATH = outputPath;
 
   try {
-    await writeKnownEntityCandidatesIfRequested({
+    const result = await writeKnownEntityCandidatesIfRequested({
       anchors: [
         {
           english: "Seatbelt",
@@ -188,6 +188,10 @@ test("writeKnownEntityCandidatesIfRequested persists unknown anchors into a cand
       ],
       ignoredTerms: []
     });
+
+    assert.equal(result.written, true);
+    assert.equal(result.count, 1);
+    assert.equal(result.outputPath, outputPath);
 
     const saved = JSON.parse(await readFile(outputPath, "utf8")) as {
       version: number;

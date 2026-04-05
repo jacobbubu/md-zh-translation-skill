@@ -55,6 +55,12 @@ export type KnownEntityCandidatesFile = {
   entities: KnownEntityCandidateRecord[];
 };
 
+export type KnownEntityCandidateWriteResult = {
+  written: boolean;
+  count: number;
+  outputPath?: string;
+};
+
 let cachedKnownEntities: KnownEntitiesFile | null = null;
 
 export function loadKnownEntities(): KnownEntitiesFile {
@@ -122,10 +128,13 @@ export function mergeAnchorCatalogs(
 export async function writeKnownEntityCandidatesIfRequested(
   catalog: AnchorCatalog,
   knownEntities: KnownEntitiesFile = loadKnownEntities()
-): Promise<void> {
+): Promise<KnownEntityCandidateWriteResult> {
   const outputPath = process.env.MDZH_KNOWN_ENTITIES_CANDIDATES_PATH?.trim();
   if (!outputPath) {
-    return;
+    return {
+      written: false,
+      count: 0
+    };
   }
 
   const candidates = deriveKnownEntityCandidates(catalog, knownEntities);
@@ -143,6 +152,11 @@ export async function writeKnownEntityCandidatesIfRequested(
     )}\n`,
     "utf8"
   );
+  return {
+    written: true,
+    count: candidates.length,
+    outputPath
+  };
 }
 
 function deriveKnownEntityCandidates(
