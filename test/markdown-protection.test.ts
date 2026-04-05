@@ -214,7 +214,10 @@ test("protectSegmentFormattingSpans keeps inline code visible while still preser
   const protectedMarkdown = protectSegmentFormattingSpans(source, 7000);
 
   assert.match(protectedMarkdown.protectedBody, /`~\/\.bashrc`/);
-  assert.match(protectedMarkdown.protectedBody, /\*\*Deny\*\*/);
+  assert.match(
+    protectedMarkdown.protectedBody,
+    /<mdzh-strong-7000>Deny<\/mdzh-strong-7000>/
+  );
   assert.match(protectedMarkdown.protectedBody, /\*\*Expected behavior:\*\*/);
   assert.equal(restoreMarkdownSpans(protectedMarkdown.protectedBody, protectedMarkdown.spans), source);
 });
@@ -248,4 +251,28 @@ test("protectSegmentFormattingSpans does not create local inline code placeholde
   assert.doesNotMatch(protectedMarkdown.protectedBody, /@@MDZH_INLINE_CODE_7100@@/);
   assert.equal(protectedMarkdown.spans.some((span) => span.kind === "inline_code"), false);
   assert.equal(restoreMarkdownSpans(protectedMarkdown.protectedBody, protectedMarkdown.spans), source);
+});
+
+test("restoreMarkdownSpans recovers dropped strong-emphasis tags from plain occurrences outside existing tags", () => {
+  const source = [
+    "<mdzh-strong-0075>macOS</mdzh-strong-0075> — Works on all recent versions (10.14+)",
+    "",
+    "<mdzh-strong-0076>Linux</mdzh-strong-0076> — Works on most distributions",
+    ""
+  ].join("\n");
+  const spans = [
+    { id: "@@MDZH_STRONG_EMPHASIS_0075@@", kind: "strong_emphasis" as const, raw: "**macOS**" },
+    { id: "@@MDZH_STRONG_EMPHASIS_0076@@", kind: "strong_emphasis" as const, raw: "**Linux**" }
+  ];
+  const translatedWithoutTags = [
+    "macOS（苹果操作系统）— 适用于所有较新的版本（10.14+）",
+    "",
+    "Linux（Linux 操作系统）— 适用于大多数发行版",
+    ""
+  ].join("\n");
+
+  const restored = restoreMarkdownSpans(translatedWithoutTags, spans);
+
+  assert.match(restored, /\*\*macOS\*\*（苹果操作系统）— 适用于所有较新的版本/);
+  assert.match(restored, /\*\*Linux\*\*（Linux 操作系统）— 适用于大多数发行版/);
 });

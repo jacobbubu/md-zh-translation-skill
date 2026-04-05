@@ -3840,12 +3840,46 @@ test("translateMarkdownArticle adds structure guidance for translatable emphasis
   const prompt = executor.prompts.find(
     (item) =>
       !isDocumentAnalysisPrompt(item) &&
-      (item.includes("**now has a sandbox mode**") || item.includes("--dangerously-skip-permissions"))
+      (item.includes("<mdzh-strong-") || item.includes("--dangerously-skip-permissions"))
   );
   assert.ok(prompt);
   assert.match(prompt, /【当前分段附加规则】/);
   assert.match(prompt, /当前分段包含可翻译的 Markdown 强调结构或命令\/flag 写法/);
+  assert.match(prompt, /<mdzh-strong-\d{4}>now has a sandbox mode<\/mdzh-strong-\d{4}>/);
+  assert.match(prompt, /原样保留标签本身/);
   assert.match(prompt, /--dangerously-skip-permissions/);
+});
+
+test("translateMarkdownArticle restores visible strong-emphasis markers back to markdown emphasis even when the model drops the tags", async () => {
+  const source = "Claude Code **now has a sandbox mode** that changes the workflow.\n";
+
+  class StrongMarkerExecutor implements CodexExecutor {
+    async execute(prompt: string, options: CodexExecOptions): Promise<CodexExecResult> {
+      if (isDocumentAnalysisPrompt(prompt)) {
+        return createExecResult(JSON.stringify({ anchors: [] }));
+      }
+
+      if (options.outputSchema || prompt.includes('"hard_checks"') || prompt.includes("只返回 JSON")) {
+        return createExecResult(wrapAuditForSegments(prompt, createAudit(true)));
+      }
+
+      const protectedSource = extractPromptSection(prompt, "【英文原文】") ?? "";
+      const translated = protectedSource
+        .replace(/<mdzh-strong-\d{4}>/g, "")
+        .replace(/<\/mdzh-strong-\d{4}>/g, "")
+        .replace("Claude Code", "Claude Code（Anthropic 的命令行编码助手）")
+        .replace("now has a sandbox mode", "现在有了沙盒模式")
+        .replace("that changes the workflow.", "，这改变了工作流程。");
+      return createExecResult(translated);
+    }
+  }
+
+  const result = await translateMarkdownArticle(source, {
+    executor: new StrongMarkerExecutor(),
+    formatter: async (markdown) => markdown
+  });
+
+  assert.match(result.markdown, /现在有了\*\*沙盒模式（sandbox mode）\*\*/);
 });
 
 test("translateMarkdownArticle fails when the hard-pass translation already broke a protected span", async () => {

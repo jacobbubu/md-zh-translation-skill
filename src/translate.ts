@@ -745,6 +745,7 @@ function buildSegmentPromptContext(
   source: string
 ): ChunkPromptContext {
   const slice = buildSegmentTaskSlice(state, `chunk-${chunk.index + 1}`, segmentId);
+  const specialNotes = buildSegmentSpecialNotes(source, slice);
   return {
     documentTitle: plan.documentTitle,
     headingPath: chunk.headingPath,
@@ -752,7 +753,7 @@ function buildSegmentPromptContext(
     chunkCount: plan.chunks.length,
     sourcePathHint,
     segmentHeadings: extractSegmentHeadingHints(source),
-    specialNotes: extractSegmentSpecialNotes(source),
+    specialNotes,
     requiredAnchors: slice.requiredAnchors.map(summarizePromptAnchor),
     repeatAnchors: slice.repeatAnchors.map(summarizePromptAnchor),
     establishedAnchors: slice.establishedAnchors.map(summarizePromptAnchor),
@@ -773,6 +774,7 @@ function buildChunkStylePromptContext(
   const combinedEstablished = chunkSegments.flatMap((segment) =>
     buildSegmentTaskSlice(state, chunkId, segment.id).requiredAnchors.map(summarizePromptAnchor)
   );
+  const specialNotes = extractSegmentSpecialNotes(source);
   return {
     documentTitle: plan.documentTitle,
     headingPath: chunk.headingPath,
@@ -780,7 +782,7 @@ function buildChunkStylePromptContext(
     chunkCount: plan.chunks.length,
     sourcePathHint,
     segmentHeadings: extractSegmentHeadingHints(source),
-    specialNotes: extractSegmentSpecialNotes(source),
+    specialNotes,
     requiredAnchors: [],
     repeatAnchors: [],
     establishedAnchors: [...new Set(combinedEstablished)],
@@ -1454,6 +1456,60 @@ function restoreInlineCodeFromSourceShape(source: string, translated: string): s
   return changed ? translatedLines.join("\n") : translated;
 }
 
+function restoreStrongEmphasisFromSourceShape(
+  source: string,
+  translated: string,
+  slice: PromptSlice | null
+): string {
+  if (!source.includes("<mdzh-strong-")) {
+    return translated;
+  }
+
+  const sourceLines = source.split(/\r?\n/);
+  const translatedLines = translated.split(/\r?\n/);
+  let changed = false;
+
+  for (let index = 0; index < Math.min(sourceLines.length, translatedLines.length); index += 1) {
+    const sourceLine = sourceLines[index] ?? "";
+    let translatedLine = translatedLines[index] ?? "";
+    const emphasisMatches = [...sourceLine.matchAll(/<(?<tag>mdzh-strong-\d{4})>(?<content>[^<\n]+)<\/\k<tag>>/g)];
+    if (emphasisMatches.length === 0) {
+      continue;
+    }
+
+    for (const match of emphasisMatches) {
+      const tagName = match.groups?.tag;
+      const content = match.groups?.content?.trim();
+      if (!tagName || !content) {
+        continue;
+      }
+
+      if (translatedLine.includes(`<${tagName}>`) && translatedLine.includes(`</${tagName}>`)) {
+        continue;
+      }
+
+      const candidates = buildStrongEmphasisRecoveryCandidates(content, slice);
+      for (const candidate of candidates) {
+        const restoredLine = wrapPlainOccurrenceOutsideInlineCodeWithWrapper(
+          translatedLine,
+          candidate,
+          `<${tagName}>`,
+          `</${tagName}>`
+        );
+        if (restoredLine !== translatedLine) {
+          translatedLine = restoredLine;
+          changed = true;
+          break;
+        }
+      }
+    }
+
+    translatedLines[index] = translatedLine;
+  }
+
+  return changed ? translatedLines.join("\n") : translated;
+}
+
 function collectInlineCodeCounts(text: string): Map<string, number> {
   const counts = new Map<string, number>();
   for (const match of text.matchAll(/`([^`\n]+)`/g)) {
@@ -1526,15 +1582,126 @@ function wrapPlainOccurrenceOutsideInlineCode(text: string, token: string): stri
 }
 
 function replacePlainTokenInSegment(segment: string, token: string): { segment: string; replaced: boolean } {
+  return replacePlainTokenInSegmentWithWrapper(segment, token, "`", "`");
+}
+
+function replacePlainTokenInSegmentWithWrapper(
+  segment: string,
+  token: string,
+  prefix: string,
+  suffix: string
+): { segment: string; replaced: boolean } {
   const index = segment.indexOf(token);
   if (index < 0) {
     return { segment, replaced: false };
   }
 
   return {
-    segment: `${segment.slice(0, index)}\`${token}\`${segment.slice(index + token.length)}`,
+    segment: `${segment.slice(0, index)}${prefix}${token}${suffix}${segment.slice(index + token.length)}`,
     replaced: true
   };
+}
+
+function buildStrongEmphasisRecoveryCandidates(content: string, slice: PromptSlice | null): string[] {
+  const candidates: string[] = [];
+  const normalizedContent = content.trim().toLowerCase();
+  if (!normalizedContent) {
+    return candidates;
+  }
+
+  for (const anchor of [
+    ...(slice?.requiredAnchors ?? []),
+    ...(slice?.repeatAnchors ?? []),
+    ...(slice?.establishedAnchors ?? [])
+  ]) {
+    const english = anchor.english.trim().toLowerCase();
+    if (!english || !normalizedContent.includes(english)) {
+      continue;
+    }
+
+    if (anchor.canonicalDisplay) {
+      candidates.push(anchor.canonicalDisplay);
+    }
+    if (anchor.allowedDisplayForms) {
+      candidates.push(...anchor.allowedDisplayForms);
+    }
+    candidates.push(formatAnchorDisplay(anchor), anchor.chineseHint, anchor.english);
+  }
+
+  candidates.push(content);
+  return [...new Set(candidates.map((item) => item.trim()).filter(Boolean))].sort((left, right) => right.length - left.length);
+}
+
+function wrapPlainOccurrenceOutsideInlineCodeWithWrapper(
+  text: string,
+  token: string,
+  prefix: string,
+  suffix: string
+): string {
+  if (!token) {
+    return text;
+  }
+
+  if (
+    text.includes(`${prefix}${token}${suffix}`) ||
+    text.includes(`**${token}**`) ||
+    text.includes(`__${token}__`)
+  ) {
+    return text;
+  }
+
+  let output = "";
+  let index = 0;
+  let textStart = 0;
+
+  while (index < text.length) {
+    if (text[index] !== "`") {
+      index += 1;
+      continue;
+    }
+
+    const plainSegment = text.slice(textStart, index);
+    const replaced = replacePlainTokenInSegmentWithWrapper(plainSegment, token, prefix, suffix);
+    output += replaced.segment;
+    if (replaced.replaced) {
+      output += text.slice(index);
+      return output;
+    }
+
+    let tickCount = 1;
+    while (text[index + tickCount] === "`") {
+      tickCount += 1;
+    }
+
+    const fence = "`".repeat(tickCount);
+    const inlineStart = index;
+    index += tickCount;
+
+    let closingIndex = -1;
+    while (index < text.length) {
+      if (text.slice(index, index + tickCount) === fence) {
+        closingIndex = index;
+        break;
+      }
+      index += 1;
+    }
+
+    if (closingIndex < 0) {
+      output += text.slice(inlineStart, inlineStart + tickCount);
+      textStart = inlineStart + tickCount;
+      index = textStart;
+      continue;
+    }
+
+    output += text.slice(inlineStart, closingIndex + tickCount);
+    index = closingIndex + tickCount;
+    textStart = index;
+  }
+
+  const tail = text.slice(textStart);
+  const replacedTail = replacePlainTokenInSegmentWithWrapper(tail, token, prefix, suffix);
+  output += replacedTail.segment;
+  return output;
 }
 
 function collectPlainCommandTokens(
@@ -1664,9 +1831,14 @@ async function translateProtectedSegment(
     normalizedHeadingDraftText,
     chunkPromptContext.stateSlice
   );
+  const restoredStrongDraftText = restoreStrongEmphasisFromSourceShape(
+    protectedSource,
+    normalizedSurfaceDraftText,
+    chunkPromptContext.stateSlice
+  );
   const restoredInlineDraftText = restoreInlineCodeFromSourceShape(
     protectedSource,
-    normalizedSurfaceDraftText
+    restoredStrongDraftText
   );
   const canonicalProtectedBody = reprotectMarkdownSpans(restoredInlineDraftText, combinedSpans);
   const restoredBody = restoreMarkdownSpans(canonicalProtectedBody, combinedSpans);
@@ -1774,9 +1946,14 @@ async function repairDraftedSegment(
       normalizedExplicitRepairText,
       buildSegmentTaskSlice(context.state, context.chunkId, draftedSegment.segmentId)
     );
+    const restoredStrongRepairText = restoreStrongEmphasisFromSourceShape(
+      draftedSegment.protectedSource,
+      normalizedSurfaceRepairText,
+      buildSegmentTaskSlice(context.state, context.chunkId, draftedSegment.segmentId)
+    );
     const restoredInlineRepairText = restoreInlineCodeFromSourceShape(
       draftedSegment.protectedSource,
-      normalizedSurfaceRepairText
+      restoredStrongRepairText
     );
     draftedSegment.protectedBody = reprotectMarkdownSpans(restoredInlineRepairText, draftedSegment.spans);
     draftedSegment.restoredBody = restoreMarkdownSpans(draftedSegment.protectedBody, draftedSegment.spans);
@@ -2645,10 +2822,7 @@ function extractSegmentSpecialNotes(source: string): string[] {
   const notes: string[] = [];
 
   if (containsHeadingLikeBlock(source)) {
-    notes.push(
-      "当前分段包含标题或加粗标题。若标题中的关键术语、产品名、项目名或专业概念是全文首次出现，必须直接在标题本身补齐中英文对照；不要把这类修复转移到正文其他句子里。",
-      "修复标题首现双语时，只补局部术语或专名本身，不要把整条标题原句附上英文，也不要只润色中文标题却遗漏必须补齐的英文锚点。"
-    );
+    notes.push("当前分段包含标题或加粗标题。请保留标题层级、加粗标记和原有标点结构，不要把标题改写成正文句子。");
   }
 
   if (containsAttributionLikeBlock(source)) {
@@ -2689,11 +2863,52 @@ function extractSegmentSpecialNotes(source: string): string[] {
   if (containsTranslatableMarkdownStructure(source)) {
     notes.push(
       "当前分段包含可翻译的 Markdown 强调结构或命令/flag 写法。翻译时必须保留等价结构：原文中的 **加粗**、*斜体* 等强调，不得无故去掉；像 --dangerously-skip-permissions 这类命令参数或 flag，应保留原始写法，不要改成代码块、标题、列表标签或其他 Markdown 结构。",
-      "如果强调结构里的正文需要翻译，请翻译内容本身，但保留强调标记；如果命令、flag、配置键名或 CLI 参数本身是英文原名，请保留原名，只翻译周围解释。"
+      "如果强调结构里的正文需要翻译，请翻译内容本身，但保留强调标记；如果命令、flag、配置键名或 CLI 参数本身是英文原名，请保留原名，只翻译周围解释。",
+      "系统可能把可翻译的粗体显示成 `<mdzh-strong-0001>...</mdzh-strong-0001>` 这类结构标记。遇到这类标记时，必须原样保留标签本身，只翻译中间正文；系统会在输出阶段自动还原成 Markdown 粗体。"
     );
   }
 
   return notes;
+}
+
+const HEADING_ANCHOR_SPECIAL_NOTES = [
+  "当前分段包含标题或加粗标题。若标题中的关键术语、产品名、项目名或专业概念是全文首次出现，必须直接在标题本身补齐中英文对照；不要把这类修复转移到正文其他句子里。",
+  "修复标题首现双语时，只补局部术语或专名本身，不要把整条标题原句附上英文，也不要只润色中文标题却遗漏必须补齐的英文锚点。"
+] as const;
+
+function buildSegmentSpecialNotes(source: string, slice: PromptSlice): string[] {
+  const notes = extractSegmentSpecialNotes(source);
+  if (!containsHeadingLikeBlock(source)) {
+    return notes;
+  }
+
+  if (shouldAddHeadingAnchorSpecialNotes(source, slice)) {
+    notes.push(...HEADING_ANCHOR_SPECIAL_NOTES);
+  }
+
+  return notes;
+}
+
+function shouldAddHeadingAnchorSpecialNotes(source: string, slice: PromptSlice): boolean {
+  const headingHints = extractSegmentHeadingHints(source);
+  if (headingHints.length === 0) {
+    return false;
+  }
+
+  const hasRequiredHeadingAnchor = slice.requiredAnchors.some((anchor) =>
+    headingHints.some(
+      (heading) =>
+        heading.toLowerCase().includes(anchor.english.trim().toLowerCase()) ||
+        heading.includes(anchor.chineseHint)
+    )
+  );
+  if (hasRequiredHeadingAnchor) {
+    return true;
+  }
+
+  return slice.pendingRepairs.some(
+    (repair) => repair.locationLabel.includes("标题") || repair.instruction.includes("标题")
+  );
 }
 
 function containsAttributionLikeBlock(source: string): boolean {

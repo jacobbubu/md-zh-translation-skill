@@ -83,8 +83,23 @@ export function protectMarkdownSpans(body: string): ProtectedMarkdown {
 }
 
 export function protectSegmentFormattingSpans(body: string, startIndex = 1): ProtectedMarkdown {
-  void startIndex;
-  return { protectedBody: body, spans: [] };
+  const spans: ProtectedSpan[] = [];
+  let nextIndex = startIndex;
+
+  const registerStrongEmphasis = (raw: string): string => {
+    const currentIndex = nextIndex;
+    const id = createPlaceholder("strong_emphasis", currentIndex);
+    nextIndex += 1;
+    spans.push({ id, kind: "strong_emphasis", raw });
+    const content = raw.slice(2, -2);
+    const tagName = createStrongEmphasisTagName(currentIndex);
+    return `<${tagName}>${content}</${tagName}>`;
+  };
+
+  return {
+    protectedBody: protectInlineStrongEmphasis(body, registerStrongEmphasis),
+    spans
+  };
 }
 
 function protectFencedCodeBlocks(
@@ -233,7 +248,7 @@ function protectInlineMarkdownLinks(
 
 function protectInlineStrongEmphasis(
   input: string,
-  register: (kind: ProtectedKind, raw: string) => string
+  register: (raw: string) => string
 ): string {
   return input
     .split(/\r?\n/)
@@ -243,7 +258,7 @@ function protectInlineStrongEmphasis(
 
 function protectInlineStrongEmphasisInLine(
   line: string,
-  register: (kind: ProtectedKind, raw: string) => string
+  register: (raw: string) => string
 ): string {
   const pattern = /(\*\*[^*\n][^*\n]{0,80}\*\*|__[^_\n][^_\n]{0,80}__)/g;
   return line.replace(pattern, (raw) => {
@@ -257,7 +272,7 @@ function protectInlineStrongEmphasisInLine(
       return raw;
     }
 
-    return register("strong_emphasis", raw);
+    return register(raw);
   });
 }
 
@@ -319,7 +334,13 @@ export function restoreMarkdownSpans(protectedBody: string, spans: ProtectedSpan
   let output = reprotectMarkdownSpans(protectedBody, spans);
 
   for (const span of spans) {
+    if (span.kind === "strong_emphasis") {
+      output = restoreStrongEmphasisPair(output, span);
+      continue;
+    }
+
     const matches = output.match(new RegExp(escapeRegex(span.id), "g")) ?? [];
+
     if (matches.length === 1) {
       output = output.replace(span.id, span.raw);
       continue;
@@ -346,7 +367,14 @@ export function reprotectMarkdownSpans(protectedBody: string, spans: ProtectedSp
   for (const span of spans) {
     output = canonicalizeWrappedPlaceholder(output, span);
 
+    if (span.kind === "strong_emphasis") {
+      output = recoverMissingStrongEmphasisTag(output, span) ?? output;
+      assertStrongEmphasisTagIntegrity(output, span);
+      continue;
+    }
+
     const matches = output.match(new RegExp(escapeRegex(span.id), "g")) ?? [];
+
     if (matches.length === 1) {
       continue;
     }
@@ -384,7 +412,7 @@ function canonicalizeWrappedPlaceholder(output: string, span: ProtectedSpan): st
     case "inline_code":
       return replaceWrappedPlaceholder(output, span.id, ["`"]) ?? output;
     case "strong_emphasis":
-      return replaceWrappedPlaceholder(output, span.id, ["**", "__"]) ?? output;
+      return canonicalizeWrappedStrongEmphasisTag(output, span) ?? output;
     default:
       return output;
   }
@@ -448,6 +476,185 @@ function replaceWrappedPlaceholder(source: string, placeholder: string, wrappers
     }
   }
   return null;
+}
+
+function createStrongEmphasisTagName(index: number): string {
+  return `mdzh-strong-${String(index).padStart(4, "0")}`;
+}
+
+function getStrongEmphasisTagName(span: ProtectedSpan): string {
+  const match = span.id.match(/_(\d{4,})@@$/);
+  return createStrongEmphasisTagName(Number(match?.[1] ?? "0"));
+}
+
+function canonicalizeWrappedStrongEmphasisTag(source: string, span: ProtectedSpan): string | null {
+  const delimiter = span.raw.startsWith("__") ? "__" : "**";
+  const tagName = getStrongEmphasisTagName(span);
+  const wrappedPattern = new RegExp(
+    `${escapeRegex(delimiter)}<${tagName}>([\\s\\S]*?)<\\/${tagName}>${escapeRegex(delimiter)}`
+  );
+  const match = source.match(wrappedPattern);
+  if (!match) {
+    return null;
+  }
+
+  return source.replace(wrappedPattern, `<${tagName}>${match[1] ?? ""}</${tagName}>`);
+}
+
+function restoreStrongEmphasisPair(source: string, span: ProtectedSpan): string {
+  const tagName = getStrongEmphasisTagName(span);
+  const pattern = new RegExp(`<${tagName}>([\\s\\S]*?)<\\/${tagName}>`);
+  const match = source.match(pattern);
+  if (!match) {
+    throw new HardGateError(
+      `Protected span integrity failed for ${span.id}: expected a matching strong-emphasis tag pair.`
+    );
+  }
+
+  const delimiter = span.raw.startsWith("__") ? "__" : "**";
+  const innerText = match[1] ?? "";
+  return source.replace(pattern, `${delimiter}${innerText}${delimiter}`);
+}
+
+function assertStrongEmphasisTagIntegrity(source: string, span: ProtectedSpan): void {
+  const tagName = getStrongEmphasisTagName(span);
+  const openMatches = source.match(new RegExp(`<${tagName}>`, "g")) ?? [];
+  const closeMatches = source.match(new RegExp(`<\\/${tagName}>`, "g")) ?? [];
+  if (openMatches.length === 1 && closeMatches.length === 1) {
+    return;
+  }
+
+  throw new HardGateError(
+    `Protected span integrity failed for ${span.id}: expected 1 strong-emphasis tag pair, found ${openMatches.length} opening and ${closeMatches.length} closing tags.`
+  );
+}
+
+function recoverMissingStrongEmphasisTag(source: string, span: ProtectedSpan): string | null {
+  const tagName = getStrongEmphasisTagName(span);
+  if (source.includes(`<${tagName}>`) && source.includes(`</${tagName}>`)) {
+    return null;
+  }
+
+  const content = span.raw.slice(2, -2).trim();
+  if (!content) {
+    return null;
+  }
+
+  const tagWrapped = `<${tagName}>${content}</${tagName}>`;
+  const literalWrapped = replaceFirstLiteral(source, span.raw, tagWrapped);
+  if (literalWrapped !== null) {
+    return literalWrapped;
+  }
+
+  return wrapPlainOccurrenceOutsideInlineCodeAndStrongTags(source, content, `<${tagName}>`, `</${tagName}>`);
+}
+
+function wrapPlainOccurrenceOutsideInlineCodeAndStrongTags(
+  text: string,
+  token: string,
+  prefix: string,
+  suffix: string
+): string | null {
+  if (!token) {
+    return null;
+  }
+
+  if (
+    text.includes(`${prefix}${token}${suffix}`) ||
+    text.includes(`**${token}**`) ||
+    text.includes(`__${token}__`)
+  ) {
+    return null;
+  }
+
+  let output = "";
+  let index = 0;
+  let textStart = 0;
+
+  while (index < text.length) {
+    if (text[index] === "`") {
+      const plainSegment = text.slice(textStart, index);
+      const replaced = replacePlainTokenInSegmentWithWrapper(plainSegment, token, prefix, suffix);
+      output += replaced.segment;
+      if (replaced.replaced) {
+        output += text.slice(index);
+        return output;
+      }
+
+      const skippedInline = skipInlineCode(text, index);
+      if (skippedInline === null) {
+        output += text.slice(index);
+        return null;
+      }
+
+      output += text.slice(index, skippedInline);
+      index = skippedInline;
+      textStart = index;
+      continue;
+    }
+
+    const strongTagMatch = text.slice(index).match(/^<mdzh-strong-\d{4}>[\s\S]*?<\/mdzh-strong-\d{4}>/);
+    if (strongTagMatch) {
+      const plainSegment = text.slice(textStart, index);
+      const replaced = replacePlainTokenInSegmentWithWrapper(plainSegment, token, prefix, suffix);
+      output += replaced.segment;
+      if (replaced.replaced) {
+        output += text.slice(index);
+        return output;
+      }
+
+      const matched = strongTagMatch[0];
+      output += matched;
+      index += matched.length;
+      textStart = index;
+      continue;
+    }
+
+    index += 1;
+  }
+
+  const tail = text.slice(textStart);
+  const replacedTail = replacePlainTokenInSegmentWithWrapper(tail, token, prefix, suffix);
+  if (!replacedTail.replaced) {
+    return null;
+  }
+  output += replacedTail.segment;
+  return output;
+}
+
+function skipInlineCode(text: string, startIndex: number): number | null {
+  let tickCount = 1;
+  while (text[startIndex + tickCount] === "`") {
+    tickCount += 1;
+  }
+
+  const fence = "`".repeat(tickCount);
+  let index = startIndex + tickCount;
+  while (index < text.length) {
+    if (text.slice(index, index + tickCount) === fence) {
+      return index + tickCount;
+    }
+    index += 1;
+  }
+
+  return null;
+}
+
+function replacePlainTokenInSegmentWithWrapper(
+  segment: string,
+  token: string,
+  prefix: string,
+  suffix: string
+): { segment: string; replaced: boolean } {
+  const index = segment.indexOf(token);
+  if (index < 0) {
+    return { segment, replaced: false };
+  }
+
+  return {
+    segment: `${segment.slice(0, index)}${prefix}${token}${suffix}${segment.slice(index + token.length)}`,
+    replaced: true
+  };
 }
 
 function replaceMissingMarkdownLinkDestination(source: string, span: ProtectedSpan): string | null {
