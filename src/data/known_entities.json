@@ -110,6 +110,72 @@
       "preferred_chinese_hint": "API 令牌",
       "family_id": "api",
       "notes": "缩写复合术语。"
+    },
+    {
+      "id": "sandbox-mode",
+      "surface_forms": ["sandbox mode", "Sandbox mode"],
+      "aliases": [],
+      "category": "concept",
+      "display_policy": "chinese_primary_with_en_anchor",
+      "preferred_english": "sandbox mode",
+      "preferred_chinese_hint": "沙盒模式",
+      "family_id": "sandbox_mode",
+      "notes": "核心概念术语，使用中文主译加英文锚定。"
+    },
+    {
+      "id": "yolo-mode",
+      "surface_forms": ["YOLO mode"],
+      "aliases": [],
+      "category": "concept",
+      "display_policy": "english_primary_with_cn_hint",
+      "preferred_english": "YOLO mode",
+      "preferred_chinese_hint": "YOLO 模式",
+      "family_id": "yolo_mode",
+      "notes": "常见英文模式名，保留英文主名并补中文说明。"
+    },
+    {
+      "id": "prompt-injection-attacks",
+      "surface_forms": ["prompt injection attacks", "Prompt injection attacks"],
+      "aliases": ["prompt injection"],
+      "category": "concept",
+      "display_policy": "chinese_primary_with_en_anchor",
+      "preferred_english": "prompt injection attacks",
+      "preferred_chinese_hint": "提示注入攻击",
+      "family_id": "prompt_injection_attacks",
+      "notes": "安全概念术语，使用中文主译加英文锚定。"
+    },
+    {
+      "id": "supply-chain-attacks",
+      "surface_forms": ["supply chain attacks", "Supply chain attacks"],
+      "aliases": [],
+      "category": "concept",
+      "display_policy": "chinese_primary_with_en_anchor",
+      "preferred_english": "supply chain attacks",
+      "preferred_chinese_hint": "供应链攻击",
+      "family_id": "supply_chain_attacks",
+      "notes": "安全概念术语，使用中文主译加英文锚定。"
+    },
+    {
+      "id": "rag",
+      "surface_forms": ["RAG"],
+      "aliases": [],
+      "category": "concept",
+      "display_policy": "acronym_compound",
+      "preferred_english": "RAG",
+      "preferred_chinese_hint": "检索增强生成",
+      "family_id": "rag",
+      "notes": "常见缩写概念。"
+    },
+    {
+      "id": "pypi",
+      "surface_forms": ["PyPI"],
+      "aliases": [],
+      "category": "package",
+      "display_policy": "acronym_compound",
+      "preferred_english": "PyPI",
+      "preferred_chinese_hint": "Python 包索引",
+      "family_id": "pypi",
+      "notes": "常见缩写平台名。"
     }
   ]
 }

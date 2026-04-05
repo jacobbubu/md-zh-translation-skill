@@ -23,6 +23,8 @@ test("loadKnownEntities exposes the bundled formal known-entity table", () => {
   assert.equal(knownEntities.version, 1);
   assert.ok(knownEntities.entities.some((entity) => entity.id === "claude"));
   assert.ok(knownEntities.entities.some((entity) => entity.id === "ssh-keys"));
+  assert.ok(knownEntities.entities.some((entity) => entity.id === "sandbox-mode"));
+  assert.ok(knownEntities.entities.some((entity) => entity.id === "rag"));
 });
 
 test("buildKnownEntityCatalog seeds bare-english known entities before model analysis", () => {
@@ -59,6 +61,68 @@ test("buildKnownEntityCatalog seeds bare-english known entities before model ana
   assert.equal(claude.displayPolicy, "english-only");
   assert.equal(claude.requiresBilingual, false);
   assert.deepEqual(claude.allowedDisplayForms, ["Claude"]);
+});
+
+test("buildKnownEntityCatalog applies formal display policies for promoted entities", () => {
+  const state = createTranslationRunState({
+    sourcePathHint: "sample.md",
+    documentTitle: "Sample",
+    frontmatterPresent: false,
+    protectedSpans: [],
+    chunks: [
+      {
+        source: [
+          "sandbox mode prevents prompt injection attacks.",
+          "",
+          "Enable YOLO mode when needed.",
+          "",
+          "A supply chain attacks example can appear in RAG docs and PyPI docs."
+        ].join("\n"),
+        separatorAfter: "",
+        headingPath: ["Sample"],
+        segments: [
+          {
+            kind: "translatable",
+            source: [
+              "sandbox mode prevents prompt injection attacks.",
+              "",
+              "Enable YOLO mode when needed.",
+              "",
+              "A supply chain attacks example can appear in RAG docs and PyPI docs."
+            ].join("\n"),
+            separatorAfter: "",
+            spanIds: [],
+            headingHints: [],
+            specialNotes: []
+          }
+        ]
+      }
+    ]
+  });
+
+  const catalog = buildKnownEntityCatalog(state);
+  applyAnchorCatalog(state, catalog);
+  const slice = buildSegmentTaskSlice(state, "chunk-1", "chunk-1-segment-1");
+
+  const sandboxMode = slice.requiredAnchors.find((anchor) => anchor.english === "sandbox mode");
+  assert.ok(sandboxMode);
+  assert.equal(sandboxMode.displayPolicy, "chinese-primary");
+
+  const yoloMode = slice.requiredAnchors.find((anchor) => anchor.english === "YOLO mode");
+  assert.ok(yoloMode);
+  assert.equal(yoloMode.displayPolicy, "english-primary");
+
+  const pypi = slice.requiredAnchors.find((anchor) => anchor.english === "PyPI");
+  assert.ok(pypi);
+  assert.equal(pypi.displayPolicy, "acronym-compound");
+
+  const rag = slice.requiredAnchors.find((anchor) => anchor.english === "RAG");
+  assert.ok(rag);
+  assert.equal(rag.displayPolicy, "acronym-compound");
+
+  const promptInjection = slice.requiredAnchors.find((anchor) => anchor.english === "prompt injection attacks");
+  assert.ok(promptInjection);
+  assert.equal(promptInjection.displayPolicy, "chinese-primary");
 });
 
 test("mergeAnchorCatalogs keeps formal known entities ahead of discovered duplicates", () => {

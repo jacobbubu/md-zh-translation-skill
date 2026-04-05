@@ -184,18 +184,28 @@ const ANCHOR_CATALOG_SCHEMA = {
       items: {
         type: "object",
         additionalProperties: false,
-        required: ["english", "chineseHint", "familyKey", "firstOccurrence"],
+        required: ["english", "chineseHint", "familyKey", "displayPolicy", "sourceForms", "firstOccurrence"],
         properties: {
           english: { type: "string" },
           chineseHint: { type: "string" },
           familyKey: { type: "string" },
           displayPolicy: {
-            type: "string",
-            enum: ["auto", "acronym-compound", "english-only", "english-primary", "chinese-primary"]
+            anyOf: [
+              {
+                type: "string",
+                enum: ["auto", "acronym-compound", "english-only", "english-primary", "chinese-primary"]
+              },
+              { type: "null" }
+            ]
           },
           sourceForms: {
-            type: "array",
-            items: { type: "string" }
+            anyOf: [
+              {
+                type: "array",
+                items: { type: "string" }
+              },
+              { type: "null" }
+            ]
           },
           firstOccurrence: {
             type: "object",
