@@ -380,3 +380,73 @@ test("translation state allows bare repeat text for established english-primary 
     "Claude"
   ]);
 });
+
+test("translation state does not treat a singular anchor as mentioned by a pluralized source variant", () => {
+  const state = createTranslationRunState({
+    sourcePathHint: "sample.md",
+    documentTitle: "Sample",
+    frontmatterPresent: false,
+    protectedSpans: [],
+    chunks: [
+      {
+        source: "Claude Code sandbox is enabled.\n\nThis is my quick reference for standard commands when working with Claude Code sandboxes.",
+        separatorAfter: "",
+        headingPath: ["Sample"],
+        segments: [
+          {
+            kind: "translatable",
+            source: "Claude Code sandbox is enabled.",
+            separatorAfter: "\n\n",
+            spanIds: [],
+            headingHints: [],
+            specialNotes: []
+          },
+          {
+            kind: "translatable",
+            source: "This is my quick reference for standard commands when working with Claude Code sandboxes.",
+            separatorAfter: "",
+            spanIds: [],
+            headingHints: [],
+            specialNotes: []
+          }
+        ]
+      }
+    ]
+  });
+
+  applyAnchorCatalog(state, {
+    anchors: [
+      {
+        english: "Claude Code sandbox",
+        chineseHint: "沙箱模式",
+        familyKey: "claude-code-sandbox-mode",
+        displayPolicy: "chinese-primary",
+        sourceForms: ["Claude Code sandbox"],
+        firstOccurrence: {
+          chunkId: "chunk-1",
+          segmentId: "chunk-1-segment-1"
+        }
+      }
+    ],
+    ignoredTerms: []
+  });
+
+  applySegmentAudit(state, {
+    segmentId: "chunk-1-segment-1",
+    hardChecks: {
+      paragraph_match: { pass: true, problem: "" },
+      first_mention_bilingual: { pass: true, problem: "" },
+      numbers_units_logic: { pass: true, problem: "" },
+      chinese_punctuation: { pass: true, problem: "" },
+      unit_conversion_boundary: { pass: true, problem: "" },
+      protected_span_integrity: { pass: true, problem: "" }
+    },
+    repairTasks: [],
+    rawMustFix: []
+  });
+
+  const slice = buildSegmentTaskSlice(state, "chunk-1", "chunk-1-segment-2");
+  assert.equal(slice.requiredAnchors.length, 0);
+  assert.equal(slice.repeatAnchors.length, 0);
+  assert.equal(slice.establishedAnchors.some((anchor) => anchor.english === "Claude Code sandbox"), true);
+});

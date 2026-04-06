@@ -521,11 +521,7 @@ function containsAnchorText(source: string, english: string): boolean {
 }
 
 function containsAnyAnchorText(source: string, forms: readonly string[]): boolean {
-  const normalizedSource = source.toLowerCase();
-  return forms.some((form) => {
-    const normalizedForm = form.trim().toLowerCase();
-    return normalizedForm.length > 0 && normalizedSource.includes(normalizedForm);
-  });
+  return forms.some((form) => containsWholePhrase(source, form));
 }
 
 function normalizeFamilyKey(english: string): string {
@@ -566,4 +562,43 @@ function inferPositionKind(segment: SegmentState): AnchorPositionKind {
   }
 
   return "paragraph";
+}
+
+function containsWholePhrase(text: string, phrase: string): boolean {
+  const trimmed = phrase.trim();
+  if (!trimmed) {
+    return false;
+  }
+
+  if (!/[A-Za-z0-9.+/_-]/.test(trimmed)) {
+    return text.includes(trimmed);
+  }
+
+  const boundaryClass = buildBoundaryClass(trimmed);
+  const pattern = new RegExp(`(^|[^${boundaryClass}])${escapeRegExp(trimmed)}($|[^${boundaryClass}])`, "i");
+  return pattern.test(text);
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function buildBoundaryClass(phrase: string): string {
+  let allowed = "A-Za-z0-9";
+  if (phrase.includes(".")) {
+    allowed += "\\.";
+  }
+  if (phrase.includes("+")) {
+    allowed += "\\+";
+  }
+  if (phrase.includes("/")) {
+    allowed += "/";
+  }
+  if (phrase.includes("_")) {
+    allowed += "_";
+  }
+  if (phrase.includes("-")) {
+    allowed += "-";
+  }
+  return allowed;
 }
