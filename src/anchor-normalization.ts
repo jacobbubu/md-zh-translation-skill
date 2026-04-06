@@ -183,6 +183,10 @@ export function injectPlannedAnchorText(
     );
 
     for (const anchor of lineAnchors) {
+      if (shouldSkipEnglishPrimaryHeadingCanonicalInjection(sourceLine, anchor)) {
+        continue;
+      }
+
       if (shouldSkipAnchorInjectionForCommandPhrase(sourceLine, anchor)) {
         continue;
       }
@@ -362,6 +366,22 @@ export function normalizeExplicitRepairAnchorText(
 
       if (sourceHeading && translatedHeading) {
         if (
+          matchingAnchor &&
+          shouldSkipEnglishPrimaryHeadingCanonicalInjection(sourceHeading.raw, matchingAnchor)
+        ) {
+          const sourceShapedHeading = restoreHeadingTemplateLine(
+            sourceHeading,
+            translatedLine,
+            [matchingAnchor]
+          );
+          if (sourceShapedHeading !== translatedLine) {
+            translatedLine = sourceShapedHeading;
+            changed = true;
+            continue;
+          }
+        }
+
+        if (
           stripInlineMarkdownMarkers(translatedHeading.content).includes(target.chineseHint)
         ) {
           const headingAnchors = coalesceHeadingLineAnchors(
@@ -499,6 +519,16 @@ function extractHeadingSourcePrefix(sourceHeadingContent: string, english: strin
 
 function deriveTranslatedHeadingPrefix(content: string, anchor: PromptAnchor): string | null {
   const display = resolveAnchorDisplay(anchor);
+  if (display.mode === "english-primary") {
+    const normalizedEnglish = normalizeHeadingAnchorEnglishForLine(anchor.english, content);
+    if (normalizedEnglish) {
+      const englishIndex = content.indexOf(normalizedEnglish);
+      if (englishIndex > 0) {
+        return content.slice(0, englishIndex);
+      }
+    }
+  }
+
   const candidates = [
     anchor.chineseHint,
     display.chineseDisplay,
@@ -685,15 +715,14 @@ function resolvePromptAnchorForExplicitRepair(
   slice: PromptSlice
 ): PromptAnchor | null {
   const targetEnglish = target.english?.toLowerCase();
-  if (!targetEnglish) {
-    return null;
-  }
-
   const anchors = dedupePromptAnchors([
     ...slice.requiredAnchors,
     ...slice.repeatAnchors,
     ...slice.establishedAnchors
   ]);
+  if (!targetEnglish) {
+    return anchors.find((anchor) => containsSourceAnchorPhrase(target.chineseHint, anchor.english)) ?? null;
+  }
   const englishMatches = anchors.filter(
     (anchor) => anchor.english.toLowerCase() === targetEnglish && anchor.chineseHint !== target.english
   );
@@ -1042,6 +1071,23 @@ function shouldSkipAnchorInjectionForCommandPhrase(sourceLine: string, anchor: P
   }
 
   return /^[A-Za-z0-9./_-]/.test(remainder);
+}
+
+function shouldSkipEnglishPrimaryHeadingCanonicalInjection(
+  sourceLine: string,
+  anchor: PromptAnchor
+): boolean {
+  const sourceHeading = extractHeadingLikeLine(sourceLine);
+  if (!sourceHeading) {
+    return false;
+  }
+
+  const display = resolveAnchorDisplay(anchor);
+  if (display.mode !== "english-primary") {
+    return false;
+  }
+
+  return containsSourceAnchorPhrase(sourceHeading.content, anchor.english);
 }
 
 type HeadingLine = {

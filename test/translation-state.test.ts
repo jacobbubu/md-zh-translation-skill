@@ -264,6 +264,53 @@ test("translation state infers acronym-compound display policy for acronym-led a
   );
 });
 
+test("translation state infers english-primary display policy for english-led tool hints", () => {
+  const state = createTranslationRunState({
+    sourcePathHint: "sample.md",
+    documentTitle: "Sample",
+    frontmatterPresent: false,
+    protectedSpans: [],
+    chunks: [
+      {
+        source: "**Option 2: cco Sandbox**",
+        separatorAfter: "",
+        headingPath: ["Sample"],
+        segments: [
+          {
+            kind: "translatable",
+            source: "**Option 2: cco Sandbox**",
+            separatorAfter: "",
+            spanIds: [],
+            headingHints: ["Option 2: cco Sandbox"],
+            specialNotes: []
+          }
+        ]
+      }
+    ]
+  });
+
+  const catalog: AnchorCatalog = {
+    anchors: [
+      {
+        english: "cco Sandbox",
+        chineseHint: "cco 沙箱工具",
+        familyKey: "cco sandbox",
+        firstOccurrence: {
+          chunkId: "chunk-1",
+          segmentId: "chunk-1-segment-1"
+        }
+      }
+    ],
+    ignoredTerms: []
+  };
+
+  applyAnchorCatalog(state, catalog);
+
+  const slice = buildSegmentTaskSlice(state, "chunk-1", "chunk-1-segment-1");
+  assert.equal(slice.requiredAnchors[0]?.displayPolicy, "english-primary");
+  assert.equal(slice.requiredAnchors[0]?.displayMode, "english-primary");
+});
+
 test("translation state exposes canonical display metadata for english-primary anchors", () => {
   const state = createTranslationRunState({
     sourcePathHint: "sample.md",

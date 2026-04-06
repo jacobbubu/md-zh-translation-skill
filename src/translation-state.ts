@@ -541,6 +541,10 @@ function inferAnchorDisplayPolicy(english: string, chineseHint: string): AnchorD
     return "acronym-compound";
   }
 
+  if (englishTokens.length >= 2 && firstEnglishToken && chineseHint.startsWith(firstEnglishToken)) {
+    return "english-primary";
+  }
+
   return "auto";
 }
 

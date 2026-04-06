@@ -3529,6 +3529,69 @@ test("translateMarkdownArticle restores a named anchor inside an ATX heading aft
   assert.match(result.markdown, /## 沙盒模式（Sandbox Mode）如何改变自主编码/);
 });
 
+test("translateMarkdownArticle keeps a source-shaped english-primary heading during repair", async () => {
+  const source = [
+    "# Title",
+    "",
+    "**Option 2: cco Sandbox**",
+    "",
+    "Body.",
+    ""
+  ].join("\n");
+
+  let auditCount = 0;
+  const result = await translateMarkdownArticle(source, {
+    executor: {
+      async execute(prompt, options) {
+        if (isDocumentAnalysisPrompt(prompt)) {
+          return createExecResult(
+            createAnchorCatalog([
+              {
+                english: "cco Sandbox",
+                chineseHint: "cco 沙箱工具",
+                familyKey: "cco-sandbox"
+              }
+            ])
+          );
+        }
+
+        if (options.outputSchema && prompt.includes("【分段审校输入】")) {
+          auditCount += 1;
+          if (auditCount === 1) {
+            return createExecResult(
+              wrapPerSegmentAudits(prompt, [
+                {
+                  segment_index: 1,
+                  audit: createAudit(false, [
+                    "位置：分段标题“**选项 2：cco Sandbox（cco Sandbox（cco 沙箱工具））**”；问题：标题首现锚定格式错误；修复目标：保留标题结构并修复为合法的首现形式。"
+                  ])
+                }
+              ])
+            );
+          }
+
+          return createExecResult(wrapPerSegmentAudits(prompt, [{ segment_index: 1, audit: createAudit(true) }]));
+        }
+
+        if (options.outputSchema || prompt.includes("只返回 JSON")) {
+          return createExecResult(JSON.stringify(createAudit(true)));
+        }
+
+        const currentTranslation = extractPromptSection(prompt, "【当前译文】");
+        if (currentTranslation !== null) {
+          return createExecResult(currentTranslation);
+        }
+
+        return createExecResult(["# Title", "", "**选项 2：cco Sandbox（cco Sandbox（cco 沙箱工具））**", "", "正文。", ""].join("\n"));
+      }
+    },
+    formatter: async (markdown) => markdown
+  });
+
+  assert.match(result.markdown, /\*\*选项 2：cco Sandbox\*\*/);
+  assert.doesNotMatch(result.markdown, /cco Sandbox（cco Sandbox/);
+});
+
 test("translateMarkdownArticle adds attribution guidance for caption-like segments", async () => {
   const source = [
     "# Title",

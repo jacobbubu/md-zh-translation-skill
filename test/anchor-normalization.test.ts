@@ -300,11 +300,15 @@ test("normalizeHeadingLikeAnchorText preserves source-shaped english-primary hea
     ]
   });
   const source = "**Option 2: cco Sandbox**";
-  const translated = "**选项 2：cco Sandbox（cco Sandbox（cco 沙箱工具））**";
+  const translatedVariants = [
+    "**选项 2：cco Sandbox（cco Sandbox（cco 沙箱工具））**",
+    "**选项 2：cco Sandbox（cco 沙箱工具）**"
+  ];
 
-  const normalized = normalizeHeadingLikeAnchorText(source, translated, slice);
-
-  assert.equal(normalized, "**选项 2：cco Sandbox**");
+  for (const translated of translatedVariants) {
+    const normalized = normalizeHeadingLikeAnchorText(source, translated, slice);
+    assert.equal(normalized, "**选项 2：cco Sandbox**");
+  }
 });
 
 test("normalizeHeadingLikeAnchorText skips full english back-reference for operational headings", () => {
