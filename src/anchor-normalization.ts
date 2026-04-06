@@ -620,6 +620,7 @@ function normalizeSingleAnchor(
     normalized = normalized.replace(new RegExp(`${escapedEnglish}（${escapedEnglish}）`, "g"), canonical);
     normalized = normalized.replace(new RegExp(`${escapedChinese}（${escapedEnglish}）\\s*（${escapedEnglish}）`, "g"), canonical);
     normalized = normalized.replace(new RegExp(`${escapedChinese}（${escapedChinese}）`, "g"), canonical);
+    normalized = normalizeMixedChinesePrimaryParentheses(normalized, chineseHint, english, canonical);
     if (display.mode === "acronym-compound") {
       normalized = normalizeAcronymCompoundParentheses(normalized, display);
     }
@@ -671,6 +672,31 @@ function collapseRepeatedEnglishParentheses(text: string, english: string): stri
   return text.replace(new RegExp(`（${escapedEnglish}）\\s*（${escapedEnglish}）`, "g"), `（${english}）`);
 }
 
+function normalizeMixedChinesePrimaryParentheses(
+  text: string,
+  chineseDisplay: string,
+  english: string,
+  canonical: string
+): string {
+  const chineseTails = buildChineseTailVariants(chineseDisplay);
+  if (chineseTails.length === 0) {
+    return text;
+  }
+
+  let normalized = text;
+  const escapedEnglish = escapeRegExp(english);
+
+  for (const tail of chineseTails) {
+    const escapedTail = escapeRegExp(tail);
+    normalized = normalized.replace(
+      new RegExp(`[A-Za-z][A-Za-z0-9.+/_ -]*\\s*${escapedTail}（${escapedEnglish}）`, "g"),
+      canonical
+    );
+  }
+
+  return normalized;
+}
+
 function injectAnchorIntoLine(text: string, anchor: PromptAnchor): string {
   const display = resolveAnchorDisplay(anchor);
 
@@ -711,6 +737,20 @@ function injectAnchorIntoLine(text: string, anchor: PromptAnchor): string {
   }
 
   return text;
+}
+
+function buildChineseTailVariants(chineseDisplay: string): string[] {
+  const chars = [...chineseDisplay.trim()];
+  const variants: string[] = [];
+
+  for (let start = 0; start < chars.length; start += 1) {
+    const suffix = chars.slice(start).join("");
+    if (suffix.length >= 2 && /[\u4e00-\u9fff]/u.test(suffix)) {
+      variants.push(suffix);
+    }
+  }
+
+  return [...new Set(variants)].sort((left, right) => right.length - left.length);
 }
 
 function collapseUnexpectedFamilyVariant(

@@ -73,6 +73,19 @@ test("normalizeSegmentAnchorText removes repeated english parentheses for alread
   assert.equal(normalized, "沙箱模式 解决了这个问题。");
 });
 
+test("normalizeSegmentAnchorText restores mixed chinese-primary anchors to their canonical form", () => {
+  const slice = createSlice({
+    requiredAnchors: [createAnchor("anchor-1", "sandbox mode", "沙箱模式")]
+  });
+
+  const normalized = normalizeSegmentAnchorText(
+    "Sandbox 模式（sandbox mode）现已在本次会话中启用。",
+    slice
+  );
+
+  assert.equal(normalized, "沙箱模式（sandbox mode）现已在本次会话中启用。");
+});
+
 test("normalizeSegmentAnchorText collapses exact duplicate english-only parentheses", () => {
   const slice = createSlice({
     requiredAnchors: [createAnchor("anchor-1", "npm", "npm")]
