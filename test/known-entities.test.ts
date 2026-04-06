@@ -156,6 +156,38 @@ test("buildKnownEntityCatalog applies formal display policies for promoted entit
   }
 });
 
+test("buildKnownEntityCatalog preserves the source surface form for formal known entities", () => {
+  const state = createTranslationRunState({
+    sourcePathHint: "sample.md",
+    documentTitle: "Sample",
+    frontmatterPresent: false,
+    protectedSpans: [],
+    chunks: [
+      {
+        source: "Prompt injection attacks can be blocked.\n",
+        separatorAfter: "",
+        headingPath: ["Sample"],
+        segments: [
+          {
+            kind: "translatable",
+            source: "Prompt injection attacks can be blocked.\n",
+            separatorAfter: "",
+            spanIds: [],
+            headingHints: [],
+            specialNotes: []
+          }
+        ]
+      }
+    ]
+  });
+
+  const catalog = buildKnownEntityCatalog(state);
+  const anchor = catalog.anchors.find((item) => item.familyKey === "prompt_injection_attacks");
+
+  assert.ok(anchor);
+  assert.equal(anchor.english, "Prompt injection attacks");
+});
+
 test("buildKnownEntityCatalog matches slash-delimited bare-english tools as separate formal entities", () => {
   const state = createTranslationRunState({
     sourcePathHint: "sample.md",
@@ -228,6 +260,48 @@ test("mergeAnchorCatalogs keeps formal known entities ahead of discovered duplic
 
   assert.equal(merged.anchors.length, 1);
   assert.equal(merged.anchors[0]?.displayPolicy, "english-only");
+});
+
+test("mergeAnchorCatalogs dedupes same english surface forms even when family keys differ", () => {
+  const formalCatalog: AnchorCatalog = {
+    anchors: [
+      {
+        english: "YOLO mode",
+        chineseHint: "YOLO 模式",
+        familyKey: "yolo_mode",
+        displayPolicy: "english-primary",
+        firstOccurrence: {
+          chunkId: "chunk-1",
+          segmentId: "chunk-1-segment-1"
+        },
+        sourceForms: ["YOLO mode"]
+      }
+    ],
+    ignoredTerms: []
+  };
+
+  const discoveredCatalog: AnchorCatalog = {
+    anchors: [
+      {
+        english: "YOLO mode",
+        chineseHint: "YOLO 模式",
+        familyKey: "yolo mode",
+        displayPolicy: "acronym-compound",
+        firstOccurrence: {
+          chunkId: "chunk-1",
+          segmentId: "chunk-1-segment-1"
+        },
+        sourceForms: ["YOLO mode"]
+      }
+    ],
+    ignoredTerms: []
+  };
+
+  const merged = mergeAnchorCatalogs(formalCatalog, discoveredCatalog);
+
+  assert.equal(merged.anchors.length, 1);
+  assert.equal(merged.anchors[0]?.displayPolicy, "english-primary");
+  assert.equal(merged.anchors[0]?.familyKey, "yolo_mode");
 });
 
 test("normalizeDiscoveredAnchorCatalog promotes a heading surface over an earlier paraphrase", () => {

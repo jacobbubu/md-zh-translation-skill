@@ -86,6 +86,22 @@ test("normalizeSegmentAnchorText restores mixed chinese-primary anchors to their
   assert.equal(normalized, "沙箱模式（sandbox mode）现已在本次会话中启用。");
 });
 
+test("normalizeSegmentAnchorText strips freshness prefixes from chinese-primary canonical anchors", () => {
+  const slice = createSlice({
+    requiredAnchors: [createAnchor("anchor-1", "sandbox mode", "沙箱模式")]
+  });
+
+  const normalized = normalizeSegmentAnchorText(
+    "Claude Code 的新沙箱模式（sandbox mode）用一种更有创新性的方式同时解决了这两个问题。",
+    slice
+  );
+
+  assert.equal(
+    normalized,
+    "Claude Code 的沙箱模式（sandbox mode）用一种更有创新性的方式同时解决了这两个问题。"
+  );
+});
+
 test("normalizeSegmentAnchorText collapses exact duplicate english-only parentheses", () => {
   const slice = createSlice({
     requiredAnchors: [createAnchor("anchor-1", "npm", "npm")]
@@ -199,6 +215,18 @@ test("normalizeSourceSurfaceAnchorText keeps the source surface form when a long
   const normalized = normalizeSourceSurfaceAnchorText(source, translated, slice);
 
   assert.equal(normalized, "告诉 Claude（Anthropic 的 AI 助手）：");
+});
+
+test("normalizeSourceSurfaceAnchorText restores a trailing heading anchor to the canonical chinese-primary form", () => {
+  const slice = createSlice({
+    requiredAnchors: [createAnchor("anchor-1", "Sandbox Mode", "沙箱模式")]
+  });
+  const source = "## How Sandbox Mode Changes Autonomous Coding";
+  const translated = "## 沙箱模式如何改变自主编码（Sandbox Mode）";
+
+  const normalized = normalizeSourceSurfaceAnchorText(source, translated, slice);
+
+  assert.equal(normalized, "## 沙箱模式（Sandbox Mode）如何改变自主编码");
 });
 
 test("normalizeSegmentAnchorText collapses duplicate English parentheses when no better local hint exists", () => {

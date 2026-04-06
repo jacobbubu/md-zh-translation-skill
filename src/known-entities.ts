@@ -87,8 +87,15 @@ export function buildKnownEntityCatalog(
       continue;
     }
 
+    const english = resolveFormalEnglishSurfaceForm(
+      state,
+      firstOccurrence.segmentId,
+      sourceForms,
+      entity.preferred_english
+    );
+
     anchors.push({
-      english: entity.preferred_english,
+      english,
       chineseHint: entity.preferred_chinese_hint,
       familyKey: entity.family_id,
       displayPolicy: mapKnownPolicyToAnchorPolicy(entity.display_policy),
@@ -111,7 +118,7 @@ export function mergeAnchorCatalogs(
   const anchors: AnalysisAnchor[] = [];
 
   for (const anchor of [...formalCatalog.anchors, ...discoveredCatalog.anchors]) {
-    const key = `${anchor.english.trim().toLowerCase()}::${anchor.familyKey.trim().toLowerCase()}`;
+    const key = anchor.english.trim().toLowerCase();
     if (seen.has(key)) {
       continue;
     }
@@ -232,6 +239,61 @@ function mapAnchorPolicyToKnownPolicy(
 
 function dedupeForms(surfaceForms: string[], aliases: string[], preferredEnglish: string): string[] {
   return [...new Set([...surfaceForms, ...aliases, preferredEnglish].map((item) => item.trim()).filter(Boolean))];
+}
+
+function resolveFormalEnglishSurfaceForm(
+  state: TranslationRunState,
+  segmentId: string,
+  sourceForms: readonly string[],
+  fallback: string
+): string {
+  const segment = state.segments.find((item) => item.id === segmentId);
+  if (!segment) {
+    return fallback;
+  }
+
+  const ranked = sourceForms
+    .map((form) => {
+      const exactIndex = segment.source.indexOf(form);
+      const matchedSurface = findMatchedSourceSurface(segment.source, form);
+      const lowerIndex = matchedSurface ? segment.source.toLowerCase().indexOf(form.toLowerCase()) : -1;
+      return {
+        form,
+        matchedSurface,
+        exactIndex,
+        lowerIndex
+      };
+    })
+    .filter((item) => item.lowerIndex >= 0)
+    .sort((left, right) => {
+      const leftRank = left.exactIndex >= 0 ? left.exactIndex : left.lowerIndex + 10_000;
+      const rightRank = right.exactIndex >= 0 ? right.exactIndex : right.lowerIndex + 10_000;
+      if (leftRank !== rightRank) {
+        return leftRank - rightRank;
+      }
+      return right.form.length - left.form.length;
+    });
+
+  return ranked[0]?.matchedSurface ?? fallback;
+}
+
+function findMatchedSourceSurface(source: string, form: string): string | null {
+  const trimmed = form.trim();
+  if (!trimmed) {
+    return null;
+  }
+
+  const exactIndex = source.indexOf(trimmed);
+  if (exactIndex >= 0) {
+    return trimmed;
+  }
+
+  const boundaryClass = buildBoundaryClass(trimmed);
+  const match = source.match(
+    new RegExp(`(^|[^${boundaryClass}])(${escapeRegExp(trimmed)})($|[^${boundaryClass}])`, "i")
+  );
+
+  return match?.[2] ?? null;
 }
 
 function promoteHeadingSurfaceForm(

@@ -124,6 +124,15 @@ export function normalizeSourceSurfaceAnchorText(
     }
 
     for (const sourceAnchor of sourceAnchors) {
+      const normalizedHeadingLine = normalizeTrailingHeadingAnchorParenthetical(
+        translatedLine,
+        sourceAnchor
+      );
+      if (normalizedHeadingLine !== translatedLine) {
+        translatedLine = normalizedHeadingLine;
+        changed = true;
+      }
+
       const siblingVariants = anchors.filter(
         (candidate) =>
           candidate.familyId === sourceAnchor.familyId &&
@@ -384,8 +393,12 @@ export function normalizeExplicitRepairAnchorText(
           }
 
           const normalizedHeading =
-            matchingAnchor && translatedHeading.content.includes(matchingAnchor.chineseHint)
-              ? injectAnchorIntoLine(translatedHeading.content, matchingAnchor)
+            matchingAnchor
+              ? injectAnchorIntoHeadingRepairContent(
+                  translatedHeading.content,
+                  target.chineseHint,
+                  matchingAnchor
+                )
               : normalizeHeadingRepairContent(translatedHeading.content, english);
           if (normalizedHeading !== translatedHeading.content) {
             translatedLine = translatedLine.replace(translatedHeading.content, normalizedHeading);
@@ -570,6 +583,103 @@ function normalizeHeadingRepairContent(content: string, english: string): string
   return content.replace(parentheticalMatch[0], `（${inner}，${normalizedEnglish}）`);
 }
 
+function injectAnchorIntoHeadingRepairContent(
+  content: string,
+  targetChineseHint: string,
+  anchor: PromptAnchor
+): string {
+  const directlyInjected = injectAnchorIntoLine(content, anchor);
+  if (directlyInjected !== content) {
+    return directlyInjected;
+  }
+
+  const display = resolveAnchorDisplay(anchor);
+  if (display.mode !== "chinese-primary" && display.mode !== "acronym-compound") {
+    return normalizeHeadingRepairContent(content, anchor.english);
+  }
+
+  const fuzzyCandidate = findFuzzyChineseHeadingAnchorCandidate(targetChineseHint, display.chineseDisplay);
+  if (fuzzyCandidate && content.includes(fuzzyCandidate)) {
+    return replaceFirst(content, fuzzyCandidate, display.canonical);
+  }
+
+  return normalizeHeadingRepairContent(content, anchor.english);
+}
+
+function normalizeTrailingHeadingAnchorParenthetical(
+  translatedRawLine: string,
+  anchor: PromptAnchor
+): string {
+  const translatedHeading = extractHeadingLikeLine(translatedRawLine);
+  if (!translatedHeading) {
+    return translatedRawLine;
+  }
+
+  const display = resolveAnchorDisplay(anchor);
+  if (display.mode !== "chinese-primary" && display.mode !== "acronym-compound") {
+    return translatedRawLine;
+  }
+
+  const normalizedEnglish = normalizeHeadingAnchorEnglishForLine(anchor.english, translatedHeading.content);
+  if (!normalizedEnglish) {
+    return translatedRawLine;
+  }
+
+  const trailingPattern = new RegExp(`（${escapeRegExp(normalizedEnglish)}）\\s*$`);
+  if (!trailingPattern.test(translatedHeading.content)) {
+    return translatedRawLine;
+  }
+
+  const strippedContent = translatedHeading.content.replace(trailingPattern, "").trimEnd();
+  let normalizedContent = strippedContent;
+
+  if (!normalizedContent.includes(display.canonical)) {
+    if (normalizedContent.includes(display.chineseDisplay)) {
+      normalizedContent = replaceFirst(normalizedContent, display.chineseDisplay, display.canonical);
+    } else if (normalizedContent.includes(anchor.chineseHint)) {
+      normalizedContent = replaceFirst(normalizedContent, anchor.chineseHint, display.canonical);
+    } else {
+      return translatedRawLine;
+    }
+  }
+
+  return normalizedContent !== translatedHeading.content
+    ? translatedRawLine.replace(translatedHeading.content, normalizedContent)
+    : translatedRawLine;
+}
+
+function findFuzzyChineseHeadingAnchorCandidate(
+  headingText: string,
+  chineseDisplay: string
+): string | null {
+  for (const tail of buildChineseTailVariants(chineseDisplay)) {
+    if (tail.length < 2) {
+      continue;
+    }
+
+    let tailIndex = headingText.indexOf(tail);
+    while (tailIndex >= 0) {
+      let start = tailIndex;
+      while (start > 0 && isChineseHeadingAnchorChar(headingText[start - 1]!)) {
+        start -= 1;
+      }
+
+      const candidate = headingText.slice(start, tailIndex + tail.length);
+      if (candidate && candidate !== chineseDisplay && /[\u4e00-\u9fff]/u.test(candidate)) {
+        return candidate;
+      }
+
+      tailIndex = headingText.indexOf(tail, tailIndex + tail.length);
+    }
+  }
+
+  return null;
+}
+
+function isChineseHeadingAnchorChar(char: string): boolean {
+  return /[\u4e00-\u9fff]/u.test(char);
+}
+
 function resolvePromptAnchorForExplicitRepair(
   target: ExplicitRepairTarget,
   slice: PromptSlice
@@ -584,14 +694,14 @@ function resolvePromptAnchorForExplicitRepair(
     ...slice.repeatAnchors,
     ...slice.establishedAnchors
   ]);
+  const englishMatches = anchors.filter(
+    (anchor) => anchor.english.toLowerCase() === targetEnglish && anchor.chineseHint !== target.english
+  );
 
   return (
-    anchors.find(
-      (anchor) =>
-        anchor.english.toLowerCase() === targetEnglish &&
-        anchor.chineseHint !== target.english &&
-        target.chineseHint.includes(anchor.chineseHint)
-    ) ?? null
+    englishMatches.find((anchor) => target.chineseHint.includes(anchor.chineseHint)) ??
+    englishMatches[0] ??
+    null
   );
 }
 
@@ -621,6 +731,7 @@ function normalizeSingleAnchor(
     normalized = normalized.replace(new RegExp(`${escapedChinese}（${escapedEnglish}）\\s*（${escapedEnglish}）`, "g"), canonical);
     normalized = normalized.replace(new RegExp(`${escapedChinese}（${escapedChinese}）`, "g"), canonical);
     normalized = normalizeMixedChinesePrimaryParentheses(normalized, chineseHint, english, canonical);
+    normalized = normalizePrefixedChinesePrimaryParentheses(normalized, chineseHint, english, canonical);
     if (display.mode === "acronym-compound") {
       normalized = normalizeAcronymCompoundParentheses(normalized, display);
     }
@@ -695,6 +806,21 @@ function normalizeMixedChinesePrimaryParentheses(
   }
 
   return normalized;
+}
+
+function normalizePrefixedChinesePrimaryParentheses(
+  text: string,
+  chineseDisplay: string,
+  english: string,
+  canonical: string
+): string {
+  const escapedChinese = escapeRegExp(chineseDisplay);
+  const escapedEnglish = escapeRegExp(english);
+
+  return text.replace(
+    new RegExp(`(?:全新|新版|新的|新)${escapedChinese}（${escapedEnglish}）`, "g"),
+    canonical
+  );
 }
 
 function injectAnchorIntoLine(text: string, anchor: PromptAnchor): string {

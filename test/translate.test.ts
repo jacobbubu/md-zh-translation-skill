@@ -3526,7 +3526,7 @@ test("translateMarkdownArticle restores a named anchor inside an ATX heading aft
     formatter: async (markdown) => markdown
   });
 
-  assert.match(result.markdown, /## 沙箱模式（Sandbox Mode）如何改变自主编码/);
+  assert.match(result.markdown, /## 沙盒模式（Sandbox Mode）如何改变自主编码/);
 });
 
 test("translateMarkdownArticle adds attribution guidance for caption-like segments", async () => {
