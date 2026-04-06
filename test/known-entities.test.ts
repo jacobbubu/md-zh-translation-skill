@@ -23,6 +23,9 @@ test("loadKnownEntities exposes the bundled formal known-entity table", () => {
 
   assert.equal(knownEntities.version, 1);
   assert.ok(knownEntities.entities.some((entity) => entity.id === "claude"));
+  assert.ok(knownEntities.entities.some((entity) => entity.id === "linux"));
+  assert.ok(knownEntities.entities.some((entity) => entity.id === "macos"));
+  assert.ok(knownEntities.entities.some((entity) => entity.id === "anthropic"));
   assert.ok(knownEntities.entities.some((entity) => entity.id === "ssh-keys"));
   assert.ok(knownEntities.entities.some((entity) => entity.id === "sandbox-mode"));
   assert.ok(knownEntities.entities.some((entity) => entity.id === "rag"));
@@ -79,7 +82,9 @@ test("buildKnownEntityCatalog applies formal display policies for promoted entit
           "",
           "A supply chain attacks example can appear in RAG docs and PyPI docs.",
           "",
-          "pip and cargo can also access AWS credentials when allowed."
+          "pip and cargo can also access AWS credentials when allowed.",
+          "",
+          "Linux and macOS differ from Windows, while Anthropic ships tooling for Node.js and Python."
         ].join("\n"),
         separatorAfter: "",
         headingPath: ["Sample"],
@@ -93,7 +98,9 @@ test("buildKnownEntityCatalog applies formal display policies for promoted entit
               "",
               "A supply chain attacks example can appear in RAG docs and PyPI docs.",
               "",
-              "pip and cargo can also access AWS credentials when allowed."
+              "pip and cargo can also access AWS credentials when allowed.",
+              "",
+              "Linux and macOS differ from Windows, while Anthropic ships tooling for Node.js and Python."
             ].join("\n"),
             separatorAfter: "",
             spanIds: [],
@@ -140,6 +147,13 @@ test("buildKnownEntityCatalog applies formal display policies for promoted entit
   const awsCredentials = slice.requiredAnchors.find((anchor) => anchor.english === "AWS credentials");
   assert.ok(awsCredentials);
   assert.equal(awsCredentials.displayPolicy, "acronym-compound");
+
+  for (const english of ["Linux", "macOS", "Windows", "Anthropic", "Node.js", "Python"]) {
+    const anchor = slice.requiredAnchors.find((item) => item.english === english);
+    assert.ok(anchor, `${english} should be present in required anchors`);
+    assert.equal(anchor.displayPolicy, "english-only");
+    assert.deepEqual(anchor.allowedDisplayForms, [english]);
+  }
 });
 
 test("buildKnownEntityCatalog matches slash-delimited bare-english tools as separate formal entities", () => {

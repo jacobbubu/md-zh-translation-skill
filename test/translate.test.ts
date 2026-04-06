@@ -2068,7 +2068,7 @@ test("translateMarkdownArticle repeats explicit English target guidance when mus
               {
                 segment_index: 1,
                 audit: createAudit(false, [
-                  "第4条项目符号：将“Python”补成首现中英对照，保留原句含义。"
+                  "第4条项目符号：将“bubblewrap”补成首现中英对照，保留原句含义。"
                 ])
               }
             ])
@@ -2094,10 +2094,10 @@ test("translateMarkdownArticle repeats explicit English target guidance when mus
   const repairPrompt = executor.prompts.find(
     (item) =>
       item.includes("【must_fix】") &&
-      item.includes("将“Python”补成首现中英对照")
+      item.includes("将“bubblewrap”补成首现中英对照")
   );
   assert.ok(repairPrompt);
-  assert.match(repairPrompt, /本次 must_fix 明确点名了这些英文目标：Python/);
+  assert.match(repairPrompt, /本次 must_fix 明确点名了这些英文目标：bubblewrap/);
   assert.match(repairPrompt, /即使它看起来是常见技术词，也必须严格按 must_fix 要求修复/);
   assert.match(repairPrompt, /必须在对应的标题、当前句、列表项或被点名位置本身保留这个英文原名/);
 });
@@ -2508,9 +2508,9 @@ test("translateMarkdownArticle repeats duplicate-English-anchor guidance when mu
     "",
     "### System Requirements",
     "",
-    "**Supported Platforms:**",
+    "**Security Frameworks:**",
     "",
-    "**macOS** — Works on all recent versions (10.14+)",
+    "**Seatbelt** — Works on all recent versions (10.14+)",
     "",
     "- Uses the Seatbelt security framework"
   ].join("\n");
@@ -2527,7 +2527,7 @@ test("translateMarkdownArticle repeats duplicate-English-anchor guidance when mu
               {
                 segment_index: 1,
                 audit: createAudit(false, [
-                  "位置：`**macOS**` 下第一条列表项；问题：`Seatbelt 安全框架（Seatbelt）` 的首现写法属于英文重复回括，未采用自然的中英锚定；修复目标：改为只保留一次英文原名并配中文说明的首现形式，不要重复回括同一英文词。"
+                  "位置：`**Seatbelt**` 下第一条列表项；问题：`Seatbelt 安全框架（Seatbelt）` 的首现写法属于英文重复回括，未采用自然的中英锚定；修复目标：改为只保留一次英文原名并配中文说明的首现形式，不要重复回括同一英文词。"
                 ])
               }
             ])
@@ -2861,7 +2861,7 @@ test("translateMarkdownArticle repeats slash-qualified heading repair guidance w
   const source = [
     "# Title",
     "",
-    "**Expected behavior (macOS/Linux):**",
+    "**Expected behavior (bubblewrap/Seatbelt):**",
     "",
     "Body paragraph.",
     ""
@@ -2879,7 +2879,7 @@ test("translateMarkdownArticle repeats slash-qualified heading repair guidance w
               {
                 segment_index: 1,
                 audit: createAudit(false, [
-                  "标题“Expected behavior (macOS/Linux)”中 macOS/Linux 首现缺少中文对照，需在标题内补齐对应说明。"
+                  "标题“Expected behavior (bubblewrap/Seatbelt)”中 bubblewrap/Seatbelt 首现缺少中文对照，需在标题内补齐对应说明。"
                 ])
               }
             ])
@@ -2905,7 +2905,7 @@ test("translateMarkdownArticle repeats slash-qualified heading repair guidance w
   const repairPrompt = executor.prompts.find(
     (item) =>
       item.includes("【must_fix】") &&
-      item.includes("标题“Expected behavior (macOS/Linux)”中 macOS/Linux 首现缺少中文对照")
+      item.includes("标题“Expected behavior (bubblewrap/Seatbelt)”中 bubblewrap/Seatbelt 首现缺少中文对照")
   );
   assert.ok(repairPrompt);
   assert.match(repairPrompt, /本次 must_fix 明确指向标题/);
@@ -2919,7 +2919,7 @@ test("translateMarkdownArticle treats bold platform labels as heading-like repai
   const source = [
     "# Title",
     "",
-    "**Linux** — Works on most distributions",
+    "**Seatbelt** — Works on most distributions",
     "",
     "- Ubuntu 20.04+",
     "- Fedora 32+",
@@ -2938,7 +2938,7 @@ test("translateMarkdownArticle treats bold platform labels as heading-like repai
               {
                 segment_index: 1,
                 audit: createAudit(false, [
-                  "第2段“Linux（操作系统）”是首次出现的专名，需补成包含英文原名的中英对照首现锚定。"
+                  "第2段“Seatbelt（安全框架）”是首次出现的专名，需补成包含英文原名的中英对照首现锚定。"
                 ])
               }
             ])
@@ -2964,11 +2964,11 @@ test("translateMarkdownArticle treats bold platform labels as heading-like repai
   const repairPrompt = executor.prompts.find(
     (item) =>
       item.includes("【must_fix】") &&
-      item.includes("第2段“Linux（操作系统）”是首次出现的专名")
+      item.includes("第2段“Seatbelt（安全框架）”是首次出现的专名")
   );
   assert.ok(repairPrompt);
   assert.match(repairPrompt, /本次 must_fix 明确指向标题/);
-  assert.match(repairPrompt, /必须直接修改以下标题文本本身：.*Linux/);
+  assert.match(repairPrompt, /必须直接修改以下标题文本本身：.*Seatbelt/);
   assert.match(repairPrompt, /如果标题里的目标是英文产品名、工具名、项目名、模型名、CLI 名称，或以英文表达的核心概念性标题术语/);
 });
 

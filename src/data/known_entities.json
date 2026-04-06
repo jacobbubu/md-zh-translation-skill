@@ -79,6 +79,83 @@
       "notes": "默认允许裸英文首现。"
     },
     {
+      "id": "linux",
+      "surface_forms": ["Linux"],
+      "aliases": [],
+      "category": "platform",
+      "display_policy": "bare_english_ok",
+      "preferred_english": "Linux",
+      "preferred_chinese_hint": "Linux 操作系统",
+      "family_id": "linux",
+      "notes": "默认允许裸英文首现。"
+    },
+    {
+      "id": "macos",
+      "surface_forms": ["macOS"],
+      "aliases": [],
+      "category": "platform",
+      "display_policy": "bare_english_ok",
+      "preferred_english": "macOS",
+      "preferred_chinese_hint": "苹果操作系统",
+      "family_id": "macos",
+      "notes": "默认允许裸英文首现。"
+    },
+    {
+      "id": "windows",
+      "surface_forms": ["Windows"],
+      "aliases": [],
+      "category": "platform",
+      "display_policy": "bare_english_ok",
+      "preferred_english": "Windows",
+      "preferred_chinese_hint": "Windows 操作系统",
+      "family_id": "windows",
+      "notes": "默认允许裸英文首现。"
+    },
+    {
+      "id": "ubuntu",
+      "surface_forms": ["Ubuntu"],
+      "aliases": [],
+      "category": "platform",
+      "display_policy": "bare_english_ok",
+      "preferred_english": "Ubuntu",
+      "preferred_chinese_hint": "Ubuntu 发行版",
+      "family_id": "ubuntu",
+      "notes": "默认允许裸英文首现。"
+    },
+    {
+      "id": "anthropic",
+      "surface_forms": ["Anthropic"],
+      "aliases": [],
+      "category": "company",
+      "display_policy": "bare_english_ok",
+      "preferred_english": "Anthropic",
+      "preferred_chinese_hint": "AI 公司",
+      "family_id": "anthropic",
+      "notes": "默认允许裸英文首现。"
+    },
+    {
+      "id": "nodejs",
+      "surface_forms": ["Node.js"],
+      "aliases": [],
+      "category": "tool",
+      "display_policy": "bare_english_ok",
+      "preferred_english": "Node.js",
+      "preferred_chinese_hint": "JavaScript 运行时",
+      "family_id": "nodejs",
+      "notes": "默认允许裸英文首现。"
+    },
+    {
+      "id": "python",
+      "surface_forms": ["Python"],
+      "aliases": [],
+      "category": "tool",
+      "display_policy": "bare_english_ok",
+      "preferred_english": "Python",
+      "preferred_chinese_hint": "Python 语言",
+      "family_id": "python",
+      "notes": "默认允许裸英文首现。"
+    },
+    {
       "id": "npm",
       "surface_forms": ["npm"],
       "aliases": [],
