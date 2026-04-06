@@ -3828,6 +3828,100 @@ test("translateMarkdownArticle synthesizes missing first-mention repair tasks wh
   }
 });
 
+test("translateMarkdownArticle normalizes package registry terminology inside package dependency context", async () => {
+  const source = [
+    "### Supply Chain Attacks",
+    "",
+    "Compromised npm packages or dependencies that attempt to:",
+    "",
+    "Sandbox blocks file access outside the project directory and restricts network connections to approved registries.",
+    ""
+  ].join("\n");
+
+  const result = await translateMarkdownArticle(source, {
+    executor: {
+      async execute(prompt, options) {
+        if (isDocumentAnalysisPrompt(prompt)) {
+          return createExecResult(createEmptyAnchorCatalog());
+        }
+
+        if (options.outputSchema && prompt.includes("【分段审校输入】")) {
+          return createExecResult(
+            wrapPerSegmentAudits(prompt, [
+              {
+                segment_index: 1,
+                audit: createAudit(true)
+              }
+            ])
+          );
+        }
+
+        if (options.outputSchema || prompt.includes("只返回 JSON")) {
+          return createExecResult(JSON.stringify(createAudit(true)));
+        }
+
+        return createExecResult([
+          "### 供应链攻击",
+          "",
+          "被攻陷的 npm 包或依赖项可能试图：",
+          "",
+          "沙盒会阻止访问项目目录之外的文件，并将网络连接限制到已批准的注册表。",
+          ""
+        ].join("\n"));
+      }
+    },
+    formatter: async (markdown) => markdown
+  });
+
+  assert.match(result.markdown, /已批准的包注册源/);
+  assert.doesNotMatch(result.markdown, /已批准的注册表/);
+});
+
+test("translateMarkdownArticle does not rewrite generic registry text outside package dependency context", async () => {
+  const source = [
+    "### Windows Internals",
+    "",
+    "The Windows registry stores system configuration values.",
+    ""
+  ].join("\n");
+
+  const result = await translateMarkdownArticle(source, {
+    executor: {
+      async execute(prompt, options) {
+        if (isDocumentAnalysisPrompt(prompt)) {
+          return createExecResult(createEmptyAnchorCatalog());
+        }
+
+        if (options.outputSchema && prompt.includes("【分段审校输入】")) {
+          return createExecResult(
+            wrapPerSegmentAudits(prompt, [
+              {
+                segment_index: 1,
+                audit: createAudit(true)
+              }
+            ])
+          );
+        }
+
+        if (options.outputSchema || prompt.includes("只返回 JSON")) {
+          return createExecResult(JSON.stringify(createAudit(true)));
+        }
+
+        return createExecResult([
+          "### Windows Internals",
+          "",
+          "Windows 注册表存储系统配置值。",
+          ""
+        ].join("\n"));
+      }
+    },
+    formatter: async (markdown) => markdown
+  });
+
+  assert.match(result.markdown, /Windows 注册表存储系统配置值/);
+  assert.doesNotMatch(result.markdown, /包注册源/);
+});
+
 test("translateMarkdownArticle adds structure guidance for translatable emphasis and command flags", async () => {
   const source = [
     "# Title",

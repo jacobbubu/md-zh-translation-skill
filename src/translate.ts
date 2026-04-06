@@ -1522,6 +1522,44 @@ function restoreInlineCodeFromSourceShape(source: string, translated: string): s
   return changed ? translatedLines.join("\n") : translated;
 }
 
+function normalizePackageRegistryTerminology(source: string, translated: string): string {
+  if (!/\bregistr(?:y|ies)\b/i.test(source)) {
+    return translated;
+  }
+
+  const hasPackageRegistryContext = /\b(npm|pip|cargo|pypi|package(?:s)?|dependenc(?:y|ies))\b/i.test(source);
+  if (!hasPackageRegistryContext) {
+    return translated;
+  }
+
+  const sourceLines = source.split(/\r?\n/);
+  const translatedLines = translated.split(/\r?\n/);
+  let changed = false;
+
+  for (let index = 0; index < Math.min(sourceLines.length, translatedLines.length); index += 1) {
+    const sourceLine = sourceLines[index] ?? "";
+    const translatedLine = translatedLines[index] ?? "";
+    if (!/\bregistr(?:y|ies)\b/i.test(sourceLine) || !/注册表/.test(translatedLine)) {
+      continue;
+    }
+
+    let normalizedLine = translatedLine;
+    normalizedLine = normalizedLine.replace(/已批准的注册表/g, "已批准的包注册源");
+    normalizedLine = normalizedLine.replace(/批准的注册表/g, "批准的包注册源");
+    normalizedLine = normalizedLine.replace(/包注册表/g, "包注册源");
+    if (!/包注册源/.test(normalizedLine)) {
+      normalizedLine = normalizedLine.replace(/注册表/g, "包注册源");
+    }
+
+    if (normalizedLine !== translatedLine) {
+      translatedLines[index] = normalizedLine;
+      changed = true;
+    }
+  }
+
+  return changed ? translatedLines.join("\n") : translated;
+}
+
 function collectInlineCodeCounts(text: string): Map<string, number> {
   const counts = new Map<string, number>();
   for (const match of text.matchAll(/`([^`\n]+)`/g)) {
@@ -1732,9 +1770,13 @@ async function translateProtectedSegment(
     normalizedHeadingDraftText,
     chunkPromptContext.stateSlice
   );
-  const restoredInlineDraftText = restoreInlineCodeFromSourceShape(
+  const normalizedRegistryDraftText = normalizePackageRegistryTerminology(
     protectedSource,
     normalizedSurfaceDraftText
+  );
+  const restoredInlineDraftText = restoreInlineCodeFromSourceShape(
+    protectedSource,
+    normalizedRegistryDraftText
   );
   const canonicalProtectedBody = reprotectMarkdownSpans(restoredInlineDraftText, combinedSpans);
   const restoredBody = restoreMarkdownSpans(canonicalProtectedBody, combinedSpans);
@@ -1842,9 +1884,13 @@ async function repairDraftedSegment(
       normalizedExplicitRepairText,
       buildSegmentTaskSlice(context.state, context.chunkId, draftedSegment.segmentId)
     );
-    const restoredInlineRepairText = restoreInlineCodeFromSourceShape(
+    const normalizedRegistryRepairText = normalizePackageRegistryTerminology(
       draftedSegment.protectedSource,
       normalizedSurfaceRepairText
+    );
+    const restoredInlineRepairText = restoreInlineCodeFromSourceShape(
+      draftedSegment.protectedSource,
+      normalizedRegistryRepairText
     );
     draftedSegment.protectedBody = reprotectMarkdownSpans(restoredInlineRepairText, draftedSegment.spans);
     draftedSegment.restoredBody = restoreMarkdownSpans(draftedSegment.protectedBody, draftedSegment.spans);
