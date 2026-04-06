@@ -247,12 +247,18 @@ export function normalizeHeadingLikeAnchorText(
       normalizedLine = stripShadowedHeadingAnchor(normalizedLine, shadowedAnchor);
     }
 
+    normalizedLine = stripRepeatedEnglishPrimaryHeadingExplainers(normalizedLine, lineAnchors);
+
     const templateRestoredLine = restoreHeadingTemplateLine(sourceLine, normalizedLine, lineAnchors);
     if (templateRestoredLine !== normalizedLine) {
       normalizedLine = templateRestoredLine;
     }
 
     for (const anchor of lineAnchors) {
+      const display = resolveAnchorDisplay(anchor);
+      if (display.mode === "english-primary") {
+        continue;
+      }
       const headingEnglish = normalizeHeadingAnchorEnglishForLine(anchor.english, translatedLine.content);
       if (shouldSkipWholeHeadingAnchorInjection(sourceLine.content, anchor.english)) {
         normalizedLine = stripOperationalHeadingAnchor(normalizedLine, headingEnglish);
@@ -279,6 +285,20 @@ export function normalizeHeadingLikeAnchorText(
   }
 
   return normalized;
+}
+
+function buildHeadingTemplateContent(anchor: PromptAnchor, translatedHeadingContent: string): string {
+  const display = resolveAnchorDisplay(anchor);
+  const normalizedEnglish = normalizeHeadingAnchorEnglishForLine(anchor.english, translatedHeadingContent);
+  if (!normalizedEnglish) {
+    return "";
+  }
+
+  if (display.mode === "english-primary" || display.mode === "english-only") {
+    return normalizedEnglish;
+  }
+
+  return buildCanonicalHeadingContent(anchor, translatedHeadingContent);
 }
 
 export function normalizeExplicitRepairAnchorText(
@@ -342,6 +362,7 @@ export function normalizeExplicitRepairAnchorText(
               ...slice.establishedAnchors
             ]).filter((anchor) => containsSourceAnchorPhrase(sourceHeading.content, anchor.english))
           );
+          translatedLine = stripRepeatedEnglishPrimaryHeadingExplainers(translatedLine, headingAnchors);
           const templateRestoredHeading = restoreHeadingTemplateLine(
             sourceHeading,
             translatedLine,
@@ -417,7 +438,7 @@ function restoreHeadingTemplateLine(
       normalizeAnchorEnglishForSourceMatch(anchor.english)
   );
   if (exactAnchor) {
-    const canonicalContent = buildCanonicalHeadingContent(exactAnchor, translatedHeading.content);
+    const canonicalContent = buildHeadingTemplateContent(exactAnchor, translatedHeading.content);
     if (canonicalContent && canonicalContent !== translatedHeading.content) {
       return translatedRawLine.replace(translatedHeading.content, canonicalContent);
     }
@@ -434,7 +455,11 @@ function restoreHeadingTemplateLine(
       continue;
     }
 
-    const canonicalContent = `${translatedPrefix}${buildCanonicalHeadingContent(anchor, translatedHeading.content)}`;
+    const canonicalSuffix = buildHeadingTemplateContent(anchor, translatedHeading.content);
+    if (!canonicalSuffix) {
+      continue;
+    }
+    const canonicalContent = `${translatedPrefix}${canonicalSuffix}`;
     if (canonicalContent !== translatedHeading.content) {
       return translatedRawLine.replace(translatedHeading.content, canonicalContent);
     }
@@ -794,6 +819,32 @@ function stripRepeatedEnglishSubanchorParentheticals(content: string): string {
     .replace(/[ ]{2,}/g, " ")
     .replace(/\s+([：:）])/g, "$1")
     .trimEnd();
+}
+
+function stripRepeatedEnglishPrimaryHeadingExplainers(
+  content: string,
+  anchors: readonly PromptAnchor[]
+): string {
+  let normalized = content;
+
+  for (const anchor of anchors) {
+    const display = resolveAnchorDisplay(anchor);
+    if (display.mode !== "english-primary") {
+      continue;
+    }
+
+    const english = normalizeHeadingAnchorEnglishForLine(anchor.english, content);
+    if (!english) {
+      continue;
+    }
+
+    const escapedEnglish = escapeRegExp(english);
+    normalized = normalized
+      .replace(new RegExp(`（${escapedEnglish}（[^）]+））`, "g"), "")
+      .replace(new RegExp(`（${escapedEnglish}）`, "g"), "");
+  }
+
+  return normalized.replace(/[ ]{2,}/g, " ").replace(/（\s*）/g, "").trimEnd();
 }
 
 function shouldSkipAnchorInjectionForCommandPhrase(sourceLine: string, anchor: PromptAnchor): boolean {

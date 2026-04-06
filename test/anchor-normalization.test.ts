@@ -252,6 +252,20 @@ test("normalizeHeadingLikeAnchorText keeps a single trailing colon when restorin
   assert.equal(normalized, "**路径（Paths）：**");
 });
 
+test("normalizeHeadingLikeAnchorText preserves source-shaped english-primary headings without adding a chinese explainer", () => {
+  const slice = createSlice({
+    requiredAnchors: [
+      createAnchor("anchor-1", "cco Sandbox", "cco 沙箱工具", "cco_sandbox", "english-primary")
+    ]
+  });
+  const source = "**Option 2: cco Sandbox**";
+  const translated = "**选项 2：cco Sandbox（cco Sandbox（cco 沙箱工具））**";
+
+  const normalized = normalizeHeadingLikeAnchorText(source, translated, slice);
+
+  assert.equal(normalized, "**选项 2：cco Sandbox**");
+});
+
 test("normalizeHeadingLikeAnchorText skips full english back-reference for operational headings", () => {
   const slice = createSlice({
     requiredAnchors: [createAnchor("anchor-1", "Edit configuration:", "编辑配置")]
@@ -481,6 +495,30 @@ test("normalizeExplicitRepairAnchorText preserves missing source heading qualifi
   const normalized = normalizeExplicitRepairAnchorText(source, translated, slice);
 
   assert.equal(normalized, "### 第 2 类：提示式（Prompted，Requires Permission）");
+});
+
+test("normalizeExplicitRepairAnchorText keeps english-primary headings in source shape during repair fallback", () => {
+  const slice = createSlice({
+    requiredAnchors: [
+      createAnchor("anchor-1", "cco Sandbox", "cco 沙箱工具", "cco_sandbox", "english-primary")
+    ],
+    pendingRepairs: [
+      {
+        repairId: "repair-1",
+        anchorId: null,
+        failureType: "other",
+        locationLabel: "分段标题",
+        instruction:
+          "位置：分段标题“**选项 2：cco Sandbox（cco Sandbox（cco 沙箱工具））**”；问题：标题首现锚定格式错误；修复目标：保留标题结构并修复为合法的首现形式。"
+      }
+    ]
+  });
+  const source = "**Option 2: cco Sandbox**";
+  const translated = "**选项 2：cco Sandbox（cco Sandbox（cco 沙箱工具））**";
+
+  const normalized = normalizeExplicitRepairAnchorText(source, translated, slice);
+
+  assert.equal(normalized, "**选项 2：cco Sandbox**");
 });
 
 test("normalizeExplicitRepairAnchorText injects a named anchor back into a heading line", () => {
