@@ -239,6 +239,10 @@ export type PromptSlice = {
   }>;
 };
 
+export function buildLocalFallbackAnchorId(segmentId: string, english: string): string {
+  return `local:${segmentId}:${normalizeLocalFallbackAnchorKey(english)}`;
+}
+
 export function createTranslationRunState(input: CreateTranslationRunStateInput): TranslationRunState {
   const chunks: ChunkState[] = [];
   const segments: SegmentState[] = [];
@@ -356,6 +360,12 @@ export function buildSegmentTaskSlice(
       locationLabel: task.locationLabel,
       instruction: task.instruction
     }));
+  const localFallbackAnchors = synthesizeLocalFallbackPromptAnchors(
+    segmentId,
+    segment.source,
+    pendingRepairs,
+    [...requiredAnchors, ...repeatAnchors, ...establishedAnchors]
+  );
 
   return {
     documentTitle: state.document.title,
@@ -365,7 +375,7 @@ export function buildSegmentTaskSlice(
     segmentIndex: segment.index + 1,
     headingPath: [...chunk.headingPath],
     headingHints: [...segment.headingHints],
-    requiredAnchors,
+    requiredAnchors: coalesceRequiredAnchors([...requiredAnchors, ...localFallbackAnchors]),
     repeatAnchors,
     establishedAnchors,
     protectedSpanIds: [...segment.spanIds],
@@ -620,4 +630,89 @@ function buildBoundaryClass(phrase: string): string {
     allowed += "-";
   }
   return allowed;
+}
+
+function synthesizeLocalFallbackPromptAnchors(
+  segmentId: string,
+  segmentSource: string,
+  pendingRepairs: PromptSlice["pendingRepairs"],
+  existingAnchors: PromptSlice["requiredAnchors"]
+): PromptSlice["requiredAnchors"] {
+  const synthesized: PromptSlice["requiredAnchors"] = [];
+  const seenEnglish = new Set(existingAnchors.map((anchor) => anchor.english.trim().toLowerCase()));
+
+  for (const repair of pendingRepairs) {
+    const targetEnglish = extractLocalFallbackEnglishTarget(repair.locationLabel, repair.instruction);
+    if (!targetEnglish) {
+      continue;
+    }
+
+    const normalizedEnglish = targetEnglish.trim();
+    const normalizedKey = normalizedEnglish.toLowerCase();
+    if (!normalizedEnglish || seenEnglish.has(normalizedKey)) {
+      continue;
+    }
+
+    if (!containsAnyAnchorText(segmentSource, [normalizedEnglish])) {
+      continue;
+    }
+
+    synthesized.push({
+      anchorId: buildLocalFallbackAnchorId(segmentId, normalizedEnglish),
+      english: normalizedEnglish,
+      chineseHint: normalizedEnglish,
+      familyId: `local:${normalizeLocalFallbackAnchorKey(normalizedEnglish)}`,
+      requiresBilingual: false,
+      displayPolicy: "english-only",
+      allowRepeatText: false,
+      displayMode: "english-only",
+      canonicalDisplay: normalizedEnglish,
+      allowedDisplayForms: [normalizedEnglish]
+    });
+    seenEnglish.add(normalizedKey);
+  }
+
+  return synthesized;
+}
+
+function extractLocalFallbackEnglishTarget(locationLabel: string, instruction: string): string | null {
+  if (!(locationLabel.includes("列表项") || locationLabel.includes("项目符号"))) {
+    return null;
+  }
+
+  if (!instruction.includes("不要只写成")) {
+    return null;
+  }
+
+  const englishMatches = [
+    ...instruction.matchAll(/`([^`\n]*[A-Za-z][^`\n]*)`/g),
+    ...instruction.matchAll(/“([^”\n]*[A-Za-z][^”\n]*)”/g)
+  ]
+    .map((match) => match[1]?.trim())
+    .filter((value): value is string => Boolean(value))
+    .filter((value) => !looksCodeLikeAnchorTarget(value));
+
+  if (englishMatches.length === 0) {
+    return null;
+  }
+
+  return [...new Set(englishMatches)].sort((left, right) => right.length - left.length)[0] ?? null;
+}
+
+function looksCodeLikeAnchorTarget(value: string): boolean {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return true;
+  }
+
+  return (
+    trimmed.startsWith("--") ||
+    trimmed.startsWith(".") ||
+    trimmed.includes("/") ||
+    /[(){}[\]<>]/.test(trimmed)
+  );
+}
+
+function normalizeLocalFallbackAnchorKey(english: string): string {
+  return english.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-");
 }

@@ -36,6 +36,7 @@ import {
   applyRepairResult,
   applySegmentAudit,
   applySegmentDraft,
+  buildLocalFallbackAnchorId,
   buildSegmentTaskSlice,
   createTranslationRunState,
   getChunkSegments,
@@ -952,6 +953,13 @@ function inferRepairAnchorId(
       return exactAnchor.anchorId;
     }
 
+    if (
+      shouldUseLocalFallbackAnchor(instruction, target) &&
+      containsWholePhraseInText(segmentSource, target)
+    ) {
+      return buildLocalFallbackAnchorId(slice.segmentId, target);
+    }
+
     const matchedAnchor = anchors.find(
       (anchor) =>
         normalizedTarget.includes(anchor.english.toLowerCase()) ||
@@ -977,6 +985,29 @@ function inferRepairAnchorId(
     }
   }
   return null;
+}
+
+function shouldUseLocalFallbackAnchor(instruction: string, english: string): boolean {
+  return (
+    /(列表项|项目符号)/.test(instruction) &&
+    instruction.includes("不要只写成") &&
+    /\s/.test(english) &&
+    !looksCodeLikeLocalFallbackTarget(english)
+  );
+}
+
+function looksCodeLikeLocalFallbackTarget(value: string): boolean {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return true;
+  }
+
+  return (
+    trimmed.startsWith("--") ||
+    trimmed.startsWith(".") ||
+    trimmed.includes("/") ||
+    /[(){}[\]<>]/.test(trimmed)
+  );
 }
 
 function extractExplicitChineseTargetsFromMustFix(instructions: readonly string[]): string[] {

@@ -1281,6 +1281,17 @@ type ExplicitRepairTarget = {
 };
 
 function parseExplicitRepairTarget(instruction: string): ExplicitRepairTarget | null {
+  const preserveMatch =
+    instruction.match(/保留\s*`([^`]+)`[^。\n]*不要只写成\s*`([^`]+)`/) ??
+    instruction.match(/保留\s*“([^”]+)”[^。\n]*不要只写成\s*“([^”]+)”/);
+  if (preserveMatch?.[1] && preserveMatch[2]) {
+    return {
+      chineseHint: preserveMatch[1].trim(),
+      english: preserveMatch[1].trim(),
+      currentText: preserveMatch[2].trim()
+    };
+  }
+
   const rewriteMatch = instruction.match(/将“([^”]+)”改为与全文锚点一致的“([^”]+)”(?:术语形式|形式)?/u);
   if (rewriteMatch?.[1] && rewriteMatch[2]) {
     const rewrittenTarget = normalizeExplicitRepairChineseHint(

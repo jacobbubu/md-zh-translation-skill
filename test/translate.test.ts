@@ -4489,6 +4489,76 @@ test("translateMarkdownArticle restores a required anchor inside a longer list i
   assert.match(output.markdown, /- 包含秘密信息的环境变量（Environment variables）/);
 });
 
+test("translateMarkdownArticle synthesizes a local fallback anchor for a longer english qualifier named by repair", async () => {
+  const source = "- Pre-approved destinations (npm registry, GitHub, your APIs)\n";
+  let auditCount = 0;
+
+  const executor: CodexExecutor = {
+    async execute(prompt, options) {
+      if (isDocumentAnalysisPrompt(prompt)) {
+        return createExecResult(
+          createAnchorCatalog([
+            {
+              english: "npm",
+              chineseHint: "npm",
+              familyKey: "npm",
+              displayPolicy: "english-only"
+            },
+            {
+              english: "GitHub",
+              chineseHint: "GitHub",
+              familyKey: "github",
+              displayPolicy: "english-only"
+            }
+          ])
+        );
+      }
+
+      if (options.outputSchema && prompt.includes("【分段审校输入】")) {
+        auditCount += 1;
+        if (auditCount === 1) {
+          return createExecResult(
+            wrapPerSegmentAudits(prompt, [
+              {
+                segment_index: 1,
+                audit: createAudit(false, [
+                  "第 1 个项目符号需保留 `npm registry` 这一限定，不要只写成 `npm`。"
+                ])
+              }
+            ])
+          );
+        }
+
+        return createExecResult(wrapPerSegmentAudits(prompt, [{ segment_index: 1, audit: createAudit(true) }]));
+      }
+
+      if (prompt.includes("【必须修复】")) {
+        const currentTranslation = extractPromptSection(prompt, "【当前译文】") ?? "";
+        return createExecResult(currentTranslation);
+      }
+
+      if (options.outputSchema || prompt.includes('"hard_checks"') || prompt.includes("只返回 JSON")) {
+        return createExecResult(JSON.stringify(createAudit(true)));
+      }
+
+      const currentTranslation = extractPromptSection(prompt, "【当前译文】");
+      if (currentTranslation !== null) {
+        return createExecResult(currentTranslation);
+      }
+
+      return createExecResult("- 预先批准的目标位置（npm、GitHub、你的 API）");
+    }
+  };
+
+  const output = await translateMarkdownArticle(source, {
+    executor,
+    formatter: async (markdown) => markdown
+  });
+
+  assert.match(output.markdown, /npm registry/);
+  assert.doesNotMatch(output.markdown, /预先批准的目标位置（npm、GitHub/);
+});
+
 test("translateMarkdownArticle does not inject required anchors into command phrases", async () => {
   const source = ["**Commands:**", "", "- git status, git log, git diff", "- python script.py (runs code in project)", ""].join(
     "\n"

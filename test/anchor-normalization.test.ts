@@ -473,6 +473,36 @@ test("normalizeExplicitRepairAnchorText restores a quoted-line anchor from an ex
   assert.equal(normalized, "> 现在让我们看看沙箱模式（Sandbox mode）会保护你免受什么影响。");
 });
 
+test("normalizeExplicitRepairAnchorText restores a longer english-only list qualifier from an explicit repair target", () => {
+  const slice = createSlice({
+    requiredAnchors: [
+      {
+        ...createAnchor("local:chunk-1-segment-1:npm-registry", "npm registry", "npm registry", "local:npm-registry"),
+        displayPolicy: "english-only",
+        requiresBilingual: false,
+        displayMode: "english-only",
+        canonicalDisplay: "npm registry",
+        allowedDisplayForms: ["npm registry"]
+      }
+    ],
+    pendingRepairs: [
+      {
+        repairId: "repair-1",
+        anchorId: "local:chunk-1-segment-1:npm-registry",
+        failureType: "other",
+        locationLabel: "列表项",
+        instruction: "第 1 个项目符号需保留 `npm registry` 这一限定，不要只写成 `npm`。"
+      }
+    ]
+  });
+  const source = "- Pre-approved destinations (npm registry, GitHub, your APIs)";
+  const translated = "- 预先批准的目标位置（npm、GitHub、你的 API）";
+
+  const normalized = normalizeExplicitRepairAnchorText(source, translated, slice);
+
+  assert.equal(normalized, "- 预先批准的目标位置（npm registry、GitHub、你的 API）");
+});
+
 test("normalizeExplicitRepairAnchorText restores a heading-like anchor from a structured title repair target", () => {
   const slice = createSlice({
     pendingRepairs: [

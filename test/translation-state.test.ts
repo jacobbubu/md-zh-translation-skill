@@ -203,6 +203,77 @@ test("translation state coalesces a shorter required anchor when a longer same-s
   );
 });
 
+test("translation state synthesizes a local fallback anchor for a longer list-item qualifier named by repair", () => {
+  const state = createTranslationRunState({
+    sourcePathHint: "sample.md",
+    documentTitle: "Sample",
+    frontmatterPresent: false,
+    protectedSpans: [],
+    chunks: [
+      {
+        source: "- Pre-approved destinations (npm registry, GitHub, your APIs)",
+        separatorAfter: "",
+        headingPath: ["Sample"],
+        segments: [
+          {
+            kind: "translatable",
+            source: "- Pre-approved destinations (npm registry, GitHub, your APIs)",
+            separatorAfter: "",
+            spanIds: [],
+            headingHints: [],
+            specialNotes: []
+          }
+        ]
+      }
+    ]
+  });
+
+  applyAnchorCatalog(state, {
+    anchors: [
+      {
+        english: "npm",
+        chineseHint: "npm",
+        familyKey: "npm",
+        firstOccurrence: {
+          chunkId: "chunk-1",
+          segmentId: "chunk-1-segment-1"
+        }
+      }
+    ],
+    ignoredTerms: []
+  });
+
+  applySegmentAudit(state, {
+    segmentId: "chunk-1-segment-1",
+    hardChecks: {
+      paragraph_match: { pass: true, problem: "" },
+      first_mention_bilingual: { pass: true, problem: "" },
+      numbers_units_logic: {
+        pass: false,
+        problem: "第 1 个项目符号需保留 `npm registry` 这一限定，不要只写成 `npm`。"
+      },
+      chinese_punctuation: { pass: true, problem: "" },
+      unit_conversion_boundary: { pass: true, problem: "" },
+      protected_span_integrity: { pass: true, problem: "" }
+    },
+    repairTasks: [
+      {
+        id: "repair-1",
+        segmentId: "chunk-1-segment-1",
+        anchorId: "local:chunk-1-segment-1:npm-registry",
+        failureType: "other",
+        locationLabel: "列表项",
+        instruction: "第 1 个项目符号需保留 `npm registry` 这一限定，不要只写成 `npm`。",
+        status: "pending"
+      }
+    ],
+    rawMustFix: ["第 1 个项目符号需保留 `npm registry` 这一限定，不要只写成 `npm`。"]
+  });
+
+  const slice = buildSegmentTaskSlice(state, "chunk-1", "chunk-1-segment-1");
+  assert.equal(slice.requiredAnchors.some((anchor) => anchor.english === "npm registry"), true);
+});
+
 test("translation state infers acronym-compound display policy for acronym-led anchors", () => {
   const state = createTranslationRunState({
     sourcePathHint: "sample.md",
