@@ -430,6 +430,76 @@ test("translation state matches anchors through emphasis-fragmented source text"
   assert.equal(slice.requiredAnchors[0]?.displayPolicy, "english-only");
 });
 
+test("translation state synthesizes local fallback anchors for heading-like configuration titles named by repair", () => {
+  const state = createTranslationRunState({
+    sourcePathHint: "sample.md",
+    documentTitle: "Sample",
+    frontmatterPresent: false,
+    protectedSpans: [],
+    chunks: [
+      {
+        source: "## Filesystem Permissions (Critical )\n\n**Permission Pattern Syntax**",
+        separatorAfter: "",
+        headingPath: ["Sample"],
+        segments: [
+          {
+            kind: "translatable",
+            source: "## Filesystem Permissions (Critical )\n\n**Permission Pattern Syntax**",
+            separatorAfter: "",
+            spanIds: [],
+            headingHints: ["Filesystem Permissions (Critical )", "Permission Pattern Syntax"],
+            specialNotes: []
+          }
+        ]
+      }
+    ]
+  });
+
+  applySegmentAudit(state, {
+    segmentId: "chunk-1-segment-1",
+    hardChecks: {
+      paragraph_match: { pass: false, problem: "" },
+      first_mention_bilingual: { pass: false, problem: "" },
+      numbers_units_logic: { pass: true, problem: "" },
+      chinese_punctuation: { pass: true, problem: "" },
+      unit_conversion_boundary: { pass: true, problem: "" },
+      protected_span_integrity: { pass: true, problem: "" }
+    },
+    repairTasks: [
+      {
+        id: "repair-1",
+        segmentId: "chunk-1-segment-1",
+        anchorId: null,
+        failureType: "missing_anchor",
+        locationLabel: "标题",
+        instruction:
+          "位置：`## 文件系统权限（关键）`。问题：首次出现的关键术语 `Filesystem Permissions` 未保留中英对照。修复目标：在标题内补成合法的中英锚定形式。",
+        status: "pending"
+      },
+      {
+        id: "repair-2",
+        segmentId: "chunk-1-segment-1",
+        anchorId: null,
+        failureType: "missing_anchor",
+        locationLabel: "标题",
+        instruction:
+          "位置：`**权限模式语法**`。问题：首次出现的关键术语 `Permission Pattern Syntax` 未保留中英对照。修复目标：在该标题内补成合法的中英锚定形式。",
+        status: "pending"
+      }
+    ],
+    rawMustFix: []
+  });
+
+  const slice = buildSegmentTaskSlice(state, "chunk-1", "chunk-1-segment-1");
+  const filesystemAnchor = slice.requiredAnchors.find((anchor) => anchor.english === "Filesystem Permissions");
+  const syntaxAnchor = slice.requiredAnchors.find((anchor) => anchor.english === "Permission Pattern Syntax");
+
+  assert.equal(filesystemAnchor?.displayPolicy, "chinese-primary");
+  assert.equal(filesystemAnchor?.chineseHint, "文件系统权限");
+  assert.equal(syntaxAnchor?.displayPolicy, "chinese-primary");
+  assert.equal(syntaxAnchor?.chineseHint, "权限模式语法");
+});
+
 test("translation state exposes canonical display metadata for english-primary anchors", () => {
   const state = createTranslationRunState({
     sourcePathHint: "sample.md",

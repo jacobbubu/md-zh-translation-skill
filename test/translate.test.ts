@@ -4559,6 +4559,80 @@ test("translateMarkdownArticle synthesizes a local fallback anchor for a longer 
   assert.doesNotMatch(output.markdown, /预先批准的目标位置（npm、GitHub/);
 });
 
+test("translateMarkdownArticle synthesizes heading-local fallback anchors for configuration titles named by repair", async () => {
+  const source = [
+    "# Title",
+    "",
+    "## Filesystem Permissions (Critical )",
+    "",
+    "Filesystem permissions control what Claude can access.",
+    "",
+    "**Permission Pattern Syntax**",
+    ""
+  ].join("\n");
+  let auditCount = 0;
+
+  const result = await translateMarkdownArticle(source, {
+    executor: {
+      async execute(prompt, options) {
+        if (isDocumentAnalysisPrompt(prompt)) {
+          return createExecResult(createAnchorCatalog([]));
+        }
+
+        if (options.outputSchema && prompt.includes("【分段审校输入】")) {
+          auditCount += 1;
+          if (auditCount === 1) {
+            return createExecResult(
+              wrapPerSegmentAudits(prompt, [
+                {
+                  segment_index: 1,
+                  audit: createAudit(false, [
+                    "位置：`## 文件系统权限（关键）`。问题：首次出现的关键术语 `Filesystem Permissions` 未保留中英对照。修复目标：在标题内补成合法的中英锚定形式。",
+                    "位置：`**权限模式语法**`。问题：首次出现的关键术语 `Permission Pattern Syntax` 未保留中英对照。修复目标：在该标题内补成合法的中英锚定形式。"
+                  ])
+                }
+              ])
+            );
+          }
+
+          return createExecResult(wrapPerSegmentAudits(prompt, [{ segment_index: 1, audit: createAudit(true) }]));
+        }
+
+        if (prompt.includes("【必须修复】")) {
+          const currentTranslation = extractPromptSection(prompt, "【当前译文】") ?? "";
+          return createExecResult(currentTranslation);
+        }
+
+        if (options.outputSchema || prompt.includes('"hard_checks"') || prompt.includes("只返回 JSON")) {
+          return createExecResult(JSON.stringify(createAudit(true)));
+        }
+
+        const currentTranslation = extractPromptSection(prompt, "【当前译文】");
+        if (currentTranslation !== null) {
+          return createExecResult(currentTranslation);
+        }
+
+        return createExecResult(
+          [
+            "# Title",
+            "",
+            "## 文件系统权限（关键）",
+            "",
+            "文件系统权限控制 Claude 可以访问什么。",
+            "",
+            "**权限模式语法**",
+            ""
+          ].join("\n")
+        );
+      }
+    },
+    formatter: async (markdown) => markdown
+  });
+
+  assert.match(result.markdown, /## 文件系统权限（Filesystem Permissions）（关键）/);
+  assert.match(result.markdown, /\*\*权限模式语法（Permission Pattern Syntax）\*\*/);
+});
+
 test("translateMarkdownArticle does not inject required anchors into command phrases", async () => {
   const source = ["**Commands:**", "", "- git status, git log, git diff", "- python script.py (runs code in project)", ""].join(
     "\n"

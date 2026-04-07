@@ -1316,14 +1316,15 @@ function parseExplicitRepairTarget(instruction: string): ExplicitRepairTarget | 
   }
 
   const english =
-    instruction.match(/关键术语“([^”]*[A-Za-z][^”]*)”/)?.[1]?.trim() ??
+    instruction.match(/关键术语\s*[`“]([^`”]*[A-Za-z][^`”]*)[`”]/)?.[1]?.trim() ??
     instruction.match(/首现术语\s+([A-Za-z][A-Za-z0-9 .+/_-]*)\s+未补/)?.[1]?.trim() ??
     instruction.match(/[：:]\s*([A-Za-z][A-Za-z0-9 .+/_-]*)\s+首次出现需补/)?.[1]?.trim() ??
     instruction.match(/括注“([^”]*[A-Za-z][^”]*)”/)?.[1]?.trim() ??
     instruction.match(/“([^”]*[A-Za-z][^”]*)”缺少/)?.[1]?.trim() ??
     null;
   const locationText =
-    instruction.match(/位置：[^。；\n“]*“([^”]+)”/)?.[1]?.trim() ??
+    instruction.match(/位置：\s*`([^`\n]+)`/)?.[1]?.trim() ??
+    instruction.match(/位置：\s*“([^”\n]+)”/)?.[1]?.trim() ??
     instruction.match(/位置：(.+?)。问题[:：]/)?.[1]?.trim() ??
     instruction.match(/当前(?:分段)?标题“([^”]+)”/)?.[1]?.trim() ??
     instruction.match(/`([^`]+)`/)?.[1]?.trim() ??

@@ -1096,7 +1096,8 @@ function inferRepairTargetEnglish(
 
 function extractExplicitRepairLocationText(instruction: string): string | null {
   return (
-    instruction.match(/位置：[^。\n]*“([^”]+)”/)?.[1]?.trim() ??
+    instruction.match(/位置：\s*`([^`\n]+)`/)?.[1]?.trim() ??
+    instruction.match(/位置：\s*“([^”\n]+)”/)?.[1]?.trim() ??
     instruction.match(/当前(?:分段)?标题“([^”]+)”/)?.[1]?.trim() ??
     instruction.match(/`([^`]+)`/)?.[1]?.trim() ??
     null
@@ -1157,10 +1158,11 @@ function inferLocalRepairTarget(
     const english =
       extractHeadingEnglishSuffixAfterConnector(sourceHeading.content, normalizedTranslatedHeading, normalizedLocation) ??
       extractHeadingEnglishSuffixAfterColon(sourceHeading.content, normalizedTranslatedHeading, normalizedLocation) ??
+      extractHeadingEnglishCoreTerm(sourceHeading.content, normalizedTranslatedHeading, normalizedLocation) ??
       null;
     if (english) {
       return {
-        chineseHint: normalizedLocation,
+        chineseHint: normalizeHeadingLocalRepairChineseHint(normalizedLocation),
         english
       };
     }
@@ -1175,6 +1177,10 @@ function normalizeExplicitRepairLocationText(locationText: string): string {
     .replace(/^\*\*(.+)\*\*$/, "$1")
     .replace(/[*_`~]/g, "")
     .trim();
+}
+
+function normalizeHeadingLocalRepairChineseHint(chineseHint: string): string {
+  return chineseHint.replace(/（[\u4e00-\u9fff\s]+）\s*$/u, "").trim();
 }
 
 type LocalHeadingLine = {
@@ -1267,6 +1273,28 @@ function extractHeadingEnglishSuffixAfterColon(
 
   const colonMatch = sourceHeading.match(/[:：]\s*([A-Za-z][A-Za-z0-9 .+/_-]*)$/);
   return colonMatch?.[1]?.trim() ?? null;
+}
+
+function extractHeadingEnglishCoreTerm(
+  sourceHeading: string,
+  translatedHeading: string,
+  chineseHint: string
+): string | null {
+  if (!translatedHeading.includes(chineseHint) || !/[A-Za-z]/.test(sourceHeading)) {
+    return null;
+  }
+
+  const strippedQualifier = sourceHeading.replace(/\s+\(([^)]*[A-Za-z][^)]*)\)\s*$/, "").trim();
+  if (strippedQualifier && strippedQualifier !== sourceHeading.trim() && /^[A-Za-z][A-Za-z0-9 .+/_:-]*$/.test(strippedQualifier)) {
+    return strippedQualifier;
+  }
+
+  const trimmedSource = sourceHeading.trim();
+  if (/^[A-Za-z][A-Za-z0-9 .+/_:-]*$/.test(trimmedSource)) {
+    return trimmedSource;
+  }
+
+  return null;
 }
 
 function buildStructuredSegmentAuditResult(

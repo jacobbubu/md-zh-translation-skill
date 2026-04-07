@@ -642,12 +642,12 @@ function synthesizeLocalFallbackPromptAnchors(
   const seenEnglish = new Set(existingAnchors.map((anchor) => anchor.english.trim().toLowerCase()));
 
   for (const repair of pendingRepairs) {
-    const targetEnglish = extractLocalFallbackEnglishTarget(repair.locationLabel, repair.instruction);
-    if (!targetEnglish) {
+    const target = extractLocalFallbackAnchorTarget(repair.locationLabel, repair.instruction);
+    if (!target) {
       continue;
     }
 
-    const normalizedEnglish = targetEnglish.trim();
+    const normalizedEnglish = target.english.trim();
     const normalizedKey = normalizedEnglish.toLowerCase();
     if (!normalizedEnglish || seenEnglish.has(normalizedKey)) {
       continue;
@@ -660,14 +660,20 @@ function synthesizeLocalFallbackPromptAnchors(
     synthesized.push({
       anchorId: buildLocalFallbackAnchorId(segmentId, normalizedEnglish),
       english: normalizedEnglish,
-      chineseHint: normalizedEnglish,
+      chineseHint: target.chineseHint,
       familyId: `local:${normalizeLocalFallbackAnchorKey(normalizedEnglish)}`,
-      requiresBilingual: false,
-      displayPolicy: "english-only",
+      requiresBilingual: target.displayPolicy !== "english-only",
+      displayPolicy: target.displayPolicy,
       allowRepeatText: false,
-      displayMode: "english-only",
-      canonicalDisplay: normalizedEnglish,
-      allowedDisplayForms: [normalizedEnglish]
+      displayMode: target.displayPolicy === "english-only" ? "english-only" : "chinese-primary",
+      canonicalDisplay:
+        target.displayPolicy === "english-only"
+          ? normalizedEnglish
+          : `${target.chineseHint}（${normalizedEnglish}）`,
+      allowedDisplayForms:
+        target.displayPolicy === "english-only"
+          ? [normalizedEnglish]
+          : [`${target.chineseHint}（${normalizedEnglish}）`]
     });
     seenEnglish.add(normalizedKey);
   }
@@ -675,15 +681,10 @@ function synthesizeLocalFallbackPromptAnchors(
   return synthesized;
 }
 
-function extractLocalFallbackEnglishTarget(locationLabel: string, instruction: string): string | null {
-  if (!(locationLabel.includes("列表项") || locationLabel.includes("项目符号"))) {
-    return null;
-  }
-
-  if (!instruction.includes("不要只写成")) {
-    return null;
-  }
-
+function extractLocalFallbackAnchorTarget(
+  locationLabel: string,
+  instruction: string
+): { english: string; chineseHint: string; displayPolicy: "english-only" | "chinese-primary" } | null {
   const englishMatches = [
     ...instruction.matchAll(/`([^`\n]*[A-Za-z][^`\n]*)`/g),
     ...instruction.matchAll(/“([^”\n]*[A-Za-z][^”\n]*)”/g)
@@ -692,11 +693,48 @@ function extractLocalFallbackEnglishTarget(locationLabel: string, instruction: s
     .filter((value): value is string => Boolean(value))
     .filter((value) => !looksCodeLikeAnchorTarget(value));
 
-  if (englishMatches.length === 0) {
+  if ((locationLabel.includes("列表项") || locationLabel.includes("项目符号")) && instruction.includes("不要只写成")) {
+    if (englishMatches.length === 0) {
+      return null;
+    }
+
+    const longestEnglish = [...new Set(englishMatches)].sort((left, right) => right.length - left.length)[0];
+    if (!longestEnglish) {
+      return null;
+    }
+
+    return {
+      english: longestEnglish,
+      chineseHint: longestEnglish,
+      displayPolicy: "english-only"
+    };
+  }
+
+  if (!locationLabel.includes("标题")) {
     return null;
   }
 
-  return [...new Set(englishMatches)].sort((left, right) => right.length - left.length)[0] ?? null;
+  const headingEnglish =
+    instruction.match(/关键术语\s*[`“]([^`”\n]*[A-Za-z][^`”\n]*)[`”]/)?.[1]?.trim() ??
+    instruction.match(/修复目标：[^。；\n]*[`“]([^`”\n]*[A-Za-z][^`”\n]*)[`”]/)?.[1]?.trim() ??
+    null;
+  const locationText =
+    instruction.match(/位置：\s*`([^`\n]+)`/)?.[1]?.trim() ??
+    instruction.match(/位置：\s*“([^”\n]+)”/)?.[1]?.trim() ??
+    instruction.match(/当前(?:分段)?标题[`“]([^`”\n]+)[`”]/)?.[1]?.trim() ??
+    null;
+  const chineseHint =
+    locationText ? normalizeHeadingLocalFallbackChineseHint(stripInlineMarkdownMarkers(locationText)) : null;
+
+  if (!headingEnglish || !chineseHint || /[A-Za-z]/.test(chineseHint)) {
+    return null;
+  }
+
+  return {
+    english: headingEnglish,
+    chineseHint,
+    displayPolicy: "chinese-primary"
+  };
 }
 
 function looksCodeLikeAnchorTarget(value: string): boolean {
@@ -715,4 +753,16 @@ function looksCodeLikeAnchorTarget(value: string): boolean {
 
 function normalizeLocalFallbackAnchorKey(english: string): string {
   return english.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-");
+}
+
+function stripInlineMarkdownMarkers(text: string): string {
+  return text
+    .replace(/^#{1,6}\s+/, "")
+    .replace(/^\*\*(.+)\*\*$/, "$1")
+    .replace(/[*_`~]/g, "")
+    .trim();
+}
+
+function normalizeHeadingLocalFallbackChineseHint(text: string): string {
+  return text.replace(/（[\u4e00-\u9fff\s]+）\s*$/u, "").trim();
 }

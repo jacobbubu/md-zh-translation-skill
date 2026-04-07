@@ -524,6 +524,64 @@ test("normalizeExplicitRepairAnchorText restores a heading-like anchor from a st
   assert.equal(normalized, "**测试 2：系统文件访问（System File Access）**");
 });
 
+test("normalizeExplicitRepairAnchorText restores configuration headings from heading-local fallback anchors", () => {
+  const slice = createSlice({
+    requiredAnchors: [
+      {
+        ...createAnchor(
+          "local:chunk-1-segment-1:filesystem-permissions",
+          "Filesystem Permissions",
+          "文件系统权限",
+          "local:filesystem-permissions",
+          "chinese-primary"
+        ),
+        displayMode: "chinese-primary",
+        canonicalDisplay: "文件系统权限（Filesystem Permissions）",
+        allowedDisplayForms: ["文件系统权限（Filesystem Permissions）"]
+      },
+      {
+        ...createAnchor(
+          "local:chunk-1-segment-1:permission-pattern-syntax",
+          "Permission Pattern Syntax",
+          "权限模式语法",
+          "local:permission-pattern-syntax",
+          "chinese-primary"
+        ),
+        displayMode: "chinese-primary",
+        canonicalDisplay: "权限模式语法（Permission Pattern Syntax）",
+        allowedDisplayForms: ["权限模式语法（Permission Pattern Syntax）"]
+      }
+    ],
+    pendingRepairs: [
+      {
+        repairId: "repair-1",
+        anchorId: "local:chunk-1-segment-1:filesystem-permissions",
+        failureType: "missing_anchor",
+        locationLabel: "标题",
+        instruction:
+          "位置：`## 文件系统权限（关键）`。问题：首次出现的关键术语 `Filesystem Permissions` 未保留中英对照。修复目标：在标题内补成合法的中英锚定形式。"
+      },
+      {
+        repairId: "repair-2",
+        anchorId: "local:chunk-1-segment-1:permission-pattern-syntax",
+        failureType: "missing_anchor",
+        locationLabel: "标题",
+        instruction:
+          "位置：`**权限模式语法**`。问题：首次出现的关键术语 `Permission Pattern Syntax` 未保留中英对照。修复目标：在该标题内补成合法的中英锚定形式。"
+      }
+    ]
+  });
+  const source = ["## Filesystem Permissions (Critical )", "", "**Permission Pattern Syntax**"].join("\n");
+  const translated = ["## 文件系统权限（关键）", "", "**权限模式语法**"].join("\n");
+
+  const normalized = normalizeExplicitRepairAnchorText(source, translated, slice);
+
+  assert.equal(
+    normalized,
+    ["## 文件系统权限（Filesystem Permissions）（关键）", "", "**权限模式语法（Permission Pattern Syntax）**"].join("\n")
+  );
+});
+
 test("normalizeExplicitRepairAnchorText keeps a single trailing colon when restoring a heading-like anchor", () => {
   const slice = createSlice({
     pendingRepairs: [
