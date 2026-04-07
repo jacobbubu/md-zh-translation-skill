@@ -11,6 +11,7 @@ import {
 } from "./internal/prompts/scheme-h.js";
 import { DefaultCodexExecutor, type CodexExecutor } from "./codex-exec.js";
 import {
+  applyEmphasisPlanTargets,
   describeAnchorDisplay,
   formatAnchorDisplay,
   injectPlannedAnchorText,
@@ -24,6 +25,7 @@ import { FormattingError, HardGateError } from "./errors.js";
 import { formatTranslatedBody, reconstructMarkdown } from "./format.js";
 import { planMarkdownChunks, type MarkdownChunk, type MarkdownChunkPlan } from "./markdown-chunks.js";
 import {
+  extractTranslatableStrongEmphasisSpans,
   extractFrontmatter,
   protectMarkdownSpans,
   protectSegmentFormattingSpans,
@@ -48,6 +50,7 @@ import {
   type AnchorCatalog,
   type AnalysisAnchor,
   type AnalysisHeadingPlan,
+  type AnalysisEmphasisPlan,
   type AuditCheckKey as StateAuditCheckKey,
   type ChunkSeed,
   type PromptSlice,
@@ -181,7 +184,7 @@ const BUNDLED_GATE_AUDIT_SCHEMA = {
 const ANCHOR_CATALOG_SCHEMA = {
   type: "object",
   additionalProperties: false,
-  required: ["anchors", "headingPlans", "ignoredTerms"],
+  required: ["anchors", "headingPlans", "emphasisPlans", "ignoredTerms"],
   properties: {
     anchors: {
       type: "array",
@@ -292,6 +295,50 @@ const ANCHOR_CATALOG_SCHEMA = {
               {
                 type: "string",
                 enum: ["auto", "acronym-compound", "english-only", "english-primary", "chinese-primary"]
+              },
+              { type: "null" }
+            ]
+          }
+        }
+      }
+    },
+    emphasisPlans: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: [
+          "chunkId",
+          "segmentId",
+          "emphasisIndex",
+          "lineIndex",
+          "sourceText",
+          "strategy",
+          "targetText",
+          "governedTerms"
+        ],
+        properties: {
+          chunkId: { type: "string" },
+          segmentId: { type: "string" },
+          emphasisIndex: {
+            anyOf: [{ type: "integer", minimum: 1 }, { type: "null" }]
+          },
+          lineIndex: {
+            anyOf: [{ type: "integer", minimum: 1 }, { type: "null" }]
+          },
+          sourceText: { type: "string" },
+          strategy: {
+            type: "string",
+            enum: ["preserve-strong", "none"]
+          },
+          targetText: {
+            anyOf: [{ type: "string" }, { type: "null" }]
+          },
+          governedTerms: {
+            anyOf: [
+              {
+                type: "array",
+                items: { type: "string" }
               },
               { type: "null" }
             ]
@@ -573,6 +620,49 @@ function parseAnchorCatalog(text: string): AnchorCatalog {
     return parsedPlan;
   });
 
+  const emphasisPlans = (Array.isArray(data.emphasisPlans) ? data.emphasisPlans : []).map((item, index) => {
+    if (!item || typeof item !== "object") {
+      throw new HardGateError(`Anchor catalog emphasisPlans[${index}] is not an object.`);
+    }
+    const plan = item as Record<string, unknown>;
+    if (
+      typeof plan.chunkId !== "string" ||
+      typeof plan.segmentId !== "string" ||
+      typeof plan.sourceText !== "string" ||
+      typeof plan.strategy !== "string"
+    ) {
+      throw new HardGateError(`Anchor catalog emphasisPlans[${index}] has an invalid shape.`);
+    }
+
+    const parsedPlan: AnalysisEmphasisPlan = {
+      chunkId: plan.chunkId,
+      segmentId: plan.segmentId,
+      sourceText: plan.sourceText.trim(),
+      strategy: plan.strategy as AnalysisEmphasisPlan["strategy"]
+    };
+
+    if (typeof plan.emphasisIndex === "number") {
+      parsedPlan.emphasisIndex = plan.emphasisIndex;
+    }
+    if (typeof plan.lineIndex === "number") {
+      parsedPlan.lineIndex = plan.lineIndex;
+    }
+    if (typeof plan.targetText === "string" && plan.targetText.trim()) {
+      parsedPlan.targetText = plan.targetText.trim();
+    }
+    if (Array.isArray(plan.governedTerms)) {
+      const governedTerms = plan.governedTerms
+        .filter((term): term is string => typeof term === "string")
+        .map((term) => term.trim())
+        .filter(Boolean);
+      if (governedTerms.length > 0) {
+        parsedPlan.governedTerms = governedTerms;
+      }
+    }
+
+    return parsedPlan;
+  });
+
   const ignoredTerms = data.ignoredTerms.map((item, index) => {
     if (!item || typeof item !== "object") {
       throw new HardGateError(`Anchor catalog ignoredTerms[${index}] is not an object.`);
@@ -588,7 +678,7 @@ function parseAnchorCatalog(text: string): AnchorCatalog {
     };
   });
 
-  return { anchors, headingPlans, ignoredTerms };
+  return { anchors, headingPlans, emphasisPlans, ignoredTerms };
 }
 
 function isHardPass(audit: GateAudit): boolean {
@@ -645,6 +735,11 @@ function buildDocumentAnalysisInput(state: TranslationRunState): string {
           headingLikeLines: segment.headingHints.map((heading, index) => ({
             index: index + 1,
             sourceHeading: heading
+          })),
+          emphasisLikeSpans: extractTranslatableStrongEmphasisSpans(segment.source).map((span) => ({
+            index: span.index,
+            lineIndex: span.lineIndex,
+            sourceText: span.sourceText
           })),
           source: segment.source
         }))
@@ -920,6 +1015,10 @@ function summarizeHeadingPlan(plan: PromptSlice["headingPlans"][number]): string
   return `${plan.sourceHeading} -> strategy=${plan.strategy}; target=${plan.targetHeading?.trim() || "无"}; governed=${governed}`;
 }
 
+function summarizeEmphasisPlan(plan: PromptSlice["emphasisPlans"][number]): string {
+  return `${plan.sourceText} -> strategy=${plan.strategy}; target=${plan.targetText?.trim() || "无"}`;
+}
+
 function buildSegmentPromptContext(
   state: TranslationRunState,
   chunk: MarkdownChunk,
@@ -937,6 +1036,7 @@ function buildSegmentPromptContext(
     sourcePathHint,
     segmentHeadings: extractSegmentHeadingHints(source),
     headingPlanSummaries: slice.headingPlans.map(summarizeHeadingPlan),
+    emphasisPlanSummaries: slice.emphasisPlans.map(summarizeEmphasisPlan),
     specialNotes: extractSegmentSpecialNotes(source),
     requiredAnchors: slice.requiredAnchors.map(summarizePromptAnchor),
     repeatAnchors: slice.repeatAnchors.map(summarizePromptAnchor),
@@ -966,6 +1066,7 @@ function buildChunkStylePromptContext(
     sourcePathHint,
     segmentHeadings: extractSegmentHeadingHints(source),
     headingPlanSummaries: [],
+    emphasisPlanSummaries: [],
     specialNotes: extractSegmentSpecialNotes(source),
     requiredAnchors: [],
     repeatAnchors: [],
@@ -2250,9 +2351,14 @@ async function translateProtectedSegment(
     protectedSource,
     normalizedSurfaceDraftText
   );
+  const emphasisPlannedDraftText = applyEmphasisPlanTargets(
+    protectedSource,
+    normalizedRegistryDraftText,
+    headingPlanningSlice
+  );
   const restoredInlineDraftText = restoreInlineCodeFromSourceShape(
     protectedSource,
-    normalizedRegistryDraftText
+    emphasisPlannedDraftText
   );
   const canonicalProtectedBody = reprotectMarkdownSpans(restoredInlineDraftText, combinedSpans);
   const restoredBody = restoreMarkdownSpans(canonicalProtectedBody, combinedSpans);
@@ -2367,9 +2473,14 @@ async function repairDraftedSegment(
       draftedSegment.protectedSource,
       normalizedSurfaceRepairText
     );
+    const emphasisPlannedRepairText = applyEmphasisPlanTargets(
+      draftedSegment.protectedSource,
+      normalizedRegistryRepairText,
+      headingPlanningSlice
+    );
     const restoredInlineRepairText = restoreInlineCodeFromSourceShape(
       draftedSegment.protectedSource,
-      normalizedRegistryRepairText
+      emphasisPlannedRepairText
     );
     draftedSegment.protectedBody = reprotectMarkdownSpans(restoredInlineRepairText, draftedSegment.spans);
     draftedSegment.restoredBody = restoreMarkdownSpans(draftedSegment.protectedBody, draftedSegment.spans);
@@ -3402,6 +3513,7 @@ export type ChunkPromptContext = {
   sourcePathHint: string;
   segmentHeadings: string[];
   headingPlanSummaries: string[];
+  emphasisPlanSummaries: string[];
   requiredAnchors: string[];
   repeatAnchors: string[];
   establishedAnchors: string[];
@@ -3422,6 +3534,8 @@ function withChunkContextAt(prompt: string, context: ChunkPromptContext, marker:
     context.segmentHeadings.length > 0 ? context.segmentHeadings.join(" | ") : "无显式标题";
   const headingPlanSummaries =
     context.headingPlanSummaries.length > 0 ? context.headingPlanSummaries.join(" | ") : "无标题计划";
+  const emphasisPlanSummaries =
+    context.emphasisPlanSummaries.length > 0 ? context.emphasisPlanSummaries.join(" | ") : "无强调计划";
   const requiredAnchors = context.requiredAnchors.length > 0 ? context.requiredAnchors.join(" | ") : "无";
   const repeatAnchors = context.repeatAnchors.length > 0 ? context.repeatAnchors.join(" | ") : "无";
   const establishedAnchors =
@@ -3436,6 +3550,7 @@ function withChunkContextAt(prompt: string, context: ChunkPromptContext, marker:
     `当前章节路径：${headingPath}`,
     `当前分段标题：${segmentHeadings}`,
     `当前分段标题计划：${headingPlanSummaries}`,
+    `当前分段强调计划：${emphasisPlanSummaries}`,
     `当前分段必须建立的首现锚点：${requiredAnchors}`,
     `当前分段里已在前文建立过、禁止重复补锚的项目：${repeatAnchors}`,
     `全文已建立的锚点摘要：${establishedAnchors}`,

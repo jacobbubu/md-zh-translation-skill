@@ -32,6 +32,7 @@ function createEmptyAnchorCatalog(): string {
   return JSON.stringify({
     anchors: [],
     headingPlans: [],
+    emphasisPlans: [],
     ignoredTerms: []
   });
 }
@@ -58,6 +59,16 @@ function createAnchorCatalog(
     chineseHint?: string;
     category?: string;
     displayPolicy?: "auto" | "acronym-compound" | "english-only" | "english-primary" | "chinese-primary";
+  }> = [],
+  emphasisPlans: Array<{
+    chunkId: string;
+    segmentId: string;
+    emphasisIndex?: number;
+    lineIndex?: number;
+    sourceText: string;
+    strategy: "preserve-strong" | "none";
+    targetText?: string;
+    governedTerms?: string[];
   }> = []
 ): string {
   return JSON.stringify({
@@ -84,6 +95,16 @@ function createAnchorCatalog(
       chineseHint: plan.chineseHint ?? null,
       category: plan.category ?? null,
       displayPolicy: plan.displayPolicy ?? null
+    })),
+    emphasisPlans: emphasisPlans.map((plan) => ({
+      chunkId: plan.chunkId,
+      segmentId: plan.segmentId,
+      emphasisIndex: plan.emphasisIndex ?? null,
+      lineIndex: plan.lineIndex ?? null,
+      sourceText: plan.sourceText,
+      strategy: plan.strategy,
+      targetText: plan.targetText ?? null,
+      governedTerms: plan.governedTerms ?? null
     })),
     ignoredTerms: []
   });
@@ -299,6 +320,7 @@ function createMinimalChunkPromptContext(
     sourcePathHint: "article.md",
     segmentHeadings: [],
     headingPlanSummaries: [],
+    emphasisPlanSummaries: [],
     requiredAnchors: [],
     repeatAnchors: [],
     establishedAnchors: [],
@@ -4296,6 +4318,62 @@ test("translateMarkdownArticle adds structure guidance for translatable emphasis
   assert.match(prompt, /【当前分段附加规则】/);
   assert.match(prompt, /当前分段包含可翻译的 Markdown 强调结构或命令\/flag 写法/);
   assert.match(prompt, /--dangerously-skip-permissions/);
+});
+
+test("translateMarkdownArticle restores translatable strong emphasis from LLM emphasis plans", async () => {
+  const source = [
+    "# Title",
+    "",
+    "Claude Code **now has a sandbox mode** that changes the workflow.",
+    ""
+  ].join("\n");
+
+  const result = await translateMarkdownArticle(source, {
+    executor: {
+      async execute(prompt, options) {
+        if (isDocumentAnalysisPrompt(prompt)) {
+          return createExecResult(
+            createAnchorCatalog(
+              [],
+              [],
+              [
+                {
+                  chunkId: "chunk-1",
+                  segmentId: "chunk-1-segment-1",
+                  emphasisIndex: 1,
+                  lineIndex: 1,
+                  sourceText: "now has a sandbox mode",
+                  strategy: "preserve-strong",
+                  targetText: "现在有了沙盒模式（sandbox mode）",
+                  governedTerms: ["sandbox mode"]
+                }
+              ]
+            )
+          );
+        }
+
+        if (options.outputSchema && prompt.includes("【分段审校输入】")) {
+          return createExecResult(
+            wrapPerSegmentAudits(prompt, [
+              {
+                segment_index: 1,
+                audit: createAudit(true)
+              }
+            ])
+          );
+        }
+
+        if (options.outputSchema || prompt.includes("只返回 JSON")) {
+          return createExecResult(JSON.stringify(createAudit(true)));
+        }
+
+        return createExecResult(["# Title", "", "Claude Code 现在有了沙盒模式，改变了工作流。", ""].join("\n"));
+      }
+    },
+    formatter: async (markdown) => markdown
+  });
+
+  assert.match(result.markdown, /\*\*现在有了沙盒模式（sandbox mode）\*\*/);
 });
 
 test("translateMarkdownArticle fails when the hard-pass translation already broke a protected span", async () => {

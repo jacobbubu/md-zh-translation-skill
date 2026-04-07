@@ -28,6 +28,13 @@ export type ProtectedMarkdown = {
   spans: ProtectedSpan[];
 };
 
+export type TranslatableStrongEmphasisSpan = {
+  index: number;
+  lineIndex: number;
+  raw: string;
+  sourceText: string;
+};
+
 function createPlaceholder(kind: ProtectedKind, index: number): string {
   return `@@MDZH_${kind.toUpperCase()}_${String(index).padStart(4, "0")}@@`;
 }
@@ -85,6 +92,36 @@ export function protectMarkdownSpans(body: string): ProtectedMarkdown {
 export function protectSegmentFormattingSpans(body: string, startIndex = 1): ProtectedMarkdown {
   void startIndex;
   return { protectedBody: body, spans: [] };
+}
+
+export function extractTranslatableStrongEmphasisSpans(body: string): TranslatableStrongEmphasisSpan[] {
+  const spans: TranslatableStrongEmphasisSpan[] = [];
+  const lines = body.split(/\r?\n/);
+
+  for (const [lineIndex, line] of lines.entries()) {
+    const pattern = /(\*\*[^*\n][^*\n]{0,80}\*\*|__[^_\n][^_\n]{0,80}__)/g;
+    for (const match of line.matchAll(pattern)) {
+      const raw = match[0] ?? "";
+      const trimmedLine = line.trim();
+      if (!raw || trimmedLine === raw.trim()) {
+        continue;
+      }
+
+      const sourceText = raw.slice(2, -2).trim();
+      if (!sourceText || !/[A-Za-z]/.test(sourceText)) {
+        continue;
+      }
+
+      spans.push({
+        index: spans.length + 1,
+        lineIndex: lineIndex + 1,
+        raw,
+        sourceText
+      });
+    }
+  }
+
+  return spans;
 }
 
 function protectFencedCodeBlocks(

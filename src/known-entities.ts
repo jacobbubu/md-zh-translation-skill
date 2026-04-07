@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 
+import { extractTranslatableStrongEmphasisSpans } from "./markdown-protection.js";
 import type { AnchorCatalog, AnalysisAnchor, TranslationRunState } from "./translation-state.js";
 
 export type KnownEntityDisplayPolicy =
@@ -108,6 +109,7 @@ export function buildKnownEntityCatalog(
   return {
     anchors,
     headingPlans: [],
+    emphasisPlans: [],
     ignoredTerms: []
   };
 }
@@ -131,6 +133,7 @@ export function mergeAnchorCatalogs(
   return {
     anchors,
     headingPlans: mergeHeadingPlans(formalCatalog.headingPlans ?? [], discoveredCatalog.headingPlans ?? []),
+    emphasisPlans: [...(formalCatalog.emphasisPlans ?? []), ...(discoveredCatalog.emphasisPlans ?? [])],
     ignoredTerms: [...formalCatalog.ignoredTerms, ...discoveredCatalog.ignoredTerms]
   };
 }
@@ -158,6 +161,7 @@ export function normalizeDiscoveredAnchorCatalog(
   return {
     anchors: normalizedAnchors,
     headingPlans: normalizeDiscoveredHeadingPlans(state, catalog.headingPlans ?? []),
+    emphasisPlans: normalizeDiscoveredEmphasisPlans(state, catalog.emphasisPlans ?? []),
     ignoredTerms
   };
 }
@@ -204,6 +208,27 @@ function normalizeDiscoveredHeadingPlans(
       ...(plan.english?.trim() ? { english: plan.english.trim() } : {}),
       ...(plan.chineseHint?.trim() ? { chineseHint: plan.chineseHint.trim() } : {}),
       ...(plan.category?.trim() ? { category: plan.category.trim() } : {})
+    }));
+}
+
+function normalizeDiscoveredEmphasisPlans(
+  state: TranslationRunState,
+  emphasisPlans: NonNullable<AnchorCatalog["emphasisPlans"]>
+): NonNullable<AnchorCatalog["emphasisPlans"]> {
+  return emphasisPlans
+    .filter((plan) => {
+      const segment = state.segments.find((item) => item.id === plan.segmentId);
+      if (!segment) {
+        return false;
+      }
+      return extractSegmentStrongEmphasisSourceTexts(segment.source).includes(plan.sourceText.trim().toLowerCase());
+    })
+    .map((plan) => ({
+      ...plan,
+      sourceText: plan.sourceText.trim(),
+      ...(typeof plan.emphasisIndex === "number" ? { emphasisIndex: plan.emphasisIndex } : {}),
+      ...(typeof plan.lineIndex === "number" ? { lineIndex: plan.lineIndex } : {}),
+      ...(plan.targetText?.trim() ? { targetText: plan.targetText.trim() } : {})
     }));
 }
 
@@ -267,6 +292,12 @@ function deriveKnownEntityCandidates(
       ],
       source: "llm_analysis"
     }));
+}
+
+function extractSegmentStrongEmphasisSourceTexts(source: string): string[] {
+  return extractTranslatableStrongEmphasisSpans(source)
+    .map((span) => span.sourceText.trim().toLowerCase())
+    .filter((item) => item.length > 0);
 }
 
 function mapKnownPolicyToAnchorPolicy(policy: KnownEntityDisplayPolicy) {

@@ -157,6 +157,110 @@ export function normalizeSourceSurfaceAnchorText(
   return changed ? translatedLines.join("\n") : text;
 }
 
+export function applyEmphasisPlanTargets(
+  source: string,
+  text: string,
+  slice: PromptSlice | null
+): string {
+  if (!slice || slice.emphasisPlans.length === 0) {
+    return text;
+  }
+
+  const sourceLines = source.split(/\r?\n/);
+  const translatedLines = text.split(/\r?\n/);
+  const allAnchors = dedupePromptAnchors([
+    ...slice.requiredAnchors,
+    ...slice.repeatAnchors,
+    ...slice.establishedAnchors
+  ]);
+  let changed = false;
+
+  for (const plan of slice.emphasisPlans) {
+    if (plan.strategy !== "preserve-strong" || !plan.targetText?.trim()) {
+      continue;
+    }
+
+    const candidateIndexes: number[] = [];
+    if (typeof plan.lineIndex === "number" && plan.lineIndex >= 1) {
+      candidateIndexes.push(plan.lineIndex - 1);
+    }
+    for (let index = 0; index < Math.min(sourceLines.length, translatedLines.length); index += 1) {
+      if (!candidateIndexes.includes(index) && sourceLines[index]?.includes(plan.sourceText)) {
+        candidateIndexes.push(index);
+      }
+    }
+
+    for (const lineIndex of candidateIndexes) {
+      if (lineIndex < 0 || lineIndex >= sourceLines.length || lineIndex >= translatedLines.length) {
+        continue;
+      }
+
+      const sourceLine = sourceLines[lineIndex] ?? "";
+      let translatedLine = translatedLines[lineIndex] ?? "";
+      if (!sourceLine.includes(plan.sourceText)) {
+        continue;
+      }
+
+      const finalTargetText = resolveEmphasisPlanTargetText(plan, sourceLine, translatedLine, allAnchors);
+
+      if (
+        translatedLine.includes(`**${finalTargetText}**`) ||
+        translatedLine.includes(`__${finalTargetText}__`)
+      ) {
+        break;
+      }
+
+      const emphasizedLine = replaceFirst(translatedLine, finalTargetText, `**${finalTargetText}**`);
+      if (emphasizedLine !== translatedLine) {
+        translatedLine = emphasizedLine;
+        translatedLines[lineIndex] = translatedLine;
+        changed = true;
+        break;
+      }
+    }
+  }
+
+  return changed ? translatedLines.join("\n") : text;
+}
+
+function resolveEmphasisPlanTargetText(
+  plan: PromptSlice["emphasisPlans"][number],
+  sourceLine: string,
+  translatedLine: string,
+  anchors: readonly PromptAnchor[]
+): string {
+  let targetText = plan.targetText?.trim() ?? "";
+  if (!targetText) {
+    return "";
+  }
+
+  const governedTerms = (plan.governedTerms ?? []).map((term) => term.trim()).filter(Boolean);
+  const matchingAnchors = anchors.filter((anchor) => {
+    const sourceForms = [anchor.english];
+    return (
+      governedTerms.some((term) => sourceForms.some((form) => containsWholePhrase(term, form) || containsWholePhrase(form, term))) ||
+      containsSourceAnchorPhrase(sourceLine, anchor.english)
+    );
+  });
+
+  for (const anchor of matchingAnchors) {
+    const display = resolveAnchorDisplay(anchor);
+    if (display.mode === "english-only" || !display.canonical || !translatedLine.includes(display.canonical)) {
+      continue;
+    }
+
+    if (targetText.includes(display.canonical)) {
+      continue;
+    }
+
+    if (targetText.includes(anchor.chineseHint)) {
+      targetText = replaceFirst(targetText, anchor.chineseHint, display.canonical);
+    }
+  }
+
+  return targetText;
+}
+
 export function injectPlannedAnchorText(
   source: string,
   text: string,
@@ -254,7 +358,7 @@ export function normalizeHeadingLikeAnchorText(
     const sourceLine = sourceHeadingLines[index]!;
     const translatedLine = translatedHeadingLines[index]!;
     const terminalPlan = findTerminalHeadingPlan(slice.headingPlans, sourceLine, index);
-    if (terminalPlan) {
+    if (terminalPlan && translatedLine.content === terminalPlan.targetHeading?.trim()) {
       continue;
     }
     let normalizedLine = translatedLine.raw;
@@ -363,7 +467,14 @@ export function normalizeExplicitRepairAnchorText(
     for (const target of targets) {
       const sourceHeading = extractHeadingLikeLine(sourceLine);
       const translatedHeading = extractHeadingLikeLine(translatedLine);
-      if (sourceHeading && translatedHeading && findTerminalHeadingPlan(slice.headingPlans, sourceHeading)) {
+      const terminalPlan =
+        sourceHeading && translatedHeading ? findTerminalHeadingPlan(slice.headingPlans, sourceHeading) : null;
+      if (
+        sourceHeading &&
+        translatedHeading &&
+        terminalPlan &&
+        translatedHeading.content === terminalPlan.targetHeading?.trim()
+      ) {
         continue;
       }
 

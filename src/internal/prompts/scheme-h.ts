@@ -16,7 +16,8 @@ export const DOCUMENT_ANALYSIS_PROMPT = `
 3. 将同一概念家族的不同英文变体归并到同一个 familyKey。
 4. 如果你能高置信判断其首现显示策略，请额外给出 displayPolicy。
 5. 对标题（ATX 标题或单独成行的加粗标题）额外输出 headingPlans，让你来判定哪种恢复策略最合理，并直接给出目标标题文本。
-6. 对明显不需要强制双语锚定的通用词，放进 ignoredTerms。
+6. 对正文中可翻译的 Markdown 强调结构（如 **...**）额外输出 emphasisPlans，让你来决定强调后的目标文本。
+7. 对明显不需要强制双语锚定的通用词，放进 ignoredTerms。
 
 要求：
 1. 只返回 JSON。
@@ -47,6 +48,9 @@ export const DOCUMENT_ANALYSIS_PROMPT = `
 13. 对每条 headingPlans，都尽量给出 targetHeading：这是你认为最终最合理的标题文本（不带 Markdown 标记，但应包含你希望保留的冒号、括号和双语形式）。程序会优先执行 targetHeading。
 14. 如果标题像 “Claude Code Permission Problem” 这样是“实体名 + 普通说明性短语”，通常应判成 natural-heading，例如 targetHeading = "Claude Code 的权限问题"，而不是强行把 “Permission Problem” 做成双语术语标题。
 15. 如果标题里某些术语或实体的处理方式已经由这条 headingPlan 决定，请把它们写进 governedTerms。后续审校会以 governedTerms + targetHeading 为准，不再让全局 anchor 对同一标题追加冲突要求。
+16. 对每个 segment.input.emphasisLikeSpans 中的正文强调片段，如果强调应保留，请返回一条 emphasisPlan。targetText 只写强调内部最终应出现的完整文本，不带 Markdown 标记；如果其中包含需要首现锚定的术语，targetText 应直接写出最终锚定后的文本，而不是只写未补锚的中文骨架。
+17. 如果 emphasisPlan 覆盖的片段里包含某些术语或实体，请把它们写进 governedTerms。程序会优先按 governedTerms 对 targetText 做最终锚点对齐，再恢复 \`**...**\` 结构。
+18. emphasisPlans 只用于正文/列表/引用中的可翻译强调，不用于标题整行。
 
 返回格式：
 {
@@ -92,6 +96,18 @@ export const DOCUMENT_ANALYSIS_PROMPT = `
       "strategy": "none",
       "targetHeading": "示例：",
       "governedTerms": []
+    }
+  ],
+  "emphasisPlans": [
+    {
+      "chunkId": "chunk-1",
+      "segmentId": "chunk-1-segment-1",
+      "emphasisIndex": 1,
+      "lineIndex": 1,
+      "sourceText": "now has a sandbox mode",
+      "strategy": "preserve-strong",
+      "targetText": "现在有了沙盒模式（sandbox mode）",
+      "governedTerms": ["sandbox mode"]
     }
   ],
   "ignoredTerms": [

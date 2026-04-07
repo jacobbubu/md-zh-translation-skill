@@ -47,6 +47,8 @@ export type HeadingPlanStrategy =
   | "mixed-qualifier"
   | "natural-heading";
 
+export type EmphasisPlanStrategy = "preserve-strong" | "none";
+
 export type AnchorOccurrence = {
   chunkId: string;
   segmentId: string;
@@ -113,6 +115,7 @@ export type SegmentState = {
   spanIds: string[];
   headingHints: string[];
   headingPlans: HeadingPlanState[];
+  emphasisPlans: EmphasisPlanState[];
   specialNotes: string[];
   protectedSource: string;
   currentProtectedBody: string;
@@ -203,6 +206,17 @@ export type AnalysisHeadingPlan = {
   displayPolicy?: AnchorDisplayPolicy;
 };
 
+export type AnalysisEmphasisPlan = {
+  chunkId: string;
+  segmentId: string;
+  emphasisIndex?: number;
+  lineIndex?: number;
+  sourceText: string;
+  strategy: EmphasisPlanStrategy;
+  targetText?: string;
+  governedTerms?: string[];
+};
+
 export type AnchorCatalog = {
   anchors: AnalysisAnchor[];
   ignoredTerms: Array<{
@@ -210,9 +224,11 @@ export type AnchorCatalog = {
     reason: string;
   }>;
   headingPlans?: AnalysisHeadingPlan[];
+  emphasisPlans?: AnalysisEmphasisPlan[];
 };
 
 export type HeadingPlanState = AnalysisHeadingPlan;
+export type EmphasisPlanState = AnalysisEmphasisPlan;
 
 export type PromptSlice = {
   documentTitle: string | null;
@@ -232,6 +248,14 @@ export type PromptSlice = {
     chineseHint?: string;
     category?: string;
     displayPolicy?: AnchorDisplayPolicy;
+  }>;
+  emphasisPlans: Array<{
+    emphasisIndex?: number;
+    lineIndex?: number;
+    sourceText: string;
+    strategy: EmphasisPlanStrategy;
+    targetText?: string;
+    governedTerms?: string[];
   }>;
   requiredAnchors: Array<{
     anchorId: string;
@@ -311,6 +335,7 @@ export function createTranslationRunState(input: CreateTranslationRunStateInput)
         spanIds: [...segmentSeed.spanIds],
         headingHints: [...segmentSeed.headingHints],
         headingPlans: [],
+        emphasisPlans: [],
         specialNotes: [...segmentSeed.specialNotes],
         protectedSource: segmentSeed.source,
         currentProtectedBody: segmentSeed.source,
@@ -378,6 +403,7 @@ export function applyAnchorCatalog(state: TranslationRunState, catalog: AnchorCa
 
   for (const segment of state.segments) {
     segment.headingPlans = [];
+    segment.emphasisPlans = [];
   }
 
   for (const plan of catalog.headingPlans ?? []) {
@@ -402,6 +428,28 @@ export function applyAnchorCatalog(state: TranslationRunState, catalog: AnchorCa
       ...(plan.chineseHint?.trim() ? { chineseHint: plan.chineseHint.trim() } : {}),
       ...(plan.category?.trim() ? { category: plan.category.trim() } : {}),
       ...(plan.displayPolicy ? { displayPolicy: plan.displayPolicy } : {})
+    });
+  }
+
+  for (const plan of catalog.emphasisPlans ?? []) {
+    const segment = state.segments.find((item) => item.id === plan.segmentId);
+    if (!segment) {
+      continue;
+    }
+
+    segment.emphasisPlans.push({
+      chunkId: plan.chunkId,
+      segmentId: plan.segmentId,
+      ...(typeof plan.emphasisIndex === "number" ? { emphasisIndex: plan.emphasisIndex } : {}),
+      ...(typeof plan.lineIndex === "number" ? { lineIndex: plan.lineIndex } : {}),
+      sourceText: plan.sourceText.trim(),
+      strategy: plan.strategy,
+      ...(plan.targetText?.trim() ? { targetText: plan.targetText.trim() } : {}),
+      ...(Array.isArray(plan.governedTerms)
+        ? {
+            governedTerms: plan.governedTerms.map((term) => term.trim()).filter(Boolean)
+          }
+        : {})
     });
   }
 }
@@ -482,6 +530,14 @@ export function buildSegmentTaskSlice(
       ...(plan.chineseHint ? { chineseHint: plan.chineseHint } : {}),
       ...(plan.category ? { category: plan.category } : {}),
       ...(plan.displayPolicy ? { displayPolicy: plan.displayPolicy } : {})
+    })),
+    emphasisPlans: segment.emphasisPlans.map((plan) => ({
+      ...(typeof plan.emphasisIndex === "number" ? { emphasisIndex: plan.emphasisIndex } : {}),
+      ...(typeof plan.lineIndex === "number" ? { lineIndex: plan.lineIndex } : {}),
+      sourceText: plan.sourceText,
+      strategy: plan.strategy,
+      ...(plan.targetText ? { targetText: plan.targetText } : {}),
+      ...(plan.governedTerms?.length ? { governedTerms: [...plan.governedTerms] } : {})
     })),
     requiredAnchors: coalesceRequiredAnchors([
       ...requiredAnchors,

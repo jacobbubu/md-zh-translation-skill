@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  applyEmphasisPlanTargets,
   formatAnchorDisplay,
   injectPlannedAnchorText,
   normalizeExplicitRepairAnchorText,
@@ -41,6 +42,7 @@ function createSlice(overrides: Partial<PromptSlice>): PromptSlice {
     headingPath: ["Sample"],
     headingHints: [],
     headingPlans: [],
+    emphasisPlans: [],
     requiredAnchors: [],
     repeatAnchors: [],
     establishedAnchors: [],
@@ -127,6 +129,29 @@ test("normalizeHeadingLikeAnchorText treats targetHeading as terminal for govern
   );
 
   assert.equal(normalized, "## Claude Code 的权限问题");
+});
+
+test("applyEmphasisPlanTargets restores translatable strong emphasis from LLM plans", () => {
+  const slice = createSlice({
+    emphasisPlans: [
+      {
+        emphasisIndex: 1,
+        lineIndex: 1,
+        sourceText: "now has a sandbox mode",
+        strategy: "preserve-strong",
+        targetText: "现在有了沙盒模式（sandbox mode）",
+        governedTerms: ["sandbox mode"]
+      }
+    ]
+  });
+
+  const normalized = applyEmphasisPlanTargets(
+    "Claude Code **now has a sandbox mode** that makes the YOLO mode look amateurish.",
+    "Claude Code 现在有了沙盒模式（sandbox mode），让 YOLO 模式看起来像业余方案。",
+    slice
+  );
+
+  assert.equal(normalized, "Claude Code **现在有了沙盒模式（sandbox mode）**，让 YOLO 模式看起来像业余方案。");
 });
 
 test("normalizeSegmentAnchorText moves chinese-primary inline explanations outside the anchor parentheses", () => {
