@@ -592,85 +592,17 @@ function collectHeadingPlanGovernedAnchorIds(
 }
 
 function synthesizeHeadingHintPromptAnchors(
-  segmentId: string,
-  headingHints: readonly string[],
-  headingPlans: readonly HeadingPlanState[],
-  currentRestoredBody: string,
-  existingAnchors: PromptSlice["requiredAnchors"]
+  _segmentId: string,
+  _headingHints: readonly string[],
+  _headingPlans: readonly HeadingPlanState[],
+  _currentRestoredBody: string,
+  _existingAnchors: PromptSlice["requiredAnchors"]
 ): PromptSlice["requiredAnchors"] {
-  if (headingHints.length === 0) {
-    return [];
-  }
-
-  const translatedHeadings = extractHeadingLikeContents(currentRestoredBody);
-  if (translatedHeadings.length === 0) {
-    return [];
-  }
-  const alignedTranslatedHeadings =
-    translatedHeadings.length > headingHints.length
-      ? translatedHeadings.slice(translatedHeadings.length - headingHints.length)
-      : translatedHeadings;
-
-  const synthesized: PromptSlice["requiredAnchors"] = [];
-  const seenEnglish = new Set(existingAnchors.map((anchor) => anchor.english.trim().toLowerCase()));
-  const plannedHeadingKeys = new Set(
-    headingPlans.map((plan) => normalizeHeadingPlanningKey(plan.sourceHeading)).filter(Boolean)
-  );
-  const plannedHeadingIndices = new Set(
-    headingPlans
-      .map((plan) => (typeof plan.headingIndex === "number" ? plan.headingIndex - 1 : null))
-      .filter((index): index is number => index !== null && index >= 0)
-  );
-  const pairCount = Math.min(headingHints.length, alignedTranslatedHeadings.length);
-
-  for (let index = 0; index < pairCount; index += 1) {
-    const sourceHeading = headingHints[index]?.trim() ?? "";
-    const translatedHeading = alignedTranslatedHeadings[index]?.trim() ?? "";
-    if (!sourceHeading || !translatedHeading) {
-      continue;
-    }
-    if (plannedHeadingIndices.has(index)) {
-      continue;
-    }
-    if (plannedHeadingKeys.has(normalizeHeadingPlanningKey(sourceHeading))) {
-      continue;
-    }
-
-    const planningTarget = extractHeadingPlanningTarget(sourceHeading, translatedHeading);
-    if (!planningTarget) {
-      continue;
-    }
-
-    const { english: headingEnglish, chineseHint } = planningTarget;
-    if (!headingEnglish || !chineseHint) {
-      continue;
-    }
-
-    if (containsWholePhrase(translatedHeading, headingEnglish)) {
-      continue;
-    }
-
-    const normalizedKey = headingEnglish.toLowerCase();
-    if (seenEnglish.has(normalizedKey)) {
-      continue;
-    }
-
-    synthesized.push({
-      anchorId: buildLocalFallbackAnchorId(segmentId, headingEnglish),
-      english: headingEnglish,
-      chineseHint,
-      familyId: `local:${normalizeLocalFallbackAnchorKey(headingEnglish)}`,
-      requiresBilingual: true,
-      displayPolicy: "chinese-primary",
-      allowRepeatText: false,
-      displayMode: "chinese-primary",
-      canonicalDisplay: `${chineseHint}（${headingEnglish}）`,
-      allowedDisplayForms: [`${chineseHint}（${headingEnglish}）`]
-    });
-    seenEnglish.add(normalizedKey);
-  }
-
-  return synthesized;
+  // Title semantics should come from LLM headingPlans or explicit repair targets.
+  // Heuristic title synthesis is too aggressive when analysis shards time out, and it
+  // over-bilingualizes generic structural headings such as "System Requirements".
+  // Keep the function for backward-compatible call sites, but disable semantic inference here.
+  return [];
 }
 
 function synthesizeHeadingPlanPromptAnchors(
@@ -1142,6 +1074,44 @@ function extractLocalFallbackAnchorTarget(
   locationLabel: string,
   instruction: string
 ): { english: string; chineseHint: string; displayPolicy: "english-only" | "chinese-primary" } | null {
+  const explicitLocalizedTarget =
+    instruction.match(/(?:需补为|补齐)[“`]([^”`\n]+?)（([^）”`\n]+)）[”`]/i) ??
+    instruction.match(/建立(?:合法的)?中英文(?:首现)?对应[^“`\n]*[“`]([^”`\n]+?)（([^）”`\n]+)）[”`]/i);
+  if (explicitLocalizedTarget) {
+    const chineseHint = stripInlineMarkdownMarkers(explicitLocalizedTarget[1] ?? "").trim();
+    const english = (explicitLocalizedTarget[2] ?? "").trim();
+    if (
+      chineseHint &&
+      english &&
+      /[\u4e00-\u9fff]/u.test(chineseHint) &&
+      !looksCodeLikeAnchorTarget(english)
+    ) {
+      return {
+        english,
+        chineseHint,
+        displayPolicy: "chinese-primary"
+      };
+    }
+  }
+
+  const explicitEnglish =
+    instruction.match(/(?:术语|核心术语|英文目标)\s*[“`]([^”`\n]*[A-Za-z][^”`\n]*)[”`]/)?.[1]?.trim() ??
+    null;
+  const explicitChinese =
+    instruction.match(/为[“`]([^”`\n]+)[”`]建立(?:合法的)?中英文(?:首现)?对应/)?.[1]?.trim() ??
+    instruction.match(/补成[“`]([^”`\n]+)[”`]/)?.[1]?.trim() ??
+    null;
+  if (explicitEnglish && explicitChinese) {
+    const chineseHint = stripInlineMarkdownMarkers(explicitChinese).trim();
+    if (chineseHint && /[\u4e00-\u9fff]/u.test(chineseHint) && !looksCodeLikeAnchorTarget(explicitEnglish)) {
+      return {
+        english: explicitEnglish,
+        chineseHint,
+        displayPolicy: "chinese-primary"
+      };
+    }
+  }
+
   const englishMatches = [
     ...instruction.matchAll(/`([^`\n]*[A-Za-z][^`\n]*)`/g),
     ...instruction.matchAll(/“([^”\n]*[A-Za-z][^”\n]*)”/g)

@@ -4665,6 +4665,58 @@ test("translateMarkdownArticle synthesizes a local fallback anchor for a longer 
   assert.doesNotMatch(output.markdown, /预先批准的目标位置（npm、GitHub/);
 });
 
+test("translateMarkdownArticle synthesizes a local fallback anchor for an inline concept named by repair", async () => {
+  const source = '> This creates what security researchers call "approval fatigue."\n';
+  let auditCount = 0;
+
+  const output = await translateMarkdownArticle(source, {
+    executor: {
+      async execute(prompt, options) {
+        if (isDocumentAnalysisPrompt(prompt)) {
+          return createExecResult(createAnchorCatalog([]));
+        }
+
+        if (isBundledAuditPrompt(prompt, options)) {
+          auditCount += 1;
+          if (auditCount === 1) {
+            return createExecResult(
+              wrapPerSegmentAudits(prompt, [
+                {
+                  segment_index: 1,
+                  audit: createAudit(false, [
+                    '位置：第 1 个引用段“这就造成了安全研究人员所说的‘批准疲劳’效应。”问题：术语“approval fatigue”首次出现时缺少英文对照。修复目标：在该句内为“批准疲劳”建立合法的中英文首现对应。'
+                  ])
+                }
+              ])
+            );
+          }
+
+          return createExecResult(wrapPerSegmentAudits(prompt, [{ segment_index: 1, audit: createAudit(true) }]));
+        }
+
+        if (prompt.includes("【必须修复】")) {
+          const currentTranslation = extractPromptSection(prompt, "【当前译文】") ?? "";
+          return createExecResult(currentTranslation);
+        }
+
+        if (options.outputSchema || prompt.includes('"hard_checks"') || prompt.includes("只返回 JSON")) {
+          return createExecResult(JSON.stringify(createAudit(true)));
+        }
+
+        const currentTranslation = extractPromptSection(prompt, "【当前译文】");
+        if (currentTranslation !== null) {
+          return createExecResult(currentTranslation);
+        }
+
+        return createExecResult("> 这就造成了安全研究人员所说的“批准疲劳”效应。");
+      }
+    },
+    formatter: async (markdown) => markdown
+  });
+
+  assert.match(output.markdown, /批准疲劳（approval fatigue）/);
+});
+
 test("translateMarkdownArticle synthesizes heading-local fallback anchors for configuration titles named by repair", async () => {
   const source = [
     "# Title",

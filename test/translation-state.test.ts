@@ -322,6 +322,62 @@ test("translation state synthesizes a local fallback anchor for a longer list-it
   assert.equal(slice.requiredAnchors.some((anchor) => anchor.english === "npm registry"), true);
 });
 
+test("translation state synthesizes a local fallback anchor for an inline concept named by repair", () => {
+  const state = createTranslationRunState({
+    sourcePathHint: "sample.md",
+    documentTitle: "Sample",
+    frontmatterPresent: false,
+    protectedSpans: [],
+    chunks: [
+      {
+        source: "> This creates what security researchers call \"approval fatigue.\"",
+        separatorAfter: "",
+        headingPath: ["Sample"],
+        segments: [
+          {
+            kind: "translatable",
+            source: "> This creates what security researchers call \"approval fatigue.\"",
+            separatorAfter: "",
+            spanIds: [],
+            headingHints: [],
+            specialNotes: []
+          }
+        ]
+      }
+    ]
+  });
+
+  applySegmentAudit(state, {
+    segmentId: "chunk-1-segment-1",
+    hardChecks: {
+      paragraph_match: { pass: false, problem: "" },
+      first_mention_bilingual: { pass: false, problem: "" },
+      numbers_units_logic: { pass: true, problem: "" },
+      chinese_punctuation: { pass: true, problem: "" },
+      unit_conversion_boundary: { pass: true, problem: "" },
+      protected_span_integrity: { pass: true, problem: "" }
+    },
+    repairTasks: [
+      {
+        id: "repair-1",
+        segmentId: "chunk-1-segment-1",
+        anchorId: null,
+        failureType: "missing_anchor",
+        locationLabel: "引用句",
+        instruction:
+          "位置：`批准疲劳`。问题：首次出现的工具/专名未完整建立中英文对照。修复目标：在该位置本身需补为“批准疲劳（approval fatigue）”。",
+        status: "pending"
+      }
+    ],
+    rawMustFix: []
+  });
+
+  const slice = buildSegmentTaskSlice(state, "chunk-1", "chunk-1-segment-1");
+  const fallbackAnchor = slice.requiredAnchors.find((anchor) => anchor.english === "approval fatigue");
+  assert.equal(fallbackAnchor?.displayPolicy, "chinese-primary");
+  assert.equal(fallbackAnchor?.chineseHint, "批准疲劳");
+});
+
 test("translation state infers acronym-compound display policy for acronym-led anchors", () => {
   const state = createTranslationRunState({
     sourcePathHint: "sample.md",
@@ -548,7 +604,7 @@ test("translation state synthesizes local fallback anchors for heading-like conf
   assert.equal(syntaxAnchor?.chineseHint, "权限模式语法");
 });
 
-test("translation state synthesizes heading-local anchors directly from heading hints and current translated headings", () => {
+test("translation state does not synthesize heading-local anchors directly from heading hints without plans", () => {
   const state = createTranslationRunState({
     sourcePathHint: "sample.md",
     documentTitle: "Sample",
@@ -577,14 +633,45 @@ test("translation state synthesizes heading-local anchors directly from heading 
     currentRestoredBody: "## 文件系统权限（关键）\n\n**权限模式语法**\n\n**路径：**"
   });
 
-  assert.deepEqual(
-    slice.requiredAnchors.map((anchor) => [anchor.english, anchor.chineseHint]),
-    [
-      ["Filesystem Permissions", "文件系统权限"],
-      ["Permission Pattern Syntax", "权限模式语法"],
-      ["Paths", "路径"]
+  assert.deepEqual(slice.requiredAnchors, []);
+});
+
+test("translation state does not heuristically synthesize heading anchors without LLM plans or explicit repair", () => {
+  const state = createTranslationRunState({
+    sourcePathHint: "sample.md",
+    documentTitle: "Sample",
+    frontmatterPresent: false,
+    protectedSpans: [],
+    chunks: [
+      {
+        source: "### System Requirements\n\n**Supported Platforms:**",
+        separatorAfter: "",
+        headingPath: ["Sample"],
+        segments: [
+          {
+            kind: "translatable",
+            source: "### System Requirements\n\n**Supported Platforms:**",
+            separatorAfter: "",
+            spanIds: [],
+            headingHints: ["System Requirements", "Supported Platforms:"],
+            specialNotes: []
+          }
+        ]
+      }
     ]
-  );
+  });
+
+  applyRepairResult(state, "chunk-1-segment-1", [], {
+    protectedBody: "### 系统要求\n\n**支持的平台：**",
+    restoredBody: "### 系统要求\n\n**支持的平台：**"
+  });
+
+  const slice = buildSegmentTaskSlice(state, "chunk-1", "chunk-1-segment-1", {
+    currentRestoredBody: "### 系统要求\n\n**支持的平台：**"
+  });
+
+  assert.equal(slice.requiredAnchors.some((anchor) => anchor.english === "System Requirements"), false);
+  assert.equal(slice.requiredAnchors.some((anchor) => anchor.english === "Supported Platforms"), false);
 });
 
 test("translation state prefers LLM heading plans over heuristic heading planning", () => {

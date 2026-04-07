@@ -1449,11 +1449,13 @@ function inferRepairAnchorId(
 }
 
 function shouldUseLocalFallbackAnchor(instruction: string, english: string): boolean {
+  if (looksCodeLikeLocalFallbackTarget(english)) {
+    return false;
+  }
+
   return (
-    /(列表项|项目符号)/.test(instruction) &&
-    instruction.includes("不要只写成") &&
-    /\s/.test(english) &&
-    !looksCodeLikeLocalFallbackTarget(english)
+    ((/(列表项|项目符号)/.test(instruction) && instruction.includes("不要只写成") && /\s/.test(english)) ||
+      extractInlineLocalizedRepairTarget(instruction, english) !== null)
   );
 }
 
@@ -1508,6 +1510,76 @@ function normalizeRepairChineseTarget(text: string): string {
 
 function looksLikeChineseRepairTarget(text: string): boolean {
   return /[\u4e00-\u9fff]/u.test(text) && !/[A-Za-z]/.test(text);
+}
+
+function looksLikeLocalizedRepairTarget(text: string): boolean {
+  return /[\u4e00-\u9fff]/u.test(text) && !looksCodeLikeLocalFallbackTarget(text);
+}
+
+function normalizeLocalFallbackChineseHint(text: string): string {
+  return normalizeExplicitRepairLocationText(text)
+    .replace(/（\s*[A-Za-z][^）]*）$/u, "")
+    .replace(/\(\s*[A-Za-z][^)]*\)$/u, "")
+    .trim();
+}
+
+function extractExplicitLocalizedTargetsFromMustFix(instructions: readonly string[]): string[] {
+  const targets = new Set<string>();
+
+  for (const instruction of instructions) {
+    const patterns = [
+      /需补为[“`]([^”`\n]+?)(?:（[A-Za-z][^）”`\n]*）)?[”`]/g,
+      /补齐[“`]([^”`\n]+?)(?:（[A-Za-z][^）”`\n]*）)?[”`]/g,
+      /为[“`]([^”`\n]+)[”`]建立(?:合法的)?中英文(?:首现)?对应/g,
+      /改为与全文锚点一致的[“`]([^”`\n]+)[”`]/g
+    ];
+
+    for (const pattern of patterns) {
+      for (const match of instruction.matchAll(pattern)) {
+        const candidate = normalizeLocalFallbackChineseHint(match[1] ?? "");
+        if (candidate && looksLikeLocalizedRepairTarget(candidate)) {
+          targets.add(candidate);
+        }
+      }
+    }
+  }
+
+  return [...targets];
+}
+
+function extractInlineLocalizedRepairTarget(
+  instruction: string,
+  english: string
+): { english: string; chineseHint: string } | null {
+  const normalizedEnglish = english.trim();
+  if (!normalizedEnglish || looksCodeLikeLocalFallbackTarget(normalizedEnglish)) {
+    return null;
+  }
+
+  const bilingualPatterns = [
+    new RegExp(`需补为[“\`]([^”\`\\n]+?)（${escapeRegExp(normalizedEnglish)}）[”\`]`, "i"),
+    new RegExp(`补齐[“\`]([^”\`\\n]+?)（${escapeRegExp(normalizedEnglish)}）[”\`]`, "i")
+  ];
+
+  for (const pattern of bilingualPatterns) {
+    const match = instruction.match(pattern);
+    const chineseHint = normalizeLocalFallbackChineseHint(match?.[1] ?? "");
+    if (chineseHint && looksLikeLocalizedRepairTarget(chineseHint)) {
+      return { english: normalizedEnglish, chineseHint };
+    }
+  }
+
+  const localizedTargets = extractExplicitLocalizedTargetsFromMustFix([instruction]);
+  const chineseHint = localizedTargets[0];
+  if (chineseHint) {
+    return { english: normalizedEnglish, chineseHint };
+  }
+
+  return null;
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function containsWholePhraseInText(haystack: string, needle: string): boolean {
@@ -1575,7 +1647,8 @@ function synthesizeLocalRepairInstruction(
     return instruction;
   }
 
-  if (inferRepairAnchorId(slice, draftedSegment.segment.source, instruction)) {
+  const inferredAnchorId = inferRepairAnchorId(slice, draftedSegment.segment.source, instruction);
+  if (inferredAnchorId && !inferredAnchorId.startsWith("local:")) {
     return instruction;
   }
 
@@ -1585,11 +1658,21 @@ function synthesizeLocalRepairInstruction(
   }
 
   const target = inferLocalRepairTarget(draftedSegment.segment.source, draftedSegment.restoredBody, locationText);
-  if (!target) {
-    return instruction;
+  if (target) {
+    return `位置：\`${target.chineseHint}\`。问题：首次出现的工具/专名未完整建立中英文对照。修复目标：在该位置本身需补为“${target.chineseHint}（${target.english}）”。`;
   }
 
-  return `位置：\`${target.chineseHint}\`。问题：首次出现的工具/专名未完整建立中英文对照。修复目标：在该位置本身需补为“${target.chineseHint}（${target.english}）”。`;
+  const explicitEnglishTargets = extractExplicitEnglishTargetsFromMustFix([instruction]).filter((targetEnglish) =>
+    containsWholePhraseInText(draftedSegment.segment.source, targetEnglish)
+  );
+  for (const englishTarget of explicitEnglishTargets) {
+    const inlineTarget = extractInlineLocalizedRepairTarget(instruction, englishTarget);
+    if (inlineTarget) {
+      return `位置：\`${inlineTarget.chineseHint}\`。问题：首次出现的工具/专名未完整建立中英文对照。修复目标：在该位置本身需补为“${inlineTarget.chineseHint}（${inlineTarget.english}）”。`;
+    }
+  }
+
+  return instruction;
 }
 
 function inferLocalRepairTarget(
