@@ -5188,3 +5188,310 @@ test("translateMarkdownArticle shards document analysis and carries priorAccepte
     }
   }
 });
+
+test("translateMarkdownArticle retries a timed-out analysis shard before splitting into bounded fallback shards", async () => {
+  const previousMaxChunks = process.env.MDZH_ANALYSIS_SHARD_MAX_CHUNKS;
+  const previousMaxSourceChars = process.env.MDZH_ANALYSIS_SHARD_MAX_SOURCE_CHARS;
+  const previousMaxAttempts = process.env.MDZH_ANALYSIS_SHARD_MAX_ATTEMPTS;
+  const previousMaxSplitDepth = process.env.MDZH_ANALYSIS_SHARD_MAX_SPLIT_DEPTH;
+  const previousMinSplitSourceChars = process.env.MDZH_ANALYSIS_SHARD_MIN_SPLIT_SOURCE_CHARS;
+  const previousTimeoutMs = process.env.MDZH_ANALYSIS_SHARD_TIMEOUT_MS;
+  process.env.MDZH_ANALYSIS_SHARD_MAX_CHUNKS = "10";
+  process.env.MDZH_ANALYSIS_SHARD_MAX_SOURCE_CHARS = "20000";
+  process.env.MDZH_ANALYSIS_SHARD_MAX_ATTEMPTS = "3";
+  process.env.MDZH_ANALYSIS_SHARD_MAX_SPLIT_DEPTH = "2";
+  process.env.MDZH_ANALYSIS_SHARD_MIN_SPLIT_SOURCE_CHARS = "900";
+  process.env.MDZH_ANALYSIS_SHARD_TIMEOUT_MS = "1000";
+
+  const analysisPrompts: string[] = [];
+  const progress: string[] = [];
+  const largeParagraph = "Alpha ".repeat(400);
+
+  const source = [
+    "# Title",
+    "",
+    "## First Heading",
+    "",
+    largeParagraph,
+    "",
+    "## Second Heading",
+    "",
+    largeParagraph,
+    "",
+    "## Third Heading",
+    "",
+    largeParagraph,
+    ""
+  ].join("\n");
+
+  let fullShardAttempts = 0;
+  const executor: CodexExecutor = {
+    async execute(prompt, options) {
+      if (isDocumentAnalysisPrompt(prompt)) {
+        analysisPrompts.push(prompt);
+
+        const isFullShard =
+          prompt.includes("First Heading") &&
+          prompt.includes("Second Heading") &&
+          prompt.includes("Third Heading");
+        if (isFullShard) {
+          fullShardAttempts += 1;
+          throw new Error("Codex exec timed out after 1000ms.");
+        }
+
+        if (prompt.includes("First Heading") && prompt.includes("Second Heading")) {
+          return createExecResult(
+            createAnchorCatalog([
+              {
+                english: "First Heading",
+                chineseHint: "第一个标题",
+                familyKey: "first-heading",
+                chunkId: "chunk-2",
+                segmentId: "chunk-2-segment-1"
+              },
+              {
+                english: "Second Heading",
+                chineseHint: "第二个标题",
+                familyKey: "second-heading",
+                chunkId: "chunk-3",
+                segmentId: "chunk-3-segment-1"
+              }
+            ])
+          );
+        }
+
+        if (prompt.includes("Third Heading")) {
+          return createExecResult(
+            createAnchorCatalog([
+              {
+                english: "Third Heading",
+                chineseHint: "第三个标题",
+                familyKey: "third-heading",
+                chunkId: "chunk-4",
+                segmentId: "chunk-4-segment-1"
+              }
+            ])
+          );
+        }
+
+        return createExecResult(createEmptyAnchorCatalog());
+      }
+
+      if (options.outputSchema || prompt.includes('"hard_checks"') || prompt.includes("只返回 JSON")) {
+        return createExecResult(wrapAuditForSegments(prompt, createAudit(true)));
+      }
+
+      const currentTranslation = extractPromptSection(prompt, "【当前译文】");
+      if (currentTranslation !== null) {
+        return createExecResult(currentTranslation);
+      }
+
+      const sourceSection = extractPromptSection(prompt, "【英文原文】");
+      return createExecResult(sourceSection ?? "");
+    }
+  };
+
+  try {
+    await translateMarkdownArticle(source, {
+      executor,
+      formatter: async (markdown) => markdown,
+      onProgress: (message) => progress.push(message)
+    });
+
+    assert.equal(fullShardAttempts, 2);
+    assert.ok(
+      progress.some((message) =>
+        message.includes("timed out on attempt 1; retrying once with timeout 1500ms before fallback split")
+      )
+    );
+    assert.ok(
+      progress.some((message) => message.includes("timed out on attempt 2; splitting into 2 fallback shard(s)"))
+    );
+    assert.ok(analysisPrompts.some((prompt) => prompt.includes("First Heading") && prompt.includes("Second Heading") && !prompt.includes("Third Heading")));
+    assert.ok(analysisPrompts.some((prompt) => prompt.includes("Third Heading") && !prompt.includes("Second Heading")));
+  } finally {
+    if (previousMaxChunks === undefined) {
+      delete process.env.MDZH_ANALYSIS_SHARD_MAX_CHUNKS;
+    } else {
+      process.env.MDZH_ANALYSIS_SHARD_MAX_CHUNKS = previousMaxChunks;
+    }
+    if (previousMaxSourceChars === undefined) {
+      delete process.env.MDZH_ANALYSIS_SHARD_MAX_SOURCE_CHARS;
+    } else {
+      process.env.MDZH_ANALYSIS_SHARD_MAX_SOURCE_CHARS = previousMaxSourceChars;
+    }
+    if (previousMaxAttempts === undefined) {
+      delete process.env.MDZH_ANALYSIS_SHARD_MAX_ATTEMPTS;
+    } else {
+      process.env.MDZH_ANALYSIS_SHARD_MAX_ATTEMPTS = previousMaxAttempts;
+    }
+    if (previousMaxSplitDepth === undefined) {
+      delete process.env.MDZH_ANALYSIS_SHARD_MAX_SPLIT_DEPTH;
+    } else {
+      process.env.MDZH_ANALYSIS_SHARD_MAX_SPLIT_DEPTH = previousMaxSplitDepth;
+    }
+    if (previousMinSplitSourceChars === undefined) {
+      delete process.env.MDZH_ANALYSIS_SHARD_MIN_SPLIT_SOURCE_CHARS;
+    } else {
+      process.env.MDZH_ANALYSIS_SHARD_MIN_SPLIT_SOURCE_CHARS = previousMinSplitSourceChars;
+    }
+    if (previousTimeoutMs === undefined) {
+      delete process.env.MDZH_ANALYSIS_SHARD_TIMEOUT_MS;
+    } else {
+      process.env.MDZH_ANALYSIS_SHARD_TIMEOUT_MS = previousTimeoutMs;
+    }
+  }
+});
+
+test("translateMarkdownArticle analyzes fallback shards with bounded concurrency after a split", async () => {
+  const previousMaxChunks = process.env.MDZH_ANALYSIS_SHARD_MAX_CHUNKS;
+  const previousMaxSourceChars = process.env.MDZH_ANALYSIS_SHARD_MAX_SOURCE_CHARS;
+  const previousMaxAttempts = process.env.MDZH_ANALYSIS_SHARD_MAX_ATTEMPTS;
+  const previousMaxSplitDepth = process.env.MDZH_ANALYSIS_SHARD_MAX_SPLIT_DEPTH;
+  const previousMinSplitSourceChars = process.env.MDZH_ANALYSIS_SHARD_MIN_SPLIT_SOURCE_CHARS;
+  const previousFallbackConcurrency = process.env.MDZH_ANALYSIS_FALLBACK_SHARD_CONCURRENCY;
+  const previousTimeoutMs = process.env.MDZH_ANALYSIS_SHARD_TIMEOUT_MS;
+  process.env.MDZH_ANALYSIS_SHARD_MAX_CHUNKS = "10";
+  process.env.MDZH_ANALYSIS_SHARD_MAX_SOURCE_CHARS = "20000";
+  process.env.MDZH_ANALYSIS_SHARD_MAX_ATTEMPTS = "3";
+  process.env.MDZH_ANALYSIS_SHARD_MAX_SPLIT_DEPTH = "2";
+  process.env.MDZH_ANALYSIS_SHARD_MIN_SPLIT_SOURCE_CHARS = "900";
+  process.env.MDZH_ANALYSIS_FALLBACK_SHARD_CONCURRENCY = "2";
+  process.env.MDZH_ANALYSIS_SHARD_TIMEOUT_MS = "1000";
+
+  const largeParagraph = "Alpha ".repeat(400);
+  const source = [
+    "# Title",
+    "",
+    "## First Heading",
+    "",
+    largeParagraph,
+    "",
+    "## Second Heading",
+    "",
+    largeParagraph,
+    "",
+    "## Third Heading",
+    "",
+    largeParagraph,
+    ""
+  ].join("\n");
+
+  let fullShardAttempts = 0;
+  let inFlightChildAnalyses = 0;
+  let maxConcurrentChildAnalyses = 0;
+  const executor: CodexExecutor = {
+    async execute(prompt, options) {
+      if (isDocumentAnalysisPrompt(prompt)) {
+        const isFullShard =
+          prompt.includes("First Heading") &&
+          prompt.includes("Second Heading") &&
+          prompt.includes("Third Heading");
+        if (isFullShard) {
+          fullShardAttempts += 1;
+          throw new Error("Codex exec timed out after 1000ms.");
+        }
+
+        inFlightChildAnalyses += 1;
+        maxConcurrentChildAnalyses = Math.max(maxConcurrentChildAnalyses, inFlightChildAnalyses);
+        await new Promise((resolve) => setTimeout(resolve, 25));
+        inFlightChildAnalyses -= 1;
+
+        if (prompt.includes("First Heading") && prompt.includes("Second Heading")) {
+          return createExecResult(
+            createAnchorCatalog([
+              {
+                english: "First Heading",
+                chineseHint: "第一个标题",
+                familyKey: "first-heading",
+                chunkId: "chunk-2",
+                segmentId: "chunk-2-segment-1"
+              },
+              {
+                english: "Second Heading",
+                chineseHint: "第二个标题",
+                familyKey: "second-heading",
+                chunkId: "chunk-3",
+                segmentId: "chunk-3-segment-1"
+              }
+            ])
+          );
+        }
+
+        if (prompt.includes("Third Heading")) {
+          return createExecResult(
+            createAnchorCatalog([
+              {
+                english: "Third Heading",
+                chineseHint: "第三个标题",
+                familyKey: "third-heading",
+                chunkId: "chunk-4",
+                segmentId: "chunk-4-segment-1"
+              }
+            ])
+          );
+        }
+
+        return createExecResult(createEmptyAnchorCatalog());
+      }
+
+      if (options.outputSchema || prompt.includes('"hard_checks"') || prompt.includes("只返回 JSON")) {
+        return createExecResult(wrapAuditForSegments(prompt, createAudit(true)));
+      }
+
+      const currentTranslation = extractPromptSection(prompt, "【当前译文】");
+      if (currentTranslation !== null) {
+        return createExecResult(currentTranslation);
+      }
+
+      const sourceSection = extractPromptSection(prompt, "【英文原文】");
+      return createExecResult(sourceSection ?? "");
+    }
+  };
+
+  try {
+    await translateMarkdownArticle(source, {
+      executor,
+      formatter: async (markdown) => markdown
+    });
+
+    assert.equal(fullShardAttempts, 2);
+    assert.equal(maxConcurrentChildAnalyses, 2);
+  } finally {
+    if (previousMaxChunks === undefined) {
+      delete process.env.MDZH_ANALYSIS_SHARD_MAX_CHUNKS;
+    } else {
+      process.env.MDZH_ANALYSIS_SHARD_MAX_CHUNKS = previousMaxChunks;
+    }
+    if (previousMaxSourceChars === undefined) {
+      delete process.env.MDZH_ANALYSIS_SHARD_MAX_SOURCE_CHARS;
+    } else {
+      process.env.MDZH_ANALYSIS_SHARD_MAX_SOURCE_CHARS = previousMaxSourceChars;
+    }
+    if (previousMaxAttempts === undefined) {
+      delete process.env.MDZH_ANALYSIS_SHARD_MAX_ATTEMPTS;
+    } else {
+      process.env.MDZH_ANALYSIS_SHARD_MAX_ATTEMPTS = previousMaxAttempts;
+    }
+    if (previousMaxSplitDepth === undefined) {
+      delete process.env.MDZH_ANALYSIS_SHARD_MAX_SPLIT_DEPTH;
+    } else {
+      process.env.MDZH_ANALYSIS_SHARD_MAX_SPLIT_DEPTH = previousMaxSplitDepth;
+    }
+    if (previousMinSplitSourceChars === undefined) {
+      delete process.env.MDZH_ANALYSIS_SHARD_MIN_SPLIT_SOURCE_CHARS;
+    } else {
+      process.env.MDZH_ANALYSIS_SHARD_MIN_SPLIT_SOURCE_CHARS = previousMinSplitSourceChars;
+    }
+    if (previousFallbackConcurrency === undefined) {
+      delete process.env.MDZH_ANALYSIS_FALLBACK_SHARD_CONCURRENCY;
+    } else {
+      process.env.MDZH_ANALYSIS_FALLBACK_SHARD_CONCURRENCY = previousFallbackConcurrency;
+    }
+    if (previousTimeoutMs === undefined) {
+      delete process.env.MDZH_ANALYSIS_SHARD_TIMEOUT_MS;
+    } else {
+      process.env.MDZH_ANALYSIS_SHARD_TIMEOUT_MS = previousTimeoutMs;
+    }
+  }
+});

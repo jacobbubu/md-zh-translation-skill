@@ -83,6 +83,10 @@ const ANALYSIS_SUMMARY_MAX_HEADINGS = 40;
 const ANALYSIS_SUMMARY_MAX_IGNORED = 30;
 const ANALYSIS_SHARD_TIMEOUT_MS = 120000;
 const ANALYSIS_HEARTBEAT_MS = 15000;
+const ANALYSIS_SHARD_MAX_ATTEMPTS = 3;
+const ANALYSIS_SHARD_MAX_SPLIT_DEPTH = 2;
+const ANALYSIS_SHARD_MIN_SPLIT_SOURCE_CHARS = 900;
+const ANALYSIS_FALLBACK_SHARD_CONCURRENCY = 2;
 type ReasoningEffort = "minimal" | "low" | "medium" | "high" | "xhigh";
 type StyleMode = "none" | "final";
 
@@ -90,9 +94,11 @@ type AnalysisShard = {
   id: string;
   index: number;
   chunkIds: string[];
+  segmentIdsByChunk?: Record<string, string[]>;
   sourceChars: number;
   headingCount: number;
   emphasisCount: number;
+  depth: number;
 };
 
 type AnalysisShardSummary = {
@@ -781,6 +787,42 @@ function getAnalysisHeartbeatMs(): number {
   return readPositiveIntEnv("MDZH_ANALYSIS_HEARTBEAT_MS", ANALYSIS_HEARTBEAT_MS);
 }
 
+function getAnalysisShardMaxAttempts(): number {
+  return readPositiveIntEnv("MDZH_ANALYSIS_SHARD_MAX_ATTEMPTS", ANALYSIS_SHARD_MAX_ATTEMPTS);
+}
+
+function getAnalysisShardMaxSplitDepth(): number {
+  return readPositiveIntEnv("MDZH_ANALYSIS_SHARD_MAX_SPLIT_DEPTH", ANALYSIS_SHARD_MAX_SPLIT_DEPTH);
+}
+
+function getAnalysisShardMinSplitSourceChars(): number {
+  return readPositiveIntEnv(
+    "MDZH_ANALYSIS_SHARD_MIN_SPLIT_SOURCE_CHARS",
+    ANALYSIS_SHARD_MIN_SPLIT_SOURCE_CHARS
+  );
+}
+
+function getAnalysisFallbackShardConcurrency(): number {
+  return Math.min(
+    2,
+    readPositiveIntEnv(
+      "MDZH_ANALYSIS_FALLBACK_SHARD_CONCURRENCY",
+      ANALYSIS_FALLBACK_SHARD_CONCURRENCY
+    )
+  );
+}
+
+function getShardSegments(state: TranslationRunState, shard: AnalysisShard, chunkId: string) {
+  const segments = getChunkSegments(state, chunkId);
+  const selectedSegmentIds = shard.segmentIdsByChunk?.[chunkId];
+  if (!selectedSegmentIds?.length) {
+    return segments;
+  }
+
+  const selected = new Set(selectedSegmentIds);
+  return segments.filter((segment) => selected.has(segment.id));
+}
+
 function summarizeChunkForAnalysis(state: TranslationRunState, chunkId: string) {
   const segments = getChunkSegments(state, chunkId);
   const sourceChars = segments.reduce((total, segment) => total + segment.source.length, 0);
@@ -789,6 +831,24 @@ function summarizeChunkForAnalysis(state: TranslationRunState, chunkId: string) 
     (total, segment) => total + extractTranslatableStrongEmphasisSpans(segment.source).length,
     0
   );
+
+  return { sourceChars, headingCount, emphasisCount };
+}
+
+function summarizeAnalysisShard(state: TranslationRunState, shard: AnalysisShard) {
+  const selectedChunks = state.chunks.filter((chunk) => shard.chunkIds.includes(chunk.id));
+  let sourceChars = 0;
+  let headingCount = 0;
+  let emphasisCount = 0;
+
+  for (const chunk of selectedChunks) {
+    const segments = getShardSegments(state, shard, chunk.id);
+    for (const segment of segments) {
+      sourceChars += segment.source.length;
+      headingCount += segment.headingHints.length;
+      emphasisCount += extractTranslatableStrongEmphasisSpans(segment.source).length;
+    }
+  }
 
   return { sourceChars, headingCount, emphasisCount };
 }
@@ -811,7 +871,8 @@ function buildAnalysisShards(state: TranslationRunState): AnalysisShard[] {
       chunkIds: currentChunkIds,
       sourceChars,
       headingCount,
-      emphasisCount
+      emphasisCount,
+      depth: 0
     });
     currentChunkIds = [];
     sourceChars = 0;
@@ -842,6 +903,106 @@ function buildAnalysisShards(state: TranslationRunState): AnalysisShard[] {
   return shards;
 }
 
+function createAnalysisShard(
+  state: TranslationRunState,
+  shard: Pick<AnalysisShard, "id" | "index" | "chunkIds" | "segmentIdsByChunk" | "depth">
+): AnalysisShard {
+  const summary = summarizeAnalysisShard(state, shard as AnalysisShard);
+  return {
+    ...shard,
+    sourceChars: summary.sourceChars,
+    headingCount: summary.headingCount,
+    emphasisCount: summary.emphasisCount
+  };
+}
+
+function splitArrayBalanced<T>(
+  items: readonly T[],
+  weightOf: (item: T) => number
+): [T[], T[]] | null {
+  if (items.length <= 1) {
+    return null;
+  }
+
+  const totalWeight = items.reduce((sum, item) => sum + Math.max(weightOf(item), 1), 0);
+  const target = totalWeight / 2;
+  const left: T[] = [];
+  const right: T[] = [];
+  let leftWeight = 0;
+
+  for (let index = 0; index < items.length; index += 1) {
+    const item = items[index]!;
+    const remaining = items.length - index;
+    if (left.length > 0 && leftWeight >= target && remaining >= 1) {
+      right.push(item);
+      continue;
+    }
+    left.push(item);
+    leftWeight += Math.max(weightOf(item), 1);
+  }
+
+  if (right.length === 0) {
+    const moved = left.pop();
+    if (moved !== undefined) {
+      right.unshift(moved);
+    }
+  }
+
+  if (left.length === 0 || right.length === 0) {
+    return null;
+  }
+
+  return [left, right];
+}
+
+function splitAnalysisShard(state: TranslationRunState, shard: AnalysisShard): AnalysisShard[] {
+  const minSplitSourceChars = getAnalysisShardMinSplitSourceChars();
+  if (shard.sourceChars < minSplitSourceChars * 2) {
+    return [];
+  }
+
+  const ensureViable = (children: AnalysisShard[]): AnalysisShard[] =>
+    children.every((child) => child.sourceChars >= minSplitSourceChars) ? children : [];
+
+  if (shard.chunkIds.length > 1) {
+    const chunkSplit = splitArrayBalanced(shard.chunkIds, (chunkId) => summarizeChunkForAnalysis(state, chunkId).sourceChars);
+    if (!chunkSplit) {
+      return [];
+    }
+
+    return ensureViable(chunkSplit.map((chunkIds, index) =>
+      createAnalysisShard(state, {
+        id: `${shard.id}-c${index + 1}`,
+        index: shard.index,
+        chunkIds,
+        depth: shard.depth + 1
+      })
+    ));
+  }
+
+  const chunkId = shard.chunkIds[0];
+  if (!chunkId) {
+    return [];
+  }
+  const segments = getShardSegments(state, shard, chunkId);
+  const segmentSplit = splitArrayBalanced(segments, (segment) => segment.source.length);
+  if (!segmentSplit) {
+    return [];
+  }
+
+  return ensureViable(segmentSplit.map((group, index) =>
+    createAnalysisShard(state, {
+      id: `${shard.id}-s${index + 1}`,
+      index: shard.index,
+      chunkIds: [chunkId],
+      segmentIdsByChunk: {
+        [chunkId]: group.map((segment) => segment.id)
+      },
+      depth: shard.depth + 1
+    })
+  ));
+}
+
 function buildAnalysisShardSummary(catalog: AnchorCatalog): AnalysisShardSummary {
   return {
     anchors: catalog.anchors.slice(0, ANALYSIS_SUMMARY_MAX_ANCHORS).map((anchor) => ({
@@ -861,7 +1022,7 @@ function buildAnalysisShardSummary(catalog: AnchorCatalog): AnalysisShardSummary
 
 function buildDocumentAnalysisInput(
   state: TranslationRunState,
-  options: { shard?: AnalysisShard | null; priorSummary?: AnalysisShardSummary | null } = {}
+  options: { shard?: AnalysisShard | null; priorSummary?: AnalysisShardSummary | null; shardCount?: number } = {}
 ): string {
   const selectedChunkIds = new Set(options.shard?.chunkIds ?? state.chunks.map((chunk) => chunk.id));
   const selectedChunks = state.chunks.filter((chunk) => selectedChunkIds.has(chunk.id));
@@ -873,7 +1034,7 @@ function buildDocumentAnalysisInput(
             mode: "shard",
             shardId: options.shard.id,
             shardIndex: options.shard.index + 1,
-            shardCount: buildAnalysisShards(state).length,
+            shardCount: options.shardCount ?? buildAnalysisShards(state).length,
             chunkIds: options.shard.chunkIds,
             sourceChars: options.shard.sourceChars,
             headingCount: options.shard.headingCount,
@@ -889,7 +1050,7 @@ function buildDocumentAnalysisInput(
         id: chunk.id,
         index: chunk.index + 1,
         headingPath: chunk.headingPath,
-        segments: getChunkSegments(state, chunk.id).map((segment) => ({
+        segments: (options.shard ? getShardSegments(state, options.shard, chunk.id) : getChunkSegments(state, chunk.id)).map((segment) => ({
           id: segment.id,
           index: segment.index + 1,
           kind: segment.kind,
@@ -914,6 +1075,168 @@ function buildDocumentAnalysisInput(
 
 function countHeadingLikeLines(state: TranslationRunState): number {
   return state.segments.reduce((count, segment) => count + segment.headingHints.length, 0);
+}
+
+function isAnalysisShardTimeoutError(error: unknown): boolean {
+  return error instanceof Error && /timed out after \d+ms/i.test(error.message);
+}
+
+async function executeAnalysisShardAttempt(
+  state: TranslationRunState,
+  context: Pick<ChunkTranslationContext, "executor" | "postDraftModel" | "cwd" | "options" | "postDraftReasoningEffort">,
+  formalCatalog: AnchorCatalog,
+  accumulatedCatalog: AnchorCatalog,
+  shard: AnalysisShard,
+  shardCount: number,
+  attempt: number,
+  timeoutMs: number
+): Promise<AnchorCatalog> {
+  const acceptedSummary = buildAnalysisShardSummary(mergeAnchorCatalogs(formalCatalog, accumulatedCatalog));
+  const prompt = buildDocumentAnalysisPrompt(
+    buildDocumentAnalysisInput(state, {
+      shard,
+      shardCount,
+      priorSummary: attempt > 1 || shard.index > 0 ? acceptedSummary : null
+    })
+  );
+  report(
+    context.options,
+    "analyze",
+    `Starting model-based anchor discovery for shard ${shard.index + 1}/${shardCount} attempt ${attempt} (${shard.chunkIds.length} chunk(s), ${shard.sourceChars} source chars, ${shard.headingCount} heading(s), ${shard.emphasisCount} emphasis span(s), timeout ${timeoutMs}ms).`
+  );
+
+  const shardStartedAt = Date.now();
+  const heartbeatMs = getAnalysisHeartbeatMs();
+  const heartbeat = setInterval(() => {
+    report(
+      context.options,
+      "analyze",
+      `Shard ${shard.index + 1}/${shardCount} attempt ${attempt} still waiting for model response (${Date.now() - shardStartedAt}ms elapsed).`
+    );
+  }, heartbeatMs);
+
+  try {
+    const result = await context.executor.execute(prompt, {
+      cwd: context.cwd,
+      model: context.postDraftModel,
+      reasoningEffort: context.postDraftReasoningEffort ?? AUDIT_REASONING_EFFORT,
+      outputSchema: ANCHOR_CATALOG_SCHEMA,
+      reuseSession: false,
+      timeoutMs,
+      onStderr: (stderrChunk) => {
+        const trimmed = stderrChunk.trim();
+        if (trimmed) {
+          report(context.options, "analyze", trimmed);
+        }
+      }
+    });
+    const normalizedShardCatalog = normalizeDiscoveredAnchorCatalog(state, parseAnchorCatalog(result.text));
+    report(
+      context.options,
+      "analyze",
+      `Shard ${shard.index + 1}/${shardCount} attempt ${attempt} finished: ${normalizedShardCatalog.anchors.length} anchors, ${normalizedShardCatalog.headingPlans?.length ?? 0} heading plan(s), ${normalizedShardCatalog.ignoredTerms.length} ignored term(s).`
+    );
+    return normalizedShardCatalog;
+  } finally {
+    clearInterval(heartbeat);
+  }
+}
+
+async function analyzeShardWithFallback(
+  state: TranslationRunState,
+  context: Pick<ChunkTranslationContext, "executor" | "postDraftModel" | "cwd" | "options" | "postDraftReasoningEffort">,
+  formalCatalog: AnchorCatalog,
+  accumulatedCatalog: AnchorCatalog,
+  shard: AnalysisShard,
+  shardCount: number,
+  timeoutMs: number
+): Promise<AnchorCatalog> {
+  const maxAttempts = getAnalysisShardMaxAttempts();
+  const maxSplitDepth = getAnalysisShardMaxSplitDepth();
+  let currentTimeoutMs = timeoutMs;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      return await executeAnalysisShardAttempt(
+        state,
+        context,
+        formalCatalog,
+        accumulatedCatalog,
+        shard,
+        shardCount,
+        attempt,
+        currentTimeoutMs
+      );
+    } catch (error) {
+      const isTimeout = isAnalysisShardTimeoutError(error);
+      const hasNextAttempt = attempt < maxAttempts;
+
+      if (!isTimeout || !hasNextAttempt) {
+        throw error;
+      }
+
+      if (attempt === 1) {
+        currentTimeoutMs = Math.round(currentTimeoutMs * 1.5);
+        report(
+          context.options,
+          "analyze",
+          `Shard ${shard.index + 1}/${shardCount} timed out on attempt ${attempt}; retrying once with timeout ${currentTimeoutMs}ms before fallback split.`
+        );
+        continue;
+      }
+
+      if (shard.depth < maxSplitDepth) {
+        const fallbackShards = splitAnalysisShard(state, shard);
+        if (fallbackShards.length > 0) {
+          report(
+            context.options,
+            "analyze",
+            `Shard ${shard.index + 1}/${shardCount} timed out on attempt ${attempt}; splitting into ${fallbackShards.length} fallback shard(s).`
+          );
+
+          const childCatalogs: AnchorCatalog[] = [];
+          const concurrency = Math.max(1, getAnalysisFallbackShardConcurrency());
+
+          for (let start = 0; start < fallbackShards.length; start += concurrency) {
+            const batch = fallbackShards.slice(start, start + concurrency);
+            const batchCatalogs = await Promise.all(
+              batch.map((fallbackShard) =>
+                analyzeShardWithFallback(
+                  state,
+                  context,
+                  formalCatalog,
+                  accumulatedCatalog,
+                  fallbackShard,
+                  shardCount,
+                  timeoutMs
+                )
+              )
+            );
+            childCatalogs.push(...batchCatalogs);
+          }
+
+          return childCatalogs.reduce<AnchorCatalog>(
+            (merged, childCatalog) => mergeAnchorCatalogs(merged, childCatalog),
+            {
+              anchors: [],
+              headingPlans: [],
+              emphasisPlans: [],
+              ignoredTerms: []
+            }
+          );
+        }
+      }
+
+      currentTimeoutMs = Math.round(currentTimeoutMs * 1.5);
+      report(
+        context.options,
+        "analyze",
+        `Shard ${shard.index + 1}/${shardCount} timed out on attempt ${attempt}; retrying with expanded timeout ${currentTimeoutMs}ms.`
+      );
+    }
+  }
+
+  throw new Error(`Analysis shard ${shard.id} exhausted retry attempts without returning a result.`);
 }
 
 async function analyzeDocumentForAnchors(
@@ -942,55 +1265,17 @@ async function analyzeDocumentForAnchors(
       ignoredTerms: []
     };
     const shardTimeoutMs = getAnalysisShardTimeoutMs();
-    const heartbeatMs = getAnalysisHeartbeatMs();
 
     for (const shard of shards) {
-      const acceptedSummary = buildAnalysisShardSummary(mergeAnchorCatalogs(formalCatalog, discoveredCatalog));
-      const prompt = buildDocumentAnalysisPrompt(
-        buildDocumentAnalysisInput(state, {
-          shard,
-          priorSummary: shard.index > 0 ? acceptedSummary : null
-        })
-      );
-      report(
-        context.options,
-        "analyze",
-        `Starting model-based anchor discovery for shard ${shard.index + 1}/${shards.length} (${shard.chunkIds.length} chunk(s), ${shard.sourceChars} source chars, ${shard.headingCount} heading(s), ${shard.emphasisCount} emphasis span(s), timeout ${shardTimeoutMs}ms).`
-      );
-
       try {
-        const shardStartedAt = Date.now();
-        const heartbeat = setInterval(() => {
-          report(
-            context.options,
-            "analyze",
-            `Shard ${shard.index + 1}/${shards.length} still waiting for model response (${Date.now() - shardStartedAt}ms elapsed).`
-          );
-        }, heartbeatMs);
-        let result;
-        try {
-          result = await context.executor.execute(prompt, {
-            cwd: context.cwd,
-            model: context.postDraftModel,
-            reasoningEffort: context.postDraftReasoningEffort ?? AUDIT_REASONING_EFFORT,
-            outputSchema: ANCHOR_CATALOG_SCHEMA,
-            reuseSession: false,
-            timeoutMs: shardTimeoutMs,
-            onStderr: (stderrChunk) => {
-              const trimmed = stderrChunk.trim();
-              if (trimmed) {
-                report(context.options, "analyze", trimmed);
-              }
-            }
-          });
-        } finally {
-          clearInterval(heartbeat);
-        }
-        const normalizedShardCatalog = normalizeDiscoveredAnchorCatalog(state, parseAnchorCatalog(result.text));
-        report(
-          context.options,
-          "analyze",
-          `Shard ${shard.index + 1}/${shards.length} finished: ${normalizedShardCatalog.anchors.length} anchors, ${normalizedShardCatalog.headingPlans?.length ?? 0} heading plan(s), ${normalizedShardCatalog.ignoredTerms.length} ignored term(s).`
+        const normalizedShardCatalog = await analyzeShardWithFallback(
+          state,
+          context,
+          formalCatalog,
+          discoveredCatalog,
+          shard,
+          shards.length,
+          shardTimeoutMs
         );
         discoveredCatalog = mergeAnchorCatalogs(discoveredCatalog, normalizedShardCatalog);
         report(
