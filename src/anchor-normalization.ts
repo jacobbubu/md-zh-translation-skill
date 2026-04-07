@@ -282,16 +282,23 @@ export function normalizeHeadingLikeAnchorText(
       if (
         !anchor.chineseHint ||
         anchor.chineseHint.toLowerCase() === headingEnglish.toLowerCase() ||
-        !normalizedLine.includes(anchor.chineseHint) ||
         containsWholePhrase(normalizedLine, headingEnglish)
       ) {
         continue;
       }
 
-      normalizedLine = normalizedLine.replace(
-        anchor.chineseHint,
-        `${anchor.chineseHint}（${headingEnglish}）`
-      );
+      if (normalizedLine.includes(anchor.chineseHint)) {
+        normalizedLine = normalizedLine.replace(
+          anchor.chineseHint,
+          `${anchor.chineseHint}（${headingEnglish}）`
+        );
+        continue;
+      }
+
+      const fuzzyCandidate = findFuzzyChineseHeadingAnchorCandidate(normalizedLine, display.chineseDisplay);
+      if (fuzzyCandidate) {
+        normalizedLine = replaceFirst(normalizedLine, fuzzyCandidate, `${display.chineseDisplay}（${headingEnglish}）`);
+      }
     }
 
     if (normalizedLine !== translatedLine.raw) {

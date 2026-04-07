@@ -4633,6 +4633,65 @@ test("translateMarkdownArticle synthesizes heading-local fallback anchors for co
   assert.match(result.markdown, /\*\*权限模式语法（Permission Pattern Syntax）\*\*/);
 });
 
+test("translateMarkdownArticle restores heading hints through planning before repair text exists", async () => {
+  const source = [
+    "# Title",
+    "",
+    "## Filesystem Permissions (Critical )",
+    "",
+    "Filesystem permissions control what Claude can access.",
+    "",
+    "**Permission Pattern Syntax**",
+    "",
+    "**Paths:**",
+    ""
+  ].join("\n");
+  let auditedTranslation = "";
+
+  const result = await translateMarkdownArticle(source, {
+    executor: {
+      async execute(prompt, options) {
+        if (isDocumentAnalysisPrompt(prompt)) {
+          return createExecResult(createAnchorCatalog([]));
+        }
+
+        if (options.outputSchema || prompt.includes('"hard_checks"') || prompt.includes("只返回 JSON")) {
+          auditedTranslation = extractPromptSection(prompt, "【当前译文】") ?? "";
+          return createExecResult(wrapAuditForSegments(prompt, createAudit(true)));
+        }
+
+        const currentTranslation = extractPromptSection(prompt, "【当前译文】");
+        if (currentTranslation !== null) {
+          return createExecResult(currentTranslation);
+        }
+
+        return createExecResult(
+          [
+            "# Title",
+            "",
+            "## 文件系统权限（关键）",
+            "",
+            "文件系统权限控制 Claude 可以访问什么。",
+            "",
+            "**权限模式语法**",
+            "",
+            "**路径：**",
+            ""
+          ].join("\n")
+        );
+      }
+    },
+    formatter: async (markdown) => markdown
+  });
+
+  assert.match(auditedTranslation, /## 文件系统权限（Filesystem Permissions）（关键）/);
+  assert.match(auditedTranslation, /\*\*权限模式语法（Permission Pattern Syntax）\*\*/);
+  assert.match(auditedTranslation, /\*\*路径（Paths）：\*\*/);
+  assert.match(result.markdown, /## 文件系统权限（Filesystem Permissions）（关键）/);
+  assert.match(result.markdown, /\*\*权限模式语法（Permission Pattern Syntax）\*\*/);
+  assert.match(result.markdown, /\*\*路径（Paths）：\*\*/);
+});
+
 test("translateMarkdownArticle does not inject required anchors into command phrases", async () => {
   const source = ["**Commands:**", "", "- git status, git log, git diff", "- python script.py (runs code in project)", ""].join(
     "\n"

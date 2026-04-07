@@ -343,7 +343,10 @@ export function applyAnchorCatalog(state: TranslationRunState, catalog: AnchorCa
 export function buildSegmentTaskSlice(
   state: TranslationRunState,
   chunkId: string,
-  segmentId: string
+  segmentId: string,
+  options?: {
+    currentRestoredBody?: string;
+  }
 ): PromptSlice {
   const chunk = getChunkState(state, chunkId);
   const segment = getSegmentState(state, segmentId);
@@ -369,11 +372,17 @@ export function buildSegmentTaskSlice(
       locationLabel: task.locationLabel,
       instruction: task.instruction
     }));
+  const headingHintAnchors = synthesizeHeadingHintPromptAnchors(
+    segmentId,
+    segment.headingHints,
+    options?.currentRestoredBody ?? segment.currentRestoredBody,
+    [...requiredAnchors, ...repeatAnchors, ...establishedAnchors]
+  );
   const localFallbackAnchors = synthesizeLocalFallbackPromptAnchors(
     segmentId,
     segment.source,
     pendingRepairs,
-    [...requiredAnchors, ...repeatAnchors, ...establishedAnchors]
+    [...requiredAnchors, ...repeatAnchors, ...establishedAnchors, ...headingHintAnchors]
   );
 
   return {
@@ -384,12 +393,156 @@ export function buildSegmentTaskSlice(
     segmentIndex: segment.index + 1,
     headingPath: [...chunk.headingPath],
     headingHints: [...segment.headingHints],
-    requiredAnchors: coalesceRequiredAnchors([...requiredAnchors, ...localFallbackAnchors]),
+    requiredAnchors: coalesceRequiredAnchors([...requiredAnchors, ...headingHintAnchors, ...localFallbackAnchors]),
     repeatAnchors,
     establishedAnchors,
     protectedSpanIds: [...segment.spanIds],
     pendingRepairs
   };
+}
+
+function synthesizeHeadingHintPromptAnchors(
+  segmentId: string,
+  headingHints: readonly string[],
+  currentRestoredBody: string,
+  existingAnchors: PromptSlice["requiredAnchors"]
+): PromptSlice["requiredAnchors"] {
+  if (headingHints.length === 0) {
+    return [];
+  }
+
+  const translatedHeadings = extractHeadingLikeContents(currentRestoredBody);
+  if (translatedHeadings.length === 0) {
+    return [];
+  }
+  const alignedTranslatedHeadings =
+    translatedHeadings.length > headingHints.length
+      ? translatedHeadings.slice(translatedHeadings.length - headingHints.length)
+      : translatedHeadings;
+
+  const synthesized: PromptSlice["requiredAnchors"] = [];
+  const seenEnglish = new Set(existingAnchors.map((anchor) => anchor.english.trim().toLowerCase()));
+  const pairCount = Math.min(headingHints.length, alignedTranslatedHeadings.length);
+
+  for (let index = 0; index < pairCount; index += 1) {
+    const sourceHeading = headingHints[index]?.trim() ?? "";
+    const translatedHeading = alignedTranslatedHeadings[index]?.trim() ?? "";
+    if (!sourceHeading || !translatedHeading) {
+      continue;
+    }
+
+    const planningTarget = extractHeadingPlanningTarget(sourceHeading, translatedHeading);
+    if (!planningTarget) {
+      continue;
+    }
+
+    const { english: headingEnglish, chineseHint } = planningTarget;
+    if (!headingEnglish || !chineseHint) {
+      continue;
+    }
+
+    if (containsWholePhrase(translatedHeading, headingEnglish)) {
+      continue;
+    }
+
+    const normalizedKey = headingEnglish.toLowerCase();
+    if (seenEnglish.has(normalizedKey)) {
+      continue;
+    }
+
+    synthesized.push({
+      anchorId: buildLocalFallbackAnchorId(segmentId, headingEnglish),
+      english: headingEnglish,
+      chineseHint,
+      familyId: `local:${normalizeLocalFallbackAnchorKey(headingEnglish)}`,
+      requiresBilingual: true,
+      displayPolicy: "chinese-primary",
+      allowRepeatText: false,
+      displayMode: "chinese-primary",
+      canonicalDisplay: `${chineseHint}（${headingEnglish}）`,
+      allowedDisplayForms: [`${chineseHint}（${headingEnglish}）`]
+    });
+    seenEnglish.add(normalizedKey);
+  }
+
+  return synthesized;
+}
+
+function extractHeadingPlanningTarget(
+  sourceHeading: string,
+  translatedHeading: string
+): { english: string; chineseHint: string } | null {
+  if (isStandaloneGenericStructuralHeading(sourceHeading)) {
+    return null;
+  }
+
+  const mixedQualifierTarget = extractMixedQualifierHeadingPlanningTarget(sourceHeading, translatedHeading);
+  if (mixedQualifierTarget) {
+    return mixedQualifierTarget;
+  }
+
+  const sourceMatch = splitHeadingColonParts(sourceHeading);
+  const translatedMatch = splitHeadingColonParts(translatedHeading);
+  if (sourceMatch && translatedMatch) {
+    const suffixEnglish = extractHeadingPlanningEnglish(sourceMatch.suffix);
+    const suffixChinese = normalizeHeadingPlanningChineseHint(translatedMatch.suffix);
+    if (
+      suffixEnglish &&
+      suffixChinese &&
+      !/[A-Za-z]/.test(translatedMatch.suffix)
+    ) {
+      return { english: suffixEnglish, chineseHint: suffixChinese };
+    }
+  }
+
+  const directEnglish = extractHeadingPlanningEnglish(sourceHeading);
+  const directChinese = normalizeHeadingPlanningChineseHint(translatedHeading);
+  if (directEnglish && directChinese && isPlanningEligibleHeading(sourceHeading)) {
+    return { english: directEnglish, chineseHint: directChinese };
+  }
+
+  return null;
+}
+
+function extractMixedQualifierHeadingPlanningTarget(
+  sourceHeading: string,
+  translatedHeading: string
+): { english: string; chineseHint: string } | null {
+  const sourceCore = stripInlineMarkdownMarkers(sourceHeading)
+    .replace(/[：:]\s*$/, "")
+    .trim();
+  const translatedCore = stripInlineMarkdownMarkers(translatedHeading)
+    .replace(/[：:]\s*$/, "")
+    .trim();
+
+  if (!sourceCore || !translatedCore) {
+    return null;
+  }
+
+  const sourceTokens = sourceCore.split(/\s+/).filter(Boolean);
+  if (sourceTokens.length < 2) {
+    return null;
+  }
+
+  const suffixToken = sourceTokens[sourceTokens.length - 1] ?? "";
+  if (!MIXED_QUALIFIER_HEADING_SUFFIXES.has(suffixToken.toLowerCase())) {
+    return null;
+  }
+
+  const prefix = sourceTokens.slice(0, -1).join(" ").trim();
+  if (!prefix || !containsWholePhrase(translatedCore, prefix)) {
+    return null;
+  }
+
+  const translatedSuffix = translatedCore
+    .replace(new RegExp(`^${escapeRegExp(prefix)}\\s*`, "i"), "")
+    .trim();
+  const chineseSuffix = normalizeHeadingPlanningChineseHint(translatedSuffix);
+  if (!chineseSuffix) {
+    return null;
+  }
+
+  return { english: suffixToken, chineseHint: chineseSuffix };
 }
 
 export function applySegmentDraft(
@@ -800,3 +953,147 @@ function stripInlineMarkdownMarkers(text: string): string {
 function normalizeHeadingLocalFallbackChineseHint(text: string): string {
   return text.replace(/（[\u4e00-\u9fff\s]+）\s*$/u, "").trim();
 }
+
+function extractHeadingLikeContents(text: string): string[] {
+  const headings: string[] = [];
+
+  for (const rawLine of text.split(/\r?\n/)) {
+    const trimmed = rawLine.trim();
+    if (!trimmed) {
+      continue;
+    }
+
+    const atxMatch = trimmed.match(/^#{1,6}[ \t]+(.+?)(?:[ \t]+#+)?$/);
+    if (atxMatch?.[1]) {
+      headings.push(atxMatch[1].trim());
+      continue;
+    }
+
+    const boldMatch = trimmed.match(/^\*\*(.+)\*\*$/);
+    if (boldMatch?.[1]) {
+      headings.push(boldMatch[1].trim());
+    }
+  }
+
+  return headings;
+}
+
+function normalizeHeadingPlanningChineseHint(text: string): string | null {
+  const stripped = stripInlineMarkdownMarkers(text)
+    .replace(/[：:]\s*$/, "")
+    .replace(/（[\u4e00-\u9fff\s]+）\s*$/u, "")
+    .trim();
+  if (!stripped || /[A-Za-z]/.test(stripped)) {
+    return null;
+  }
+  return stripped;
+}
+
+function extractHeadingPlanningEnglish(sourceHeading: string): string | null {
+  const strippedQualifier = sourceHeading.replace(/\s+\(([^)]*[A-Za-z][^)]*)\)\s*$/, "").trim();
+  const withoutColon = strippedQualifier.replace(/[：:]\s*$/, "").trim();
+  if (!withoutColon || !/[A-Za-z]/.test(withoutColon)) {
+    return null;
+  }
+  return withoutColon;
+}
+
+function isPlanningEligibleHeading(sourceHeading: string): boolean {
+  const stripped = stripInlineMarkdownMarkers(sourceHeading).trim();
+  if (!stripped || !/[A-Za-z]/.test(stripped) || shouldSkipOperationalHeadingPlanning(stripped)) {
+    return false;
+  }
+
+  const withoutQualifier = stripped.replace(/\s+\(([^)]*[A-Za-z][^)]*)\)\s*$/, "").trim();
+  if (
+    /^[A-Za-z][A-Za-z0-9 ]{0,30}\d+\s*:\s*[A-Za-z]/.test(withoutQualifier) ||
+    /^[A-Za-z][A-Za-z0-9 ]{0,30}\s*:\s*[A-Za-z]/.test(withoutQualifier)
+  ) {
+    return false;
+  }
+
+  const firstToken = withoutQualifier.split(/\s+/)[0]?.toLowerCase() ?? "";
+  if (QUESTION_HEADING_TOKENS.has(firstToken)) {
+    return false;
+  }
+
+  const core = withoutQualifier.replace(/[：:]\s*$/, "").trim();
+  const wordCount = core.split(/\s+/).filter(Boolean).length;
+  if (wordCount === 1 && !/[：:()]/.test(stripped)) {
+    return false;
+  }
+
+  return wordCount > 0 && wordCount <= 4;
+}
+
+function splitHeadingColonParts(text: string): { prefix: string; suffix: string } | null {
+  const stripped = stripInlineMarkdownMarkers(text).trim();
+  const match = stripped.match(/^(.*?[：:]\s*)(.+)$/);
+  if (!match?.[1] || !match[2]) {
+    return null;
+  }
+
+  return {
+    prefix: match[1].trim(),
+    suffix: match[2].trim()
+  };
+}
+
+function isStandaloneGenericStructuralHeading(sourceHeading: string): boolean {
+  const core = stripInlineMarkdownMarkers(sourceHeading)
+    .replace(/[：:]\s*$/, "")
+    .trim()
+    .toLowerCase();
+  return STANDALONE_GENERIC_STRUCTURAL_HEADINGS.has(core);
+}
+
+function shouldSkipOperationalHeadingPlanning(sourceHeading: string): boolean {
+  const normalized = stripInlineMarkdownMarkers(sourceHeading).trim().toLowerCase();
+  const firstToken = normalized.split(/\s+/)[0] ?? "";
+  return OPERATIONAL_HEADING_VERBS.has(firstToken);
+}
+
+const QUESTION_HEADING_TOKENS = new Set(["how", "what", "why", "when", "where", "which"]);
+
+const OPERATIONAL_HEADING_VERBS = new Set([
+  "view",
+  "edit",
+  "disable",
+  "enable",
+  "check",
+  "reset",
+  "show",
+  "list",
+  "configure",
+  "set",
+  "get",
+  "change",
+  "update",
+  "open",
+  "close",
+  "run",
+  "create",
+  "delete",
+  "remove",
+  "install"
+]);
+
+const STANDALONE_GENERIC_STRUCTURAL_HEADINGS = new Set([
+  "example",
+  "examples",
+  "note",
+  "notes",
+  "overview",
+  "summary",
+  "summaries"
+]);
+
+const MIXED_QUALIFIER_HEADING_SUFFIXES = new Set([
+  "pattern",
+  "patterns",
+  "syntax",
+  "rule",
+  "rules",
+  "type",
+  "types"
+]);

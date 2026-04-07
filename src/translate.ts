@@ -2098,15 +2098,18 @@ async function translateProtectedSegment(
     normalizedDraftText,
     chunkPromptContext.stateSlice
   );
+  const headingPlanningSlice = buildSegmentTaskSlice(context.state, context.chunkId, segmentId, {
+    currentRestoredBody: injectedDraftText
+  });
   const normalizedHeadingDraftText = normalizeHeadingLikeAnchorText(
     protectedSource,
     injectedDraftText,
-    chunkPromptContext.stateSlice
+    headingPlanningSlice
   );
   const normalizedSurfaceDraftText = normalizeSourceSurfaceAnchorText(
     protectedSource,
     normalizedHeadingDraftText,
-    chunkPromptContext.stateSlice
+    headingPlanningSlice
   );
   const normalizedRegistryDraftText = normalizePackageRegistryTerminology(
     protectedSource,
@@ -2207,20 +2210,23 @@ async function repairDraftedSegment(
       normalizedRepairText,
       buildSegmentTaskSlice(context.state, context.chunkId, draftedSegment.segmentId)
     );
+    const headingPlanningSlice = buildSegmentTaskSlice(context.state, context.chunkId, draftedSegment.segmentId, {
+      currentRestoredBody: injectedRepairText
+    });
     const normalizedHeadingRepairText = normalizeHeadingLikeAnchorText(
       draftedSegment.protectedSource,
       injectedRepairText,
-      buildSegmentTaskSlice(context.state, context.chunkId, draftedSegment.segmentId)
+      headingPlanningSlice
     );
     const normalizedExplicitRepairText = normalizeExplicitRepairAnchorText(
       draftedSegment.protectedSource,
       normalizedHeadingRepairText,
-      buildSegmentTaskSlice(context.state, context.chunkId, draftedSegment.segmentId)
+      headingPlanningSlice
     );
     const normalizedSurfaceRepairText = normalizeSourceSurfaceAnchorText(
       draftedSegment.protectedSource,
       normalizedExplicitRepairText,
-      buildSegmentTaskSlice(context.state, context.chunkId, draftedSegment.segmentId)
+      headingPlanningSlice
     );
     const normalizedRegistryRepairText = normalizePackageRegistryTerminology(
       draftedSegment.protectedSource,

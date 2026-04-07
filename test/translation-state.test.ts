@@ -548,6 +548,45 @@ test("translation state synthesizes local fallback anchors for heading-like conf
   assert.equal(syntaxAnchor?.chineseHint, "权限模式语法");
 });
 
+test("translation state synthesizes heading-local anchors directly from heading hints and current translated headings", () => {
+  const state = createTranslationRunState({
+    sourcePathHint: "sample.md",
+    documentTitle: "Sample",
+    frontmatterPresent: false,
+    protectedSpans: [],
+    chunks: [
+      {
+        source: "## Filesystem Permissions (Critical )\n\n**Permission Pattern Syntax**\n\n**Paths:**",
+        separatorAfter: "",
+        headingPath: ["Sample"],
+        segments: [
+          {
+            kind: "translatable",
+            source: "## Filesystem Permissions (Critical )\n\n**Permission Pattern Syntax**\n\n**Paths:**",
+            separatorAfter: "",
+            spanIds: [],
+            headingHints: ["Filesystem Permissions (Critical )", "Permission Pattern Syntax", "Paths:"],
+            specialNotes: []
+          }
+        ]
+      }
+    ]
+  });
+
+  const slice = buildSegmentTaskSlice(state, "chunk-1", "chunk-1-segment-1", {
+    currentRestoredBody: "## 文件系统权限（关键）\n\n**权限模式语法**\n\n**路径：**"
+  });
+
+  assert.deepEqual(
+    slice.requiredAnchors.map((anchor) => [anchor.english, anchor.chineseHint]),
+    [
+      ["Filesystem Permissions", "文件系统权限"],
+      ["Permission Pattern Syntax", "权限模式语法"],
+      ["Paths", "路径"]
+    ]
+  );
+});
+
 test("translation state exposes canonical display metadata for english-primary anchors", () => {
   const state = createTranslationRunState({
     sourcePathHint: "sample.md",
