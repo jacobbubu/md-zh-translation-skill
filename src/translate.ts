@@ -74,8 +74,44 @@ const DRAFT_REASONING_EFFORT = "medium";
 const AUDIT_REASONING_EFFORT = "medium";
 const REPAIR_REASONING_EFFORT = "low";
 const STYLE_REASONING_EFFORT = "low";
+const ANALYSIS_SHARD_MAX_CHUNKS = 3;
+const ANALYSIS_SHARD_MAX_SOURCE_CHARS = 8000;
+const ANALYSIS_SHARD_MAX_HEADINGS = 12;
+const ANALYSIS_SHARD_MAX_EMPHASIS = 12;
+const ANALYSIS_SUMMARY_MAX_ANCHORS = 40;
+const ANALYSIS_SUMMARY_MAX_HEADINGS = 40;
+const ANALYSIS_SUMMARY_MAX_IGNORED = 30;
+const ANALYSIS_SHARD_TIMEOUT_MS = 120000;
+const ANALYSIS_HEARTBEAT_MS = 15000;
 type ReasoningEffort = "minimal" | "low" | "medium" | "high" | "xhigh";
 type StyleMode = "none" | "final";
+
+type AnalysisShard = {
+  id: string;
+  index: number;
+  chunkIds: string[];
+  sourceChars: number;
+  headingCount: number;
+  emphasisCount: number;
+};
+
+type AnalysisShardSummary = {
+  anchors: Array<{
+    english: string;
+    chineseHint: string;
+    displayPolicy?: AnalysisAnchor["displayPolicy"];
+    sourceForms?: string[] | null;
+  }>;
+  headingPlans: Array<{
+    sourceHeading: string;
+    strategy: AnalysisHeadingPlan["strategy"];
+    targetHeading?: string;
+  }>;
+  ignoredTerms: Array<{
+    english: string;
+    reason: string;
+  }>;
+};
 
 type AuditCheckKey =
   | "paragraph_match"
@@ -719,11 +755,137 @@ function buildChunkSeeds(
   }));
 }
 
-function buildDocumentAnalysisInput(state: TranslationRunState): string {
+function readPositiveIntEnv(name: string, fallback: number): number {
+  const raw = process.env[name]?.trim();
+  if (!raw) {
+    return fallback;
+  }
+  const parsed = Number.parseInt(raw, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function getAnalysisShardLimits() {
+  return {
+    maxChunks: readPositiveIntEnv("MDZH_ANALYSIS_SHARD_MAX_CHUNKS", ANALYSIS_SHARD_MAX_CHUNKS),
+    maxSourceChars: readPositiveIntEnv("MDZH_ANALYSIS_SHARD_MAX_SOURCE_CHARS", ANALYSIS_SHARD_MAX_SOURCE_CHARS),
+    maxHeadings: readPositiveIntEnv("MDZH_ANALYSIS_SHARD_MAX_HEADINGS", ANALYSIS_SHARD_MAX_HEADINGS),
+    maxEmphasis: readPositiveIntEnv("MDZH_ANALYSIS_SHARD_MAX_EMPHASIS", ANALYSIS_SHARD_MAX_EMPHASIS)
+  };
+}
+
+function getAnalysisShardTimeoutMs(): number {
+  return readPositiveIntEnv("MDZH_ANALYSIS_SHARD_TIMEOUT_MS", ANALYSIS_SHARD_TIMEOUT_MS);
+}
+
+function getAnalysisHeartbeatMs(): number {
+  return readPositiveIntEnv("MDZH_ANALYSIS_HEARTBEAT_MS", ANALYSIS_HEARTBEAT_MS);
+}
+
+function summarizeChunkForAnalysis(state: TranslationRunState, chunkId: string) {
+  const segments = getChunkSegments(state, chunkId);
+  const sourceChars = segments.reduce((total, segment) => total + segment.source.length, 0);
+  const headingCount = segments.reduce((total, segment) => total + segment.headingHints.length, 0);
+  const emphasisCount = segments.reduce(
+    (total, segment) => total + extractTranslatableStrongEmphasisSpans(segment.source).length,
+    0
+  );
+
+  return { sourceChars, headingCount, emphasisCount };
+}
+
+function buildAnalysisShards(state: TranslationRunState): AnalysisShard[] {
+  const limits = getAnalysisShardLimits();
+  const shards: AnalysisShard[] = [];
+  let currentChunkIds: string[] = [];
+  let sourceChars = 0;
+  let headingCount = 0;
+  let emphasisCount = 0;
+
+  const flush = () => {
+    if (currentChunkIds.length === 0) {
+      return;
+    }
+    shards.push({
+      id: `analysis-shard-${shards.length + 1}`,
+      index: shards.length,
+      chunkIds: currentChunkIds,
+      sourceChars,
+      headingCount,
+      emphasisCount
+    });
+    currentChunkIds = [];
+    sourceChars = 0;
+    headingCount = 0;
+    emphasisCount = 0;
+  };
+
+  for (const chunk of state.chunks) {
+    const chunkSummary = summarizeChunkForAnalysis(state, chunk.id);
+    const wouldExceed =
+      currentChunkIds.length > 0 &&
+      (currentChunkIds.length + 1 > limits.maxChunks ||
+        sourceChars + chunkSummary.sourceChars > limits.maxSourceChars ||
+        headingCount + chunkSummary.headingCount > limits.maxHeadings ||
+        emphasisCount + chunkSummary.emphasisCount > limits.maxEmphasis);
+
+    if (wouldExceed) {
+      flush();
+    }
+
+    currentChunkIds.push(chunk.id);
+    sourceChars += chunkSummary.sourceChars;
+    headingCount += chunkSummary.headingCount;
+    emphasisCount += chunkSummary.emphasisCount;
+  }
+
+  flush();
+  return shards;
+}
+
+function buildAnalysisShardSummary(catalog: AnchorCatalog): AnalysisShardSummary {
+  return {
+    anchors: catalog.anchors.slice(0, ANALYSIS_SUMMARY_MAX_ANCHORS).map((anchor) => ({
+      english: anchor.english,
+      chineseHint: anchor.chineseHint,
+      ...(anchor.displayPolicy ? { displayPolicy: anchor.displayPolicy } : {}),
+      ...(anchor.sourceForms?.length ? { sourceForms: anchor.sourceForms } : {})
+    })),
+    headingPlans: (catalog.headingPlans ?? []).slice(0, ANALYSIS_SUMMARY_MAX_HEADINGS).map((plan) => ({
+      sourceHeading: plan.sourceHeading,
+      strategy: plan.strategy,
+      ...(plan.targetHeading ? { targetHeading: plan.targetHeading } : {})
+    })),
+    ignoredTerms: catalog.ignoredTerms.slice(0, ANALYSIS_SUMMARY_MAX_IGNORED)
+  };
+}
+
+function buildDocumentAnalysisInput(
+  state: TranslationRunState,
+  options: { shard?: AnalysisShard | null; priorSummary?: AnalysisShardSummary | null } = {}
+): string {
+  const selectedChunkIds = new Set(options.shard?.chunkIds ?? state.chunks.map((chunk) => chunk.id));
+  const selectedChunks = state.chunks.filter((chunk) => selectedChunkIds.has(chunk.id));
   return JSON.stringify(
     {
       document: state.document,
-      chunks: state.chunks.map((chunk) => ({
+      analysisScope: options.shard
+        ? {
+            mode: "shard",
+            shardId: options.shard.id,
+            shardIndex: options.shard.index + 1,
+            shardCount: buildAnalysisShards(state).length,
+            chunkIds: options.shard.chunkIds,
+            sourceChars: options.shard.sourceChars,
+            headingCount: options.shard.headingCount,
+            emphasisCount: options.shard.emphasisCount
+          }
+        : { mode: "full-document" },
+      ...(options.priorSummary
+        ? {
+            priorAccepted: options.priorSummary
+          }
+        : {}),
+      chunks: selectedChunks.map((chunk) => ({
         id: chunk.id,
         index: chunk.index + 1,
         headingPath: chunk.headingPath,
@@ -766,23 +928,85 @@ async function analyzeDocumentForAnchors(
     "analyze",
     `Matched ${formalCatalog.anchors.length} formal known_entities in source.`
   );
-  const prompt = buildDocumentAnalysisPrompt(buildDocumentAnalysisInput(state));
+  const shards = buildAnalysisShards(state);
+  report(
+    context.options,
+    "analyze",
+    `Planned ${shards.length} analysis shard(s) for model-based anchor discovery.`
+  );
   try {
-    report(context.options, "analyze", "Starting model-based anchor discovery.");
-    const result = await context.executor.execute(prompt, {
-      cwd: context.cwd,
-      model: context.postDraftModel,
-      reasoningEffort: context.postDraftReasoningEffort ?? AUDIT_REASONING_EFFORT,
-      outputSchema: ANCHOR_CATALOG_SCHEMA,
-      reuseSession: true,
-      onStderr: (stderrChunk) => {
-        const trimmed = stderrChunk.trim();
-        if (trimmed) {
-          report(context.options, "analyze", trimmed);
+    let discoveredCatalog: AnchorCatalog = {
+      anchors: [],
+      headingPlans: [],
+      emphasisPlans: [],
+      ignoredTerms: []
+    };
+    const shardTimeoutMs = getAnalysisShardTimeoutMs();
+    const heartbeatMs = getAnalysisHeartbeatMs();
+
+    for (const shard of shards) {
+      const acceptedSummary = buildAnalysisShardSummary(mergeAnchorCatalogs(formalCatalog, discoveredCatalog));
+      const prompt = buildDocumentAnalysisPrompt(
+        buildDocumentAnalysisInput(state, {
+          shard,
+          priorSummary: shard.index > 0 ? acceptedSummary : null
+        })
+      );
+      report(
+        context.options,
+        "analyze",
+        `Starting model-based anchor discovery for shard ${shard.index + 1}/${shards.length} (${shard.chunkIds.length} chunk(s), ${shard.sourceChars} source chars, ${shard.headingCount} heading(s), ${shard.emphasisCount} emphasis span(s), timeout ${shardTimeoutMs}ms).`
+      );
+
+      try {
+        const shardStartedAt = Date.now();
+        const heartbeat = setInterval(() => {
+          report(
+            context.options,
+            "analyze",
+            `Shard ${shard.index + 1}/${shards.length} still waiting for model response (${Date.now() - shardStartedAt}ms elapsed).`
+          );
+        }, heartbeatMs);
+        let result;
+        try {
+          result = await context.executor.execute(prompt, {
+            cwd: context.cwd,
+            model: context.postDraftModel,
+            reasoningEffort: context.postDraftReasoningEffort ?? AUDIT_REASONING_EFFORT,
+            outputSchema: ANCHOR_CATALOG_SCHEMA,
+            reuseSession: false,
+            timeoutMs: shardTimeoutMs,
+            onStderr: (stderrChunk) => {
+              const trimmed = stderrChunk.trim();
+              if (trimmed) {
+                report(context.options, "analyze", trimmed);
+              }
+            }
+          });
+        } finally {
+          clearInterval(heartbeat);
         }
+        const normalizedShardCatalog = normalizeDiscoveredAnchorCatalog(state, parseAnchorCatalog(result.text));
+        report(
+          context.options,
+          "analyze",
+          `Shard ${shard.index + 1}/${shards.length} finished: ${normalizedShardCatalog.anchors.length} anchors, ${normalizedShardCatalog.headingPlans?.length ?? 0} heading plan(s), ${normalizedShardCatalog.ignoredTerms.length} ignored term(s).`
+        );
+        discoveredCatalog = mergeAnchorCatalogs(discoveredCatalog, normalizedShardCatalog);
+        report(
+          context.options,
+          "analyze",
+          `Accumulated discovery after shard ${shard.index + 1}/${shards.length}: ${discoveredCatalog.anchors.length} anchors, ${discoveredCatalog.headingPlans?.length ?? 0} heading plan(s).`
+        );
+      } catch (error) {
+        report(
+          context.options,
+          "analyze",
+          `Shard ${shard.index + 1}/${shards.length} failed, continuing with accumulated catalog: ${error instanceof Error ? error.message : String(error)}`
+        );
       }
-    });
-    const discoveredCatalog = normalizeDiscoveredAnchorCatalog(state, parseAnchorCatalog(result.text));
+    }
+
     report(
       context.options,
       "analyze",

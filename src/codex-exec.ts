@@ -29,6 +29,7 @@ export type CodexExecOptions = {
   reuseSession?: boolean;
   threadId?: string;
   reasoningEffort?: "minimal" | "low" | "medium" | "high" | "xhigh";
+  timeoutMs?: number;
 };
 
 export interface CodexExecutor {
@@ -156,8 +157,51 @@ export class DefaultCodexExecutor implements CodexExecutor {
         child.stdin.end();
 
         const exitCode = await new Promise<number>((resolve, reject) => {
-          child.once("error", reject);
-          child.once("close", (code) => resolve(code ?? 1));
+          let settled = false;
+          let timeoutHandle: NodeJS.Timeout | null = null;
+          let killHandle: NodeJS.Timeout | null = null;
+
+          const cleanup = () => {
+            if (timeoutHandle) {
+              clearTimeout(timeoutHandle);
+              timeoutHandle = null;
+            }
+            if (killHandle) {
+              clearTimeout(killHandle);
+              killHandle = null;
+            }
+          };
+
+          const rejectOnce = (error: Error) => {
+            if (settled) {
+              return;
+            }
+            settled = true;
+            cleanup();
+            reject(error);
+          };
+
+          const resolveOnce = (code: number) => {
+            if (settled) {
+              return;
+            }
+            settled = true;
+            cleanup();
+            resolve(code);
+          };
+
+          if (options.timeoutMs && options.timeoutMs > 0) {
+            timeoutHandle = setTimeout(() => {
+              child.kill("SIGTERM");
+              killHandle = setTimeout(() => {
+                child.kill("SIGKILL");
+              }, 1000);
+              rejectOnce(new CodexExecutionError(`Codex exec timed out after ${options.timeoutMs}ms.`));
+            }, options.timeoutMs);
+          }
+
+          child.once("error", (error) => rejectOnce(error));
+          child.once("close", (code) => resolveOnce(code ?? 1));
         });
 
         if (exitCode !== 0) {

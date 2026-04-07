@@ -5026,7 +5026,8 @@ test("translateMarkdownArticle reports known-entity analysis stages to progress 
 
     assert.ok(progress.some((message) => message.includes("Loading formal known_entities.")));
     assert.ok(progress.some((message) => message.includes("Matched 2 formal known_entities in source.")));
-    assert.ok(progress.some((message) => message.includes("Starting model-based anchor discovery.")));
+    assert.ok(progress.some((message) => message.includes("Planned 1 analysis shard(s)")));
+    assert.ok(progress.some((message) => message.includes("Starting model-based anchor discovery for shard 1/1")));
     assert.ok(
       progress.some((message) => message.includes("Model-based anchor discovery finished: 1 anchors, 0 heading plan(s), 0 ignored term(s)."))
     );
@@ -5039,5 +5040,99 @@ test("translateMarkdownArticle reports known-entity analysis stages to progress 
       process.env.MDZH_KNOWN_ENTITIES_CANDIDATES_PATH = previous;
     }
     await rm(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("translateMarkdownArticle shards document analysis and carries priorAccepted summary forward", async () => {
+  const previousMaxChunks = process.env.MDZH_ANALYSIS_SHARD_MAX_CHUNKS;
+  process.env.MDZH_ANALYSIS_SHARD_MAX_CHUNKS = "1";
+
+  const analysisPrompts: string[] = [];
+  const analysisReuseFlags: Array<boolean | undefined> = [];
+  const largeParagraph = "Alpha ".repeat(1200);
+
+  const source = [
+    "# Title",
+    "",
+    "## First Heading",
+    "",
+    largeParagraph,
+    "",
+    "## Second Heading",
+    "",
+    largeParagraph,
+    "",
+    "## Third Heading",
+    "",
+    largeParagraph,
+    ""
+  ].join("\n");
+
+  const executor: CodexExecutor = {
+    async execute(prompt, options) {
+      if (isDocumentAnalysisPrompt(prompt)) {
+        analysisPrompts.push(prompt);
+        analysisReuseFlags.push(options.reuseSession);
+        if (prompt.includes("First Heading") && !prompt.includes("Second Heading")) {
+          return createExecResult(
+            createAnchorCatalog([
+              {
+                english: "First Heading",
+                chineseHint: "第一个标题",
+                familyKey: "first-heading",
+                chunkId: "chunk-2",
+                segmentId: "chunk-2-segment-1"
+              }
+            ])
+          );
+        }
+        if (prompt.includes("Second Heading")) {
+          return createExecResult(
+            createAnchorCatalog([
+              {
+                english: "Second Heading",
+                chineseHint: "第二个标题",
+                familyKey: "second-heading",
+                chunkId: "chunk-3",
+                segmentId: "chunk-3-segment-1"
+              }
+            ])
+          );
+        }
+        return createExecResult(createEmptyAnchorCatalog());
+      }
+
+      if (options.outputSchema || prompt.includes('"hard_checks"') || prompt.includes("只返回 JSON")) {
+        return createExecResult(wrapAuditForSegments(prompt, createAudit(true)));
+      }
+
+      const currentTranslation = extractPromptSection(prompt, "【当前译文】");
+      if (currentTranslation !== null) {
+        return createExecResult(currentTranslation);
+      }
+
+      const sourceSection = extractPromptSection(prompt, "【英文原文】");
+      return createExecResult(sourceSection ?? "");
+    }
+  };
+
+  try {
+    await translateMarkdownArticle(source, {
+      executor,
+      formatter: async (markdown) => markdown
+    });
+
+    assert.ok(analysisPrompts.length >= 2);
+    assert.ok(analysisPrompts.every((prompt) => prompt.includes('"mode": "shard"')));
+    assert.equal(analysisReuseFlags.every((flag) => flag === false), true);
+    assert.ok(analysisPrompts[1]?.includes('"priorAccepted"'));
+    assert.ok(analysisPrompts[1]?.includes("First Heading"));
+    assert.ok(analysisPrompts[1]?.includes('"english": "First Heading"'));
+  } finally {
+    if (previousMaxChunks === undefined) {
+      delete process.env.MDZH_ANALYSIS_SHARD_MAX_CHUNKS;
+    } else {
+      process.env.MDZH_ANALYSIS_SHARD_MAX_CHUNKS = previousMaxChunks;
+    }
   }
 });

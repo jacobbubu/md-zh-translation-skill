@@ -8,7 +8,7 @@ Markdown 结构要求：
 `.trim();
 
 export const DOCUMENT_ANALYSIS_PROMPT = `
-你是一名科技与科普翻译编辑的前置分析器。请阅读下面的整篇 Markdown 文档分析输入，并只返回 JSON，不要返回散文说明。
+你是一名科技与科普翻译编辑的前置分析器。请阅读下面的 Markdown 文档分析输入（可能是整篇，也可能是带前情摘要的分片），并只返回 JSON，不要返回散文说明。
 
 目标：
 1. 找出全文里需要建立“首次中英锚定”的候选专名、产品名、机构名、项目名和关键术语。
@@ -51,6 +51,8 @@ export const DOCUMENT_ANALYSIS_PROMPT = `
 16. 对每个 segment.input.emphasisLikeSpans 中的正文强调片段，如果强调应保留，请返回一条 emphasisPlan。targetText 只写强调内部最终应出现的完整文本，不带 Markdown 标记；如果其中包含需要首现锚定的术语，targetText 应直接写出最终锚定后的文本，而不是只写未补锚的中文骨架。
 17. 如果 emphasisPlan 覆盖的片段里包含某些术语或实体，请把它们写进 governedTerms。程序会优先按 governedTerms 对 targetText 做最终锚点对齐，再恢复 \`**...**\` 结构。
 18. emphasisPlans 只用于正文/列表/引用中的可翻译强调，不用于标题整行。
+19. 如果输入里包含 priorAccepted，说明那些 anchors / headingPlans / ignoredTerms 已经被前一片分析接受。不要机械重复输出它们；只补充当前分片新增或需要修正的内容。
+20. 如果 analysisScope.mode = shard，请只根据当前分片 source 与 priorAccepted 做判断；不要臆造当前分片中不存在的 source surface form。
 
 返回格式：
 {
