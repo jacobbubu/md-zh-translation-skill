@@ -8,6 +8,7 @@ import {
   buildSegmentTaskSlice,
   createTranslationRunState,
   getSegmentState,
+  markChunkFailure,
   type AnchorCatalog
 } from "../src/translation-state.js";
 
@@ -143,6 +144,53 @@ test("translation state keeps repair tasks bound to the target segment only", ()
   assert.equal(segment.phase, "repaired");
   assert.equal(segment.currentProtectedBody, "Body (fixed)");
   assert.equal(state.repairs[0]?.status, "applied");
+});
+
+test("translation state persists chunk-level failure details for bundled audit failures", () => {
+  const state = createTranslationRunState({
+    sourcePathHint: "sample.md",
+    documentTitle: null,
+    frontmatterPresent: false,
+    protectedSpans: [],
+    chunks: [
+      {
+        source: "Body",
+        separatorAfter: "",
+        headingPath: [],
+        segments: [
+          {
+            kind: "translatable",
+            source: "Body",
+            separatorAfter: "",
+            spanIds: [],
+            headingHints: [],
+            specialNotes: []
+          }
+        ]
+      }
+    ]
+  });
+
+  markChunkFailure(state, "chunk-1", {
+    summary: "segment 1: 标题缺少英文锚定",
+    segments: [
+      {
+        segmentId: "chunk-1-segment-1",
+        segmentIndex: 1,
+        mustFix: ["标题缺少英文锚定"]
+      }
+    ]
+  });
+
+  assert.equal(state.chunks[0]?.phase, "failed");
+  assert.equal(state.chunks[0]?.lastFailure?.summary, "segment 1: 标题缺少英文锚定");
+  assert.deepEqual(state.chunks[0]?.lastFailure?.segments, [
+    {
+      segmentId: "chunk-1-segment-1",
+      segmentIndex: 1,
+      mustFix: ["标题缺少英文锚定"]
+    }
+  ]);
 });
 
 test("translation state coalesces a shorter required anchor when a longer same-segment phrase already covers it", () => {

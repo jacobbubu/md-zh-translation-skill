@@ -41,6 +41,7 @@ import {
   createTranslationRunState,
   getChunkSegments,
   getSegmentState,
+  markChunkFailure,
   markChunkPhase,
   markSegmentStyled,
   setChunkFinalBody,
@@ -1659,11 +1660,28 @@ async function translateProtectedChunk(
   }
 
   if (!isBundledHardPass(bundledAudit)) {
-    markChunkPhase(context.state, context.chunkId, "failed");
-    const remaining = bundledAudit.segments
+    const failedSegments = bundledAudit.segments
       .filter((audit) => !isHardPass(audit))
-      .map((audit) => `segment ${audit.segment_index}: ${audit.must_fix.join(" | ") || "hard gate failed"}`)
+      .map((audit) => {
+        const draftedSegment = draftedSegments.find((item) => item.segment.index + 1 === audit.segment_index);
+        return {
+          segmentId: draftedSegment?.segmentId ?? null,
+          segmentIndex: audit.segment_index,
+          mustFix: audit.must_fix.length > 0 ? [...audit.must_fix] : ["hard gate failed"]
+        };
+      });
+    const remaining = failedSegments
+      .map((audit) => `segment ${audit.segmentIndex}: ${audit.mustFix.join(" | ")}`)
       .join(" || ");
+    markChunkFailure(context.state, context.chunkId, {
+      summary: remaining,
+      segments: failedSegments
+    });
+    report(
+      context.options,
+      "audit",
+      `Chunk ${chunkPromptContext.chunkIndex}/${plan.chunks.length}${chunkLabel} failed after ${repairCyclesUsed} repair cycle(s): ${remaining}`
+    );
     throw new HardGateError(
       `Chunk ${chunkPromptContext.chunkIndex}/${plan.chunks.length}${chunkLabel} failed after ${repairCyclesUsed} repair cycle(s): ${remaining}`
     );

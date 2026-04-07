@@ -125,6 +125,14 @@ export type ChunkState = {
   segmentIds: string[];
   phase: ChunkPhase;
   finalBody: string | null;
+  lastFailure: {
+    summary: string;
+    segments: Array<{
+      segmentId: string | null;
+      segmentIndex: number;
+      mustFix: string[];
+    }>;
+  } | null;
 };
 
 export type TranslationRunState = {
@@ -284,7 +292,8 @@ export function createTranslationRunState(input: CreateTranslationRunStateInput)
       separatorAfter: chunkSeed.separatorAfter,
       segmentIds,
       phase: "pending",
-      finalBody: null
+      finalBody: null,
+      lastFailure: null
     });
   }
 
@@ -459,10 +468,35 @@ export function markChunkPhase(state: TranslationRunState, chunkId: string, phas
   getChunkState(state, chunkId).phase = phase;
 }
 
+export function markChunkFailure(
+  state: TranslationRunState,
+  chunkId: string,
+  payload: {
+    summary: string;
+    segments: Array<{
+      segmentId: string | null;
+      segmentIndex: number;
+      mustFix: string[];
+    }>;
+  }
+): void {
+  const chunk = getChunkState(state, chunkId);
+  chunk.phase = "failed";
+  chunk.lastFailure = {
+    summary: payload.summary,
+    segments: payload.segments.map((segment) => ({
+      segmentId: segment.segmentId,
+      segmentIndex: segment.segmentIndex,
+      mustFix: [...segment.mustFix]
+    }))
+  };
+}
+
 export function setChunkFinalBody(state: TranslationRunState, chunkId: string, body: string): void {
   const chunk = getChunkState(state, chunkId);
   chunk.finalBody = body;
   chunk.phase = "completed";
+  chunk.lastFailure = null;
 }
 
 function buildAnchorState(
