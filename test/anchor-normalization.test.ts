@@ -40,11 +40,13 @@ function createSlice(overrides: Partial<PromptSlice>): PromptSlice {
     segmentIndex: 1,
     headingPath: ["Sample"],
     headingHints: [],
+    headingPlans: [],
     requiredAnchors: [],
     repeatAnchors: [],
     establishedAnchors: [],
     protectedSpanIds: [],
     pendingRepairs: [],
+    headingPlanGovernedAnchorIds: [],
     ...overrides
   };
 }
@@ -102,6 +104,29 @@ test("normalizeSegmentAnchorText strips freshness prefixes from chinese-primary 
     normalized,
     "Claude Code 的沙箱模式（sandbox mode）用一种更有创新性的方式同时解决了这两个问题。"
   );
+});
+
+test("normalizeHeadingLikeAnchorText treats targetHeading as terminal for governed titles", () => {
+  const slice = createSlice({
+    headingPlans: [
+      {
+        headingIndex: 1,
+        sourceHeading: "Claude Code Permission Problem",
+        strategy: "natural-heading",
+        targetHeading: "Claude Code 的权限问题",
+        governedTerms: ["Claude Code", "Permission Problem"]
+      }
+    ],
+    requiredAnchors: [createAnchor("anchor-1", "Permission Problem", "权限问题")]
+  });
+
+  const normalized = normalizeHeadingLikeAnchorText(
+    "## Claude Code Permission Problem",
+    "## Claude Code 的权限问题",
+    slice
+  );
+
+  assert.equal(normalized, "## Claude Code 的权限问题");
 });
 
 test("normalizeSegmentAnchorText moves chinese-primary inline explanations outside the anchor parentheses", () => {

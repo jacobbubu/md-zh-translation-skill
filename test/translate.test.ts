@@ -31,6 +31,7 @@ function isBundledAuditPrompt(prompt: string, options: CodexExecOptions): boolea
 function createEmptyAnchorCatalog(): string {
   return JSON.stringify({
     anchors: [],
+    headingPlans: [],
     ignoredTerms: []
   });
 }
@@ -44,7 +45,20 @@ function createAnchorCatalog(
     displayPolicy?: "auto" | "acronym-compound" | "english-only" | "english-primary" | "chinese-primary";
     chunkId?: string;
     segmentId?: string;
-  }>
+  }>,
+  headingPlans: Array<{
+    chunkId: string;
+    segmentId: string;
+    headingIndex?: number;
+    sourceHeading: string;
+    strategy: "none" | "concept" | "source-template" | "mixed-qualifier" | "natural-heading";
+    targetHeading?: string;
+    governedTerms?: string[];
+    english?: string;
+    chineseHint?: string;
+    category?: string;
+    displayPolicy?: "auto" | "acronym-compound" | "english-only" | "english-primary" | "chinese-primary";
+  }> = []
 ): string {
   return JSON.stringify({
     anchors: anchors.map((anchor) => ({
@@ -57,6 +71,19 @@ function createAnchorCatalog(
         chunkId: anchor.chunkId ?? "chunk-1",
         segmentId: anchor.segmentId ?? "chunk-1-segment-1"
       }
+    })),
+    headingPlans: headingPlans.map((plan) => ({
+      chunkId: plan.chunkId,
+      segmentId: plan.segmentId,
+      headingIndex: plan.headingIndex ?? null,
+      sourceHeading: plan.sourceHeading,
+      strategy: plan.strategy,
+      targetHeading: plan.targetHeading ?? null,
+      governedTerms: plan.governedTerms ?? null,
+      english: plan.english ?? null,
+      chineseHint: plan.chineseHint ?? null,
+      category: plan.category ?? null,
+      displayPolicy: plan.displayPolicy ?? null
     })),
     ignoredTerms: []
   });
@@ -271,6 +298,7 @@ function createMinimalChunkPromptContext(
     chunkCount: 1,
     sourcePathHint: "article.md",
     segmentHeadings: [],
+    headingPlanSummaries: [],
     requiredAnchors: [],
     repeatAnchors: [],
     establishedAnchors: [],
@@ -4692,6 +4720,120 @@ test("translateMarkdownArticle restores heading hints through planning before re
   assert.match(result.markdown, /\*\*路径（Paths）：\*\*/);
 });
 
+test("translateMarkdownArticle prefers LLM heading plans over heuristic heading planning", async () => {
+  const source = ["# Title", "", "**Glob Patterns:**", "", "**Examples:**", ""].join("\n");
+  let auditedTranslation = "";
+
+  const result = await translateMarkdownArticle(source, {
+    executor: {
+      async execute(prompt, options) {
+        if (isDocumentAnalysisPrompt(prompt)) {
+          return createExecResult(
+            createAnchorCatalog(
+              [],
+              [
+                {
+                  chunkId: "chunk-1",
+                  segmentId: "chunk-1-segment-1",
+                  headingIndex: 1,
+                  sourceHeading: "Glob Patterns:",
+                  strategy: "mixed-qualifier",
+                  targetHeading: "Glob 模式（Patterns）：",
+                  governedTerms: ["Patterns"],
+                  english: "Patterns",
+                  chineseHint: "模式",
+                  displayPolicy: "chinese-primary"
+                },
+                {
+                  chunkId: "chunk-1",
+                  segmentId: "chunk-1-segment-1",
+                  headingIndex: 2,
+                  sourceHeading: "Examples:",
+                  strategy: "none",
+                  targetHeading: "示例：",
+                  governedTerms: []
+                }
+              ]
+            )
+          );
+        }
+
+        if (options.outputSchema || prompt.includes('"hard_checks"') || prompt.includes("只返回 JSON")) {
+          auditedTranslation = extractPromptSection(prompt, "【当前译文】") ?? "";
+          return createExecResult(wrapAuditForSegments(prompt, createAudit(true)));
+        }
+
+        const currentTranslation = extractPromptSection(prompt, "【当前译文】");
+        if (currentTranslation !== null) {
+          return createExecResult(currentTranslation);
+        }
+
+        return createExecResult(["# Title", "", "**Glob 模式：**", "", "**示例：**", ""].join("\n"));
+      }
+    },
+    formatter: async (markdown) => markdown
+  });
+
+  assert.match(auditedTranslation, /\*\*Glob 模式（Patterns）：\*\*/);
+  assert.match(auditedTranslation, /\*\*示例：\*\*/);
+  assert.match(result.markdown, /\*\*Glob 模式（Patterns）：\*\*/);
+  assert.match(result.markdown, /\*\*示例：\*\*/);
+});
+
+test("translateMarkdownArticle executes LLM natural-heading plans directly", async () => {
+  const source = ["# Title", "", "## Claude Code Permission Problem", ""].join("\n");
+  let auditedTranslation = "";
+
+  const result = await translateMarkdownArticle(source, {
+    executor: {
+      async execute(prompt, options) {
+        if (isDocumentAnalysisPrompt(prompt)) {
+          return createExecResult(
+            createAnchorCatalog(
+              [
+                {
+                  english: "Claude Code Sandbox",
+                  chineseHint: "沙盒模式",
+                  familyKey: "claude code sandbox mode",
+                  displayPolicy: "chinese-primary"
+                }
+              ],
+              [
+                {
+                  chunkId: "chunk-1",
+                  segmentId: "chunk-1-segment-1",
+                  headingIndex: 1,
+                  sourceHeading: "Claude Code Permission Problem",
+                  strategy: "natural-heading",
+                  targetHeading: "Claude Code 的权限问题",
+                  governedTerms: ["Claude Code", "Permission Problem"]
+                }
+              ]
+            )
+          );
+        }
+
+        if (options.outputSchema || prompt.includes('"hard_checks"') || prompt.includes("只返回 JSON")) {
+          auditedTranslation = extractPromptSection(prompt, "【当前译文】") ?? "";
+          return createExecResult(wrapAuditForSegments(prompt, createAudit(true)));
+        }
+
+        const currentTranslation = extractPromptSection(prompt, "【当前译文】");
+        if (currentTranslation !== null) {
+          return createExecResult(currentTranslation);
+        }
+
+        return createExecResult(["# Title", "", "## 权限问题", ""].join("\n"));
+      }
+    },
+    formatter: async (markdown) => markdown
+  });
+
+  assert.match(auditedTranslation, /## Claude Code 的权限问题/);
+  assert.doesNotMatch(auditedTranslation, /Permission Problem/u);
+  assert.match(result.markdown, /## Claude Code 的权限问题/);
+});
+
 test("translateMarkdownArticle does not inject required anchors into command phrases", async () => {
   const source = ["**Commands:**", "", "- git status, git log, git diff", "- python script.py (runs code in project)", ""].join(
     "\n"
@@ -4807,9 +4949,11 @@ test("translateMarkdownArticle reports known-entity analysis stages to progress 
     assert.ok(progress.some((message) => message.includes("Loading formal known_entities.")));
     assert.ok(progress.some((message) => message.includes("Matched 2 formal known_entities in source.")));
     assert.ok(progress.some((message) => message.includes("Starting model-based anchor discovery.")));
-    assert.ok(progress.some((message) => message.includes("Model-based anchor discovery finished: 1 anchors, 0 ignored term(s).")));
+    assert.ok(
+      progress.some((message) => message.includes("Model-based anchor discovery finished: 1 anchors, 0 heading plan(s), 0 ignored term(s)."))
+    );
     assert.ok(progress.some((message) => message.includes("Wrote 1 known_entity candidate(s) to")));
-    assert.ok(progress.some((message) => message.includes("Merged formal and discovered anchors: 3 total.")));
+    assert.ok(progress.some((message) => message.includes("Merged formal and discovered anchors: 3 total, 0 heading plan(s).")));
   } finally {
     if (previous === undefined) {
       delete process.env.MDZH_KNOWN_ENTITIES_CANDIDATES_PATH;

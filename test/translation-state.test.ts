@@ -587,6 +587,135 @@ test("translation state synthesizes heading-local anchors directly from heading 
   );
 });
 
+test("translation state prefers LLM heading plans over heuristic heading planning", () => {
+  const state = createTranslationRunState({
+    sourcePathHint: "sample.md",
+    documentTitle: "Sample",
+    frontmatterPresent: false,
+    protectedSpans: [],
+    chunks: [
+      {
+        source: "**Glob Patterns:**\n\n**Examples:**",
+        separatorAfter: "",
+        headingPath: ["Sample"],
+        segments: [
+          {
+            kind: "translatable",
+            source: "**Glob Patterns:**\n\n**Examples:**",
+            separatorAfter: "",
+            spanIds: [],
+            headingHints: ["Glob Patterns:", "Examples:"],
+            specialNotes: []
+          }
+        ]
+      }
+    ]
+  });
+
+  applyAnchorCatalog(state, {
+    anchors: [],
+    headingPlans: [
+      {
+        chunkId: "chunk-1",
+        segmentId: "chunk-1-segment-1",
+        headingIndex: 1,
+        sourceHeading: "Glob Patterns:",
+        strategy: "mixed-qualifier",
+        targetHeading: "Glob 模式（Patterns）：",
+        governedTerms: ["Patterns"],
+        english: "Patterns",
+        chineseHint: "模式",
+        displayPolicy: "chinese-primary"
+      },
+      {
+        chunkId: "chunk-1",
+        segmentId: "chunk-1-segment-1",
+        headingIndex: 2,
+        sourceHeading: "Examples:",
+        strategy: "none",
+        targetHeading: "示例："
+      }
+    ],
+    ignoredTerms: []
+  });
+
+  const slice = buildSegmentTaskSlice(state, "chunk-1", "chunk-1-segment-1", {
+    currentRestoredBody: "**Glob 模式：**\n\n**示例：**"
+  });
+
+  assert.deepEqual(
+    slice.requiredAnchors.map((anchor) => [anchor.english, anchor.chineseHint]),
+    [["Patterns", "模式"]]
+  );
+  assert.deepEqual(
+    slice.headingPlans.map((plan) => [plan.sourceHeading, plan.strategy, plan.targetHeading ?? ""]),
+    [
+      ["Glob Patterns:", "mixed-qualifier", "Glob 模式（Patterns）："],
+      ["Examples:", "none", "示例："]
+    ]
+  );
+});
+
+test("translation state suppresses conflicting global heading anchors when a headingPlan target governs the title", () => {
+  const state = createTranslationRunState({
+    sourcePathHint: "sample.md",
+    documentTitle: "Sample",
+    frontmatterPresent: false,
+    protectedSpans: [],
+    chunks: [
+      {
+        source: "## Claude Code Permission Problem",
+        separatorAfter: "",
+        headingPath: ["Sample"],
+        segments: [
+          {
+            kind: "translatable",
+            source: "## Claude Code Permission Problem",
+            separatorAfter: "",
+            spanIds: [],
+            headingHints: ["Claude Code Permission Problem"],
+            specialNotes: []
+          }
+        ]
+      }
+    ]
+  });
+
+  applyAnchorCatalog(state, {
+    anchors: [
+      {
+        english: "Permission Problem",
+        chineseHint: "权限问题",
+        familyKey: "permission problem",
+        displayPolicy: "chinese-primary",
+        sourceForms: ["Permission Problem"],
+        firstOccurrence: {
+          chunkId: "chunk-1",
+          segmentId: "chunk-1-segment-1"
+        }
+      }
+    ],
+    headingPlans: [
+      {
+        chunkId: "chunk-1",
+        segmentId: "chunk-1-segment-1",
+        headingIndex: 1,
+        sourceHeading: "Claude Code Permission Problem",
+        strategy: "natural-heading",
+        targetHeading: "Claude Code 的权限问题",
+        governedTerms: ["Claude Code", "Permission Problem"]
+      }
+    ],
+    ignoredTerms: []
+  });
+
+  const slice = buildSegmentTaskSlice(state, "chunk-1", "chunk-1-segment-1");
+
+  assert.deepEqual(slice.requiredAnchors, []);
+  assert.deepEqual(slice.headingPlanGovernedAnchorIds, ["anchor-1"]);
+  assert.equal(slice.headingPlans[0]?.targetHeading, "Claude Code 的权限问题");
+});
+
 test("translation state exposes canonical display metadata for english-primary anchors", () => {
   const state = createTranslationRunState({
     sourcePathHint: "sample.md",

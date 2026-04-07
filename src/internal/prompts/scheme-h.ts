@@ -15,7 +15,8 @@ export const DOCUMENT_ANALYSIS_PROMPT = `
 2. 标出它们在全文中的首次出现位置（chunkId + segmentId）。
 3. 将同一概念家族的不同英文变体归并到同一个 familyKey。
 4. 如果你能高置信判断其首现显示策略，请额外给出 displayPolicy。
-5. 对明显不需要强制双语锚定的通用词，放进 ignoredTerms。
+5. 对标题（ATX 标题或单独成行的加粗标题）额外输出 headingPlans，让你来判定哪种恢复策略最合理，并直接给出目标标题文本。
+6. 对明显不需要强制双语锚定的通用词，放进 ignoredTerms。
 
 要求：
 1. 只返回 JSON。
@@ -35,6 +36,17 @@ export const DOCUMENT_ANALYSIS_PROMPT = `
 7. 只有真正需要首现双语锚定的项才放进 anchors。像 Earth、reptiles、paleontologist 这类通用名词、职业称谓、类群名或常见科学词，通常应放进 ignoredTerms。
 8. 如果同一项在标题、引用、列表项和正文中都出现，首次出现位置必须精确落在最先出现的那个 chunkId / segmentId。
 9. 不要输出重复的 anchors。
+10. 对每个 segment.input.headingLikeLines 中的标题，都应返回一条 headingPlans；即使该标题不需要补锚，也要返回 strategy = none 或 natural-heading。
+11. headingPlans 用于判定标题恢复策略，不等于把标题直接提升成全局 anchor。只有你确认标题里的术语需要参与恢复时，才填写 english / chineseHint。
+12. headingPlans.strategy 可选值：
+   - none：纯结构标题，不需要补锚，如 Examples / Notes
+   - concept：标题应恢复成标准双语概念标题
+   - source-template：标题应保留 source 模板，不要再注入中文说明
+   - mixed-qualifier：标题里只有后缀通用词需要补锚，如 Glob Patterns -> Patterns / 模式
+   - natural-heading：标题应自然译成中文，只保留真正需要保留的实体或产品名，不强制给普通说明性尾部补英文
+13. 对每条 headingPlans，都尽量给出 targetHeading：这是你认为最终最合理的标题文本（不带 Markdown 标记，但应包含你希望保留的冒号、括号和双语形式）。程序会优先执行 targetHeading。
+14. 如果标题像 “Claude Code Permission Problem” 这样是“实体名 + 普通说明性短语”，通常应判成 natural-heading，例如 targetHeading = "Claude Code 的权限问题"，而不是强行把 “Permission Problem” 做成双语术语标题。
+15. 如果标题里某些术语或实体的处理方式已经由这条 headingPlan 决定，请把它们写进 governedTerms。后续审校会以 governedTerms + targetHeading 为准，不再让全局 anchor 对同一标题追加冲突要求。
 
 返回格式：
 {
@@ -48,6 +60,38 @@ export const DOCUMENT_ANALYSIS_PROMPT = `
         "chunkId": "chunk-3",
         "segmentId": "chunk-3-segment-1"
       }
+    }
+  ],
+  "headingPlans": [
+    {
+      "chunkId": "chunk-16",
+      "segmentId": "chunk-16-segment-1",
+      "headingIndex": 1,
+      "sourceHeading": "Glob Patterns:",
+      "strategy": "mixed-qualifier",
+      "targetHeading": "Glob 模式（Patterns）：",
+      "governedTerms": ["Patterns"],
+      "english": "Patterns",
+      "chineseHint": "模式",
+      "displayPolicy": "chinese-primary"
+    },
+    {
+      "chunkId": "chunk-2",
+      "segmentId": "chunk-2-segment-1",
+      "headingIndex": 1,
+      "sourceHeading": "Claude Code Permission Problem",
+      "strategy": "natural-heading",
+      "targetHeading": "Claude Code 的权限问题",
+      "governedTerms": ["Claude Code", "Permission Problem"]
+    },
+    {
+      "chunkId": "chunk-16",
+      "segmentId": "chunk-16-segment-1",
+      "headingIndex": 2,
+      "sourceHeading": "Examples:",
+      "strategy": "none",
+      "targetHeading": "示例：",
+      "governedTerms": []
     }
   ],
   "ignoredTerms": [

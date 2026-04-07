@@ -47,6 +47,7 @@ import {
   setChunkFinalBody,
   type AnchorCatalog,
   type AnalysisAnchor,
+  type AnalysisHeadingPlan,
   type AuditCheckKey as StateAuditCheckKey,
   type ChunkSeed,
   type PromptSlice,
@@ -180,7 +181,7 @@ const BUNDLED_GATE_AUDIT_SCHEMA = {
 const ANCHOR_CATALOG_SCHEMA = {
   type: "object",
   additionalProperties: false,
-  required: ["anchors", "ignoredTerms"],
+  required: ["anchors", "headingPlans", "ignoredTerms"],
   properties: {
     anchors: {
       type: "array",
@@ -232,6 +233,68 @@ const ANCHOR_CATALOG_SCHEMA = {
               chunkId: { type: "string" },
               segmentId: { type: "string" }
             }
+          }
+        }
+      }
+    },
+    headingPlans: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: [
+          "chunkId",
+          "segmentId",
+          "headingIndex",
+          "sourceHeading",
+          "strategy",
+          "targetHeading",
+          "governedTerms",
+          "english",
+          "chineseHint",
+          "category",
+          "displayPolicy"
+        ],
+        properties: {
+          chunkId: { type: "string" },
+          segmentId: { type: "string" },
+          headingIndex: {
+            anyOf: [{ type: "integer", minimum: 1 }, { type: "null" }]
+          },
+          sourceHeading: { type: "string" },
+          strategy: {
+            type: "string",
+            enum: ["none", "concept", "source-template", "mixed-qualifier", "natural-heading"]
+          },
+          targetHeading: {
+            anyOf: [{ type: "string" }, { type: "null" }]
+          },
+          governedTerms: {
+            anyOf: [
+              {
+                type: "array",
+                items: { type: "string" }
+              },
+              { type: "null" }
+            ]
+          },
+          english: {
+            anyOf: [{ type: "string" }, { type: "null" }]
+          },
+          chineseHint: {
+            anyOf: [{ type: "string" }, { type: "null" }]
+          },
+          category: {
+            anyOf: [{ type: "string" }, { type: "null" }]
+          },
+          displayPolicy: {
+            anyOf: [
+              {
+                type: "string",
+                enum: ["auto", "acronym-compound", "english-only", "english-primary", "chinese-primary"]
+              },
+              { type: "null" }
+            ]
           }
         }
       }
@@ -458,6 +521,58 @@ function parseAnchorCatalog(text: string): AnchorCatalog {
     return parsedAnchor;
   });
 
+  const headingPlans = (Array.isArray(data.headingPlans) ? data.headingPlans : []).map((item, index) => {
+    if (!item || typeof item !== "object") {
+      throw new HardGateError(`Anchor catalog headingPlans[${index}] is not an object.`);
+    }
+    const plan = item as Record<string, unknown>;
+    if (
+      typeof plan.chunkId !== "string" ||
+      typeof plan.segmentId !== "string" ||
+      typeof plan.sourceHeading !== "string" ||
+      typeof plan.strategy !== "string"
+    ) {
+      throw new HardGateError(`Anchor catalog headingPlans[${index}] has an invalid shape.`);
+    }
+
+    const parsedPlan: AnalysisHeadingPlan = {
+      chunkId: plan.chunkId.trim(),
+      segmentId: plan.segmentId.trim(),
+      sourceHeading: plan.sourceHeading.trim(),
+      strategy: plan.strategy as AnalysisHeadingPlan["strategy"]
+    };
+
+    if (typeof plan.headingIndex === "number" && Number.isInteger(plan.headingIndex) && plan.headingIndex >= 1) {
+      parsedPlan.headingIndex = plan.headingIndex;
+    }
+    if (typeof plan.targetHeading === "string" && plan.targetHeading.trim()) {
+      parsedPlan.targetHeading = plan.targetHeading.trim();
+    }
+    if (Array.isArray(plan.governedTerms)) {
+      const governedTerms = plan.governedTerms
+        .filter((item): item is string => typeof item === "string")
+        .map((item) => item.trim())
+        .filter(Boolean);
+      if (governedTerms.length > 0) {
+        parsedPlan.governedTerms = governedTerms;
+      }
+    }
+    if (typeof plan.english === "string" && plan.english.trim()) {
+      parsedPlan.english = plan.english.trim();
+    }
+    if (typeof plan.chineseHint === "string" && plan.chineseHint.trim()) {
+      parsedPlan.chineseHint = plan.chineseHint.trim();
+    }
+    if (typeof plan.category === "string" && plan.category.trim()) {
+      parsedPlan.category = plan.category.trim();
+    }
+    if (typeof plan.displayPolicy === "string") {
+      parsedPlan.displayPolicy = plan.displayPolicy as NonNullable<AnalysisHeadingPlan["displayPolicy"]>;
+    }
+
+    return parsedPlan;
+  });
+
   const ignoredTerms = data.ignoredTerms.map((item, index) => {
     if (!item || typeof item !== "object") {
       throw new HardGateError(`Anchor catalog ignoredTerms[${index}] is not an object.`);
@@ -473,7 +588,7 @@ function parseAnchorCatalog(text: string): AnchorCatalog {
     };
   });
 
-  return { anchors, ignoredTerms };
+  return { anchors, headingPlans, ignoredTerms };
 }
 
 function isHardPass(audit: GateAudit): boolean {
@@ -527,6 +642,10 @@ function buildDocumentAnalysisInput(state: TranslationRunState): string {
           index: segment.index + 1,
           kind: segment.kind,
           headingHints: segment.headingHints,
+          headingLikeLines: segment.headingHints.map((heading, index) => ({
+            index: index + 1,
+            sourceHeading: heading
+          })),
           source: segment.source
         }))
       }))
@@ -534,6 +653,10 @@ function buildDocumentAnalysisInput(state: TranslationRunState): string {
     null,
     2
   );
+}
+
+function countHeadingLikeLines(state: TranslationRunState): number {
+  return state.segments.reduce((count, segment) => count + segment.headingHints.length, 0);
 }
 
 async function analyzeDocumentForAnchors(
@@ -568,7 +691,7 @@ async function analyzeDocumentForAnchors(
     report(
       context.options,
       "analyze",
-      `Model-based anchor discovery finished: ${discoveredCatalog.anchors.length} anchors, ${discoveredCatalog.ignoredTerms.length} ignored term(s).`
+      `Model-based anchor discovery finished: ${discoveredCatalog.anchors.length} anchors, ${discoveredCatalog.headingPlans?.length ?? 0} heading plan(s), ${discoveredCatalog.ignoredTerms.length} ignored term(s).`
     );
     const candidateWrite = await writeKnownEntityCandidatesIfRequested(discoveredCatalog, knownEntities);
     if (candidateWrite.written) {
@@ -582,7 +705,12 @@ async function analyzeDocumentForAnchors(
     report(
       context.options,
       "analyze",
-      `Merged formal and discovered anchors: ${mergedCatalog.anchors.length} total.`
+      `Merged formal and discovered anchors: ${mergedCatalog.anchors.length} total, ${mergedCatalog.headingPlans?.length ?? 0} heading plan(s).`
+    );
+    report(
+      context.options,
+      "analyze",
+      `Heading plan coverage: ${mergedCatalog.headingPlans?.length ?? 0}/${countHeadingLikeLines(state)} heading-like line(s).`
     );
     return mergedCatalog;
   } catch (error) {
@@ -787,6 +915,11 @@ function summarizePromptAnchor(anchor: PromptSlice["requiredAnchors"][number]): 
   return `${canonical || "未定中文"} [display=${mode}]`;
 }
 
+function summarizeHeadingPlan(plan: PromptSlice["headingPlans"][number]): string {
+  const governed = plan.governedTerms?.length ? plan.governedTerms.join(", ") : "无";
+  return `${plan.sourceHeading} -> strategy=${plan.strategy}; target=${plan.targetHeading?.trim() || "无"}; governed=${governed}`;
+}
+
 function buildSegmentPromptContext(
   state: TranslationRunState,
   chunk: MarkdownChunk,
@@ -803,6 +936,7 @@ function buildSegmentPromptContext(
     chunkCount: plan.chunks.length,
     sourcePathHint,
     segmentHeadings: extractSegmentHeadingHints(source),
+    headingPlanSummaries: slice.headingPlans.map(summarizeHeadingPlan),
     specialNotes: extractSegmentSpecialNotes(source),
     requiredAnchors: slice.requiredAnchors.map(summarizePromptAnchor),
     repeatAnchors: slice.repeatAnchors.map(summarizePromptAnchor),
@@ -831,6 +965,7 @@ function buildChunkStylePromptContext(
     chunkCount: plan.chunks.length,
     sourcePathHint,
     segmentHeadings: extractSegmentHeadingHints(source),
+    headingPlanSummaries: [],
     specialNotes: extractSegmentSpecialNotes(source),
     requiredAnchors: [],
     repeatAnchors: [],
@@ -3266,6 +3401,7 @@ export type ChunkPromptContext = {
   chunkCount: number;
   sourcePathHint: string;
   segmentHeadings: string[];
+  headingPlanSummaries: string[];
   requiredAnchors: string[];
   repeatAnchors: string[];
   establishedAnchors: string[];
@@ -3284,6 +3420,8 @@ function withChunkContextAt(prompt: string, context: ChunkPromptContext, marker:
   const documentTitle = context.documentTitle ?? "无标题";
   const segmentHeadings =
     context.segmentHeadings.length > 0 ? context.segmentHeadings.join(" | ") : "无显式标题";
+  const headingPlanSummaries =
+    context.headingPlanSummaries.length > 0 ? context.headingPlanSummaries.join(" | ") : "无标题计划";
   const requiredAnchors = context.requiredAnchors.length > 0 ? context.requiredAnchors.join(" | ") : "无";
   const repeatAnchors = context.repeatAnchors.length > 0 ? context.repeatAnchors.join(" | ") : "无";
   const establishedAnchors =
@@ -3297,6 +3435,7 @@ function withChunkContextAt(prompt: string, context: ChunkPromptContext, marker:
     `当前分块：第 ${context.chunkIndex} / ${context.chunkCount} 块`,
     `当前章节路径：${headingPath}`,
     `当前分段标题：${segmentHeadings}`,
+    `当前分段标题计划：${headingPlanSummaries}`,
     `当前分段必须建立的首现锚点：${requiredAnchors}`,
     `当前分段里已在前文建立过、禁止重复补锚的项目：${repeatAnchors}`,
     `全文已建立的锚点摘要：${establishedAnchors}`,
@@ -3305,6 +3444,9 @@ function withChunkContextAt(prompt: string, context: ChunkPromptContext, marker:
     stateSliceJson,
     "说明：当前输入只覆盖全文的一部分。请保持术语、专名、语气和上下文的一致性，不要补写未出现在当前分块中的段落。",
     "requiredAnchors 表示：这些专名、产品名、项目名或关键术语必须在当前分段本身建立或保持合法的首现显示形式。",
+    "如果 stateSlice.headingPlans 为某个标题给出了 targetHeading，则该标题的语义与最终目标文本由 headingPlan 决定；不要再让全局 anchor 对同一标题追加冲突的中英锚定要求。",
+    "如果 headingPlan 同时给出了 governedTerms，则这些术语在对应标题里的处理方式已经由该计划决定；审校时不要再按全局 anchor 对该标题单独追加强制格式。",
+    "标题场景下，headingPlan 的 targetHeading 优先于全局 anchor catalog；全局 anchor 只能为没有 targetHeading 的标题补充约束。",
     "如果 stateSlice.requiredAnchors 给出了 canonicalDisplay 或 allowedDisplayForms，则这些形式就是当前分段可接受的合法锚定结果；像“Claude（Anthropic 的 AI 助手）”这类英文原名（中文说明）形式，或像“Claude”这类允许裸英文首现的形式，都视为已经完成首现锚定，不得再按“缺少英文对照”判错。",
     "repeatAnchors 表示：这些项目已经在全文前文完成首现锚定，即使它们在当前分块标题、加粗标题、列表项标题或正文里是本块第一次出现，也不得再补首现中英文对照。",
     "pendingRepairs 表示：这些修复任务已经绑定到当前分段，修复时必须就地完成，不要把锚点挪到别处。",

@@ -215,6 +215,9 @@ export function normalizeHeadingLikeAnchorText(
     return text;
   }
 
+  const planNormalized = applyHeadingPlanTargets(source, text, slice.headingPlans);
+  text = planNormalized;
+
   const requiredAnchors = dedupePromptAnchors(slice.requiredAnchors).sort(
     (left, right) => right.english.length - left.english.length
   );
@@ -250,6 +253,10 @@ export function normalizeHeadingLikeAnchorText(
   for (let index = 0; index < Math.min(sourceHeadingLines.length, translatedHeadingLines.length); index += 1) {
     const sourceLine = sourceHeadingLines[index]!;
     const translatedLine = translatedHeadingLines[index]!;
+    const terminalPlan = findTerminalHeadingPlan(slice.headingPlans, sourceLine, index);
+    if (terminalPlan) {
+      continue;
+    }
     let normalizedLine = translatedLine.raw;
 
     const allHeadingAnchors = requiredAnchors.filter((anchor) =>
@@ -334,6 +341,8 @@ export function normalizeExplicitRepairAnchorText(
     return text;
   }
 
+  text = applyHeadingPlanTargets(source, text, slice.headingPlans);
+
   const targets = slice.pendingRepairs
     .map((repair) => parseExplicitRepairTarget(repair.instruction))
     .filter((target): target is ExplicitRepairTarget => target !== null);
@@ -354,6 +363,9 @@ export function normalizeExplicitRepairAnchorText(
     for (const target of targets) {
       const sourceHeading = extractHeadingLikeLine(sourceLine);
       const translatedHeading = extractHeadingLikeLine(translatedLine);
+      if (sourceHeading && translatedHeading && findTerminalHeadingPlan(slice.headingPlans, sourceHeading)) {
+        continue;
+      }
 
       const matchingAnchor = resolvePromptAnchorForExplicitRepair(target, slice);
       const english =
@@ -487,6 +499,94 @@ export function normalizeExplicitRepairAnchorText(
   }
 
   return changed ? translatedLines.join("\n") : text;
+}
+
+function applyHeadingPlanTargets(
+  source: string,
+  text: string,
+  headingPlans: PromptSlice["headingPlans"]
+): string {
+  if (headingPlans.length === 0) {
+    return text;
+  }
+
+  const sourceHeadingLines = extractHeadingLikeLines(source);
+  const translatedHeadingLines = extractHeadingLikeLines(text);
+  if (sourceHeadingLines.length === 0 || translatedHeadingLines.length === 0) {
+    return text;
+  }
+
+  const normalizedPlans = headingPlans
+    .filter((plan) => plan.targetHeading?.trim())
+    .map((plan) => ({
+      ...plan,
+      targetHeading: plan.targetHeading!.trim()
+    }));
+  if (normalizedPlans.length === 0) {
+    return text;
+  }
+
+  let normalized = text;
+  const usedPlans = new Set<number>();
+
+  for (let index = 0; index < Math.min(sourceHeadingLines.length, translatedHeadingLines.length); index += 1) {
+    const sourceHeading = sourceHeadingLines[index]!;
+    const translatedHeading = translatedHeadingLines[index]!;
+    const matchingPlan =
+      normalizedPlans.find(
+        (plan) =>
+          typeof plan.headingIndex === "number" &&
+          plan.headingIndex === index + 1 &&
+          normalizeHeadingPlanKey(plan.sourceHeading) === normalizeHeadingPlanKey(sourceHeading.content)
+      ) ??
+      normalizedPlans.find(
+        (plan) =>
+          !usedPlans.has(normalizedPlans.indexOf(plan)) &&
+          normalizeHeadingPlanKey(plan.sourceHeading) === normalizeHeadingPlanKey(sourceHeading.content)
+      );
+
+    if (!matchingPlan || !matchingPlan.targetHeading) {
+      continue;
+    }
+
+    const targetHeading = matchingPlan.targetHeading;
+    if (translatedHeading.content === targetHeading) {
+      usedPlans.add(normalizedPlans.indexOf(matchingPlan));
+      continue;
+    }
+
+    normalized = normalized.replace(translatedHeading.raw, translatedHeading.raw.replace(translatedHeading.content, targetHeading));
+    usedPlans.add(normalizedPlans.indexOf(matchingPlan));
+  }
+
+  return normalized;
+}
+
+function findTerminalHeadingPlan(
+  headingPlans: PromptSlice["headingPlans"],
+  sourceHeading: HeadingLine,
+  index?: number
+): PromptSlice["headingPlans"][number] | null {
+  if (headingPlans.length === 0) {
+    return null;
+  }
+
+  const matchingPlan =
+    headingPlans.find(
+      (plan) =>
+        plan.targetHeading?.trim() &&
+        typeof plan.headingIndex === "number" &&
+        typeof index === "number" &&
+        plan.headingIndex === index + 1 &&
+        normalizeHeadingPlanKey(plan.sourceHeading) === normalizeHeadingPlanKey(sourceHeading.content)
+    ) ??
+    headingPlans.find(
+      (plan) =>
+        plan.targetHeading?.trim() &&
+        normalizeHeadingPlanKey(plan.sourceHeading) === normalizeHeadingPlanKey(sourceHeading.content)
+    );
+
+  return matchingPlan ?? null;
 }
 
 function restoreHeadingTemplateLine(
@@ -1366,6 +1466,10 @@ function extractHeadingLikeLines(text: string): HeadingLine[] {
   }
 
   return headings;
+}
+
+function normalizeHeadingPlanKey(text: string): string {
+  return stripHeadingMarkers(stripInlineMarkdownMarkers(text)).replace(/\s+/g, " ").trim().toLowerCase();
 }
 
 function dedupePromptAnchors(anchors: readonly PromptAnchor[]): PromptAnchor[] {

@@ -107,6 +107,7 @@ export function buildKnownEntityCatalog(
 
   return {
     anchors,
+    headingPlans: [],
     ignoredTerms: []
   };
 }
@@ -129,6 +130,7 @@ export function mergeAnchorCatalogs(
 
   return {
     anchors,
+    headingPlans: mergeHeadingPlans(formalCatalog.headingPlans ?? [], discoveredCatalog.headingPlans ?? []),
     ignoredTerms: [...formalCatalog.ignoredTerms, ...discoveredCatalog.ignoredTerms]
   };
 }
@@ -155,8 +157,54 @@ export function normalizeDiscoveredAnchorCatalog(
 
   return {
     anchors: normalizedAnchors,
+    headingPlans: normalizeDiscoveredHeadingPlans(state, catalog.headingPlans ?? []),
     ignoredTerms
   };
+}
+
+function mergeHeadingPlans(formalPlans: AnchorCatalog["headingPlans"], discoveredPlans: AnchorCatalog["headingPlans"]) {
+  const seen = new Set<string>();
+  const merged: NonNullable<AnchorCatalog["headingPlans"]> = [];
+
+  for (const plan of [...(formalPlans ?? []), ...(discoveredPlans ?? [])]) {
+    const key = `${plan.segmentId}::${plan.sourceHeading.trim().toLowerCase()}`;
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    merged.push(plan);
+  }
+
+  return merged;
+}
+
+function normalizeDiscoveredHeadingPlans(
+  state: TranslationRunState,
+  headingPlans: NonNullable<AnchorCatalog["headingPlans"]>
+): NonNullable<AnchorCatalog["headingPlans"]> {
+  return headingPlans
+    .filter((plan) => {
+      const segment = state.segments.find((item) => item.id === plan.segmentId);
+      if (!segment) {
+        return false;
+      }
+      return segment.headingHints.some(
+        (heading) => normalizeHeadingPlanKey(heading) === normalizeHeadingPlanKey(plan.sourceHeading)
+      );
+    })
+    .map((plan) => ({
+      ...plan,
+      sourceHeading: plan.sourceHeading.trim(),
+      ...(plan.targetHeading?.trim() ? { targetHeading: plan.targetHeading.trim() } : {}),
+      ...(Array.isArray(plan.governedTerms)
+        ? {
+            governedTerms: plan.governedTerms.map((term) => term.trim()).filter(Boolean)
+          }
+        : {}),
+      ...(plan.english?.trim() ? { english: plan.english.trim() } : {}),
+      ...(plan.chineseHint?.trim() ? { chineseHint: plan.chineseHint.trim() } : {}),
+      ...(plan.category?.trim() ? { category: plan.category.trim() } : {})
+    }));
 }
 
 export async function writeKnownEntityCandidatesIfRequested(
@@ -457,6 +505,10 @@ function buildBoundaryClass(phrase: string): string {
     allowed += "-";
   }
   return allowed;
+}
+
+function normalizeHeadingPlanKey(text: string): string {
+  return text.replace(/[*_`~]/g, "").replace(/\s+/g, " ").trim().toLowerCase();
 }
 
 function normalizeId(english: string): string {

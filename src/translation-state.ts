@@ -40,6 +40,12 @@ export type AnchorDisplayPolicy =
   | "english-only"
   | "english-primary"
   | "chinese-primary";
+export type HeadingPlanStrategy =
+  | "none"
+  | "concept"
+  | "source-template"
+  | "mixed-qualifier"
+  | "natural-heading";
 
 export type AnchorOccurrence = {
   chunkId: string;
@@ -106,6 +112,7 @@ export type SegmentState = {
   separatorAfter: string;
   spanIds: string[];
   headingHints: string[];
+  headingPlans: HeadingPlanState[];
   specialNotes: string[];
   protectedSource: string;
   currentProtectedBody: string;
@@ -182,13 +189,30 @@ export type AnalysisAnchor = {
   };
 };
 
+export type AnalysisHeadingPlan = {
+  chunkId: string;
+  segmentId: string;
+  headingIndex?: number;
+  sourceHeading: string;
+  strategy: HeadingPlanStrategy;
+  targetHeading?: string;
+  governedTerms?: string[];
+  english?: string;
+  chineseHint?: string;
+  category?: string;
+  displayPolicy?: AnchorDisplayPolicy;
+};
+
 export type AnchorCatalog = {
   anchors: AnalysisAnchor[];
   ignoredTerms: Array<{
     english: string;
     reason: string;
   }>;
+  headingPlans?: AnalysisHeadingPlan[];
 };
+
+export type HeadingPlanState = AnalysisHeadingPlan;
 
 export type PromptSlice = {
   documentTitle: string | null;
@@ -198,6 +222,17 @@ export type PromptSlice = {
   segmentIndex: number;
   headingPath: string[];
   headingHints: string[];
+  headingPlans: Array<{
+    headingIndex?: number;
+    sourceHeading: string;
+    strategy: HeadingPlanStrategy;
+    targetHeading?: string;
+    governedTerms?: string[];
+    english?: string;
+    chineseHint?: string;
+    category?: string;
+    displayPolicy?: AnchorDisplayPolicy;
+  }>;
   requiredAnchors: Array<{
     anchorId: string;
     english: string;
@@ -245,6 +280,7 @@ export type PromptSlice = {
     locationLabel: string;
     instruction: string;
   }>;
+  headingPlanGovernedAnchorIds: string[];
 };
 
 export function buildLocalFallbackAnchorId(segmentId: string, english: string): string {
@@ -274,6 +310,7 @@ export function createTranslationRunState(input: CreateTranslationRunStateInput)
         separatorAfter: segmentSeed.separatorAfter,
         spanIds: [...segmentSeed.spanIds],
         headingHints: [...segmentSeed.headingHints],
+        headingPlans: [],
         specialNotes: [...segmentSeed.specialNotes],
         protectedSource: segmentSeed.source,
         currentProtectedBody: segmentSeed.source,
@@ -338,6 +375,35 @@ export function applyAnchorCatalog(state: TranslationRunState, catalog: AnchorCa
   state.anchors = catalog.anchors
     .map((anchor, index) => buildAnchorState(state, anchor, index))
     .filter((anchor): anchor is AnchorState => anchor !== null);
+
+  for (const segment of state.segments) {
+    segment.headingPlans = [];
+  }
+
+  for (const plan of catalog.headingPlans ?? []) {
+    const segment = state.segments.find((item) => item.id === plan.segmentId);
+    if (!segment) {
+      continue;
+    }
+
+    segment.headingPlans.push({
+      chunkId: plan.chunkId,
+      segmentId: plan.segmentId,
+      ...(typeof plan.headingIndex === "number" ? { headingIndex: plan.headingIndex } : {}),
+      sourceHeading: plan.sourceHeading.trim(),
+      strategy: plan.strategy,
+      ...(plan.targetHeading?.trim() ? { targetHeading: plan.targetHeading.trim() } : {}),
+      ...(Array.isArray(plan.governedTerms)
+        ? {
+            governedTerms: plan.governedTerms.map((term) => term.trim()).filter(Boolean)
+          }
+        : {}),
+      ...(plan.english?.trim() ? { english: plan.english.trim() } : {}),
+      ...(plan.chineseHint?.trim() ? { chineseHint: plan.chineseHint.trim() } : {}),
+      ...(plan.category?.trim() ? { category: plan.category.trim() } : {}),
+      ...(plan.displayPolicy ? { displayPolicy: plan.displayPolicy } : {})
+    });
+  }
 }
 
 export function buildSegmentTaskSlice(
@@ -351,16 +417,23 @@ export function buildSegmentTaskSlice(
   const chunk = getChunkState(state, chunkId);
   const segment = getSegmentState(state, segmentId);
   const mentionedAnchors = state.anchors.filter((anchor) => anchor.mentionSegmentIds.includes(segmentId));
+  const headingPlanGovernedAnchorIds = collectHeadingPlanGovernedAnchorIds(segment, mentionedAnchors);
+  const headingFilteredAnchors = mentionedAnchors.filter((anchor) => !headingPlanGovernedAnchorIds.has(anchor.id));
   const requiredAnchors = coalesceRequiredAnchors(
-    mentionedAnchors
+    headingFilteredAnchors
     .filter((anchor) => anchor.firstOccurrence.segmentId === segmentId)
     .map((anchor) => toPromptAnchor(anchor, false))
   );
-  const repeatAnchors = mentionedAnchors
+  const repeatAnchors = headingFilteredAnchors
     .filter((anchor) => anchor.firstOccurrence.order < segment.order)
     .map((anchor) => toPromptAnchor(anchor, true));
   const establishedAnchors = state.anchors
-    .filter((anchor) => anchor.status === "established" && anchor.firstOccurrence.order < segment.order)
+    .filter(
+      (anchor) =>
+        anchor.status === "established" &&
+        anchor.firstOccurrence.order < segment.order &&
+        !headingPlanGovernedAnchorIds.has(anchor.id)
+    )
     .map((anchor) => toPromptAnchor(anchor, true))
     .slice(0, 24);
   const pendingRepairs = state.repairs
@@ -372,17 +445,23 @@ export function buildSegmentTaskSlice(
       locationLabel: task.locationLabel,
       instruction: task.instruction
     }));
+  const headingPlanAnchors = synthesizeHeadingPlanPromptAnchors(
+    segmentId,
+    segment.headingPlans,
+    [...requiredAnchors, ...repeatAnchors, ...establishedAnchors]
+  );
   const headingHintAnchors = synthesizeHeadingHintPromptAnchors(
     segmentId,
     segment.headingHints,
+    segment.headingPlans,
     options?.currentRestoredBody ?? segment.currentRestoredBody,
-    [...requiredAnchors, ...repeatAnchors, ...establishedAnchors]
+    [...requiredAnchors, ...repeatAnchors, ...establishedAnchors, ...headingPlanAnchors]
   );
   const localFallbackAnchors = synthesizeLocalFallbackPromptAnchors(
     segmentId,
     segment.source,
     pendingRepairs,
-    [...requiredAnchors, ...repeatAnchors, ...establishedAnchors, ...headingHintAnchors]
+    [...requiredAnchors, ...repeatAnchors, ...establishedAnchors, ...headingPlanAnchors, ...headingHintAnchors]
   );
 
   return {
@@ -393,17 +472,73 @@ export function buildSegmentTaskSlice(
     segmentIndex: segment.index + 1,
     headingPath: [...chunk.headingPath],
     headingHints: [...segment.headingHints],
-    requiredAnchors: coalesceRequiredAnchors([...requiredAnchors, ...headingHintAnchors, ...localFallbackAnchors]),
+    headingPlans: segment.headingPlans.map((plan) => ({
+      ...(typeof plan.headingIndex === "number" ? { headingIndex: plan.headingIndex } : {}),
+      sourceHeading: plan.sourceHeading,
+      strategy: plan.strategy,
+      ...(plan.targetHeading ? { targetHeading: plan.targetHeading } : {}),
+      ...(plan.governedTerms?.length ? { governedTerms: [...plan.governedTerms] } : {}),
+      ...(plan.english ? { english: plan.english } : {}),
+      ...(plan.chineseHint ? { chineseHint: plan.chineseHint } : {}),
+      ...(plan.category ? { category: plan.category } : {}),
+      ...(plan.displayPolicy ? { displayPolicy: plan.displayPolicy } : {})
+    })),
+    requiredAnchors: coalesceRequiredAnchors([
+      ...requiredAnchors,
+      ...headingPlanAnchors,
+      ...headingHintAnchors,
+      ...localFallbackAnchors
+    ]),
     repeatAnchors,
     establishedAnchors,
     protectedSpanIds: [...segment.spanIds],
-    pendingRepairs
+    pendingRepairs,
+    headingPlanGovernedAnchorIds: [...headingPlanGovernedAnchorIds]
   };
+}
+
+function collectHeadingPlanGovernedAnchorIds(
+  segment: SegmentState,
+  mentionedAnchors: readonly AnchorState[]
+): Set<string> {
+  if (segment.headingPlans.length === 0 || segment.headingHints.length === 0) {
+    return new Set();
+  }
+
+  const governedIds = new Set<string>();
+
+  for (const plan of segment.headingPlans) {
+    if (!plan.targetHeading?.trim()) {
+      continue;
+    }
+
+    const governedTerms = (plan.governedTerms ?? []).map((term) => term.trim()).filter(Boolean);
+    const sourceHeading =
+      typeof plan.headingIndex === "number"
+        ? segment.headingHints[(plan.headingIndex - 1)] ?? plan.sourceHeading
+        : segment.headingHints.find(
+            (heading) => normalizeHeadingPlanningKey(heading) === normalizeHeadingPlanningKey(plan.sourceHeading)
+          ) ?? plan.sourceHeading;
+
+    const normalizedSourceHeading = normalizeSourceForAnchorMatching(sourceHeading);
+    for (const anchor of mentionedAnchors) {
+      const sourceForms = anchor.sourceForms ?? [anchor.english];
+      const governedByPlan =
+        governedTerms.some((term) => sourceForms.some((form) => containsWholePhrase(term, form) || containsWholePhrase(form, term))) ||
+        sourceForms.some((form) => containsWholePhrase(normalizedSourceHeading, form));
+      if (governedByPlan) {
+        governedIds.add(anchor.id);
+      }
+    }
+  }
+
+  return governedIds;
 }
 
 function synthesizeHeadingHintPromptAnchors(
   segmentId: string,
   headingHints: readonly string[],
+  headingPlans: readonly HeadingPlanState[],
   currentRestoredBody: string,
   existingAnchors: PromptSlice["requiredAnchors"]
 ): PromptSlice["requiredAnchors"] {
@@ -422,12 +557,26 @@ function synthesizeHeadingHintPromptAnchors(
 
   const synthesized: PromptSlice["requiredAnchors"] = [];
   const seenEnglish = new Set(existingAnchors.map((anchor) => anchor.english.trim().toLowerCase()));
+  const plannedHeadingKeys = new Set(
+    headingPlans.map((plan) => normalizeHeadingPlanningKey(plan.sourceHeading)).filter(Boolean)
+  );
+  const plannedHeadingIndices = new Set(
+    headingPlans
+      .map((plan) => (typeof plan.headingIndex === "number" ? plan.headingIndex - 1 : null))
+      .filter((index): index is number => index !== null && index >= 0)
+  );
   const pairCount = Math.min(headingHints.length, alignedTranslatedHeadings.length);
 
   for (let index = 0; index < pairCount; index += 1) {
     const sourceHeading = headingHints[index]?.trim() ?? "";
     const translatedHeading = alignedTranslatedHeadings[index]?.trim() ?? "";
     if (!sourceHeading || !translatedHeading) {
+      continue;
+    }
+    if (plannedHeadingIndices.has(index)) {
+      continue;
+    }
+    if (plannedHeadingKeys.has(normalizeHeadingPlanningKey(sourceHeading))) {
       continue;
     }
 
@@ -466,6 +615,71 @@ function synthesizeHeadingHintPromptAnchors(
   }
 
   return synthesized;
+}
+
+function synthesizeHeadingPlanPromptAnchors(
+  segmentId: string,
+  headingPlans: readonly HeadingPlanState[],
+  existingAnchors: PromptSlice["requiredAnchors"]
+): PromptSlice["requiredAnchors"] {
+  if (headingPlans.length === 0) {
+    return [];
+  }
+
+  const synthesized: PromptSlice["requiredAnchors"] = [];
+  const seenEnglish = new Set(existingAnchors.map((anchor) => anchor.english.trim().toLowerCase()));
+
+  for (const plan of headingPlans) {
+    if (plan.strategy === "none" || plan.strategy === "natural-heading") {
+      continue;
+    }
+
+    const english = plan.english?.trim() ?? "";
+    if (!english) {
+      continue;
+    }
+
+    const normalizedKey = english.toLowerCase();
+    if (seenEnglish.has(normalizedKey)) {
+      continue;
+    }
+
+    const displayPolicy = resolveHeadingPlanDisplayPolicy(plan);
+    const chineseHint = resolveHeadingPlanChineseHint(plan, displayPolicy);
+    synthesized.push({
+      anchorId: buildLocalFallbackAnchorId(segmentId, english),
+      english,
+      chineseHint,
+      ...(plan.category ? { category: plan.category } : {}),
+      familyId: `local:${normalizeLocalFallbackAnchorKey(english)}`,
+      requiresBilingual: displayPolicy !== "english-only",
+      displayPolicy,
+      allowRepeatText: false,
+      displayMode: displayPolicy === "english-only" ? "english-only" : "chinese-primary",
+      canonicalDisplay: displayPolicy === "english-only" ? english : `${chineseHint}（${english}）`,
+      allowedDisplayForms: displayPolicy === "english-only" ? [english] : [`${chineseHint}（${english}）`]
+    });
+    seenEnglish.add(normalizedKey);
+  }
+
+  return synthesized;
+}
+
+function resolveHeadingPlanDisplayPolicy(plan: HeadingPlanState): AnchorDisplayPolicy {
+  if (plan.displayPolicy) {
+    return plan.displayPolicy;
+  }
+  if (plan.strategy === "source-template") {
+    return "english-only";
+  }
+  return "chinese-primary";
+}
+
+function resolveHeadingPlanChineseHint(plan: HeadingPlanState, displayPolicy: AnchorDisplayPolicy): string {
+  if (displayPolicy === "english-only") {
+    return plan.chineseHint?.trim() || plan.english?.trim() || "";
+  }
+  return plan.chineseHint?.trim() || "";
 }
 
 function extractHeadingPlanningTarget(
@@ -987,6 +1201,10 @@ function normalizeHeadingPlanningChineseHint(text: string): string | null {
     return null;
   }
   return stripped;
+}
+
+function normalizeHeadingPlanningKey(text: string): string {
+  return stripInlineMarkdownMarkers(text).replace(/\s+/g, " ").trim().toLowerCase();
 }
 
 function extractHeadingPlanningEnglish(sourceHeading: string): string | null {
