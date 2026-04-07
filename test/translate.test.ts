@@ -39,7 +39,9 @@ function createAnchorCatalog(
   anchors: Array<{
     english: string;
     chineseHint: string;
+    category?: string;
     familyKey: string;
+    displayPolicy?: "auto" | "acronym-compound" | "english-only" | "english-primary" | "chinese-primary";
     chunkId?: string;
     segmentId?: string;
   }>
@@ -48,7 +50,9 @@ function createAnchorCatalog(
     anchors: anchors.map((anchor) => ({
       english: anchor.english,
       chineseHint: anchor.chineseHint,
+      ...(anchor.category ? { category: anchor.category } : {}),
       familyKey: anchor.familyKey,
+      ...(anchor.displayPolicy ? { displayPolicy: anchor.displayPolicy } : {}),
       firstOccurrence: {
         chunkId: anchor.chunkId ?? "chunk-1",
         segmentId: anchor.segmentId ?? "chunk-1-segment-1"
@@ -1877,6 +1881,114 @@ test("translateMarkdownArticle repeats heading-only repair guidance when must_fi
   assert.match(repairPrompt, /如果标题里的目标是英文产品名、工具名、项目名、模型名、CLI 名称，或以英文表达的核心概念性标题术语/);
 });
 
+test("translateMarkdownArticle synthesizes a local heading anchor target when audit only reports a chinese title location", async () => {
+  const source = [
+    "# Title",
+    "",
+    "## How Sandbox Mode Changes Autonomous Coding",
+    "",
+    "Body paragraph.",
+    ""
+  ].join("\n");
+
+  let auditCount = 0;
+  const executor = new PromptAwareExecutor();
+  const result = await translateMarkdownArticle(source, {
+    executor: {
+      async execute(prompt, options) {
+        executor.prompts.push(prompt);
+
+        if (isDocumentAnalysisPrompt(prompt)) {
+          return createExecResult(createEmptyAnchorCatalog());
+        }
+
+        if (options.outputSchema && prompt.includes("【分段审校输入】")) {
+          auditCount += 1;
+          if (auditCount === 1) {
+            return createExecResult(
+              wrapPerSegmentAudits(prompt, [
+                {
+                  segment_index: 1,
+                  audit: createAudit(false, [
+                    "位置：`自主编码`。问题：首次出现的工具/专名未完整建立中英文对照。修复目标：在该位置本身补齐首现锚定。"
+                  ])
+                }
+              ])
+            );
+          }
+
+          return createExecResult(wrapPerSegmentAudits(prompt, [{ segment_index: 1, audit: createAudit(true) }]));
+        }
+
+        if (options.outputSchema || prompt.includes("只返回 JSON")) {
+          return createExecResult(JSON.stringify(createAudit(true)));
+        }
+
+        const currentTranslation = extractPromptSection(prompt, "【当前译文】");
+        if (currentTranslation !== null) {
+          return createExecResult(currentTranslation);
+        }
+
+        return createExecResult(["# Title", "", "## 沙盒模式如何改变自主编码", "", "正文。", ""].join("\n"));
+      }
+    },
+    formatter: async (markdown) => markdown
+  });
+
+  const repairPrompt = executor.prompts.find(
+    (item) => item.includes("【must_fix】") && item.includes("自主编码（Autonomous Coding）")
+  );
+  assert.ok(repairPrompt);
+  assert.match(result.markdown, /## 沙盒模式（Sandbox Mode）如何改变自主编码（Autonomous Coding）/);
+});
+
+test("translateMarkdownArticle suppresses first-mention demands that are neither in state nor safely synthesizable locally", async () => {
+  const source = ["# Title", "", "**Commit to ToolX (`.config.json`):**", "", "Body paragraph.", ""].join("\n");
+
+  let auditCount = 0;
+  const result = await translateMarkdownArticle(source, {
+    executor: {
+      async execute(prompt, options) {
+        if (isDocumentAnalysisPrompt(prompt)) {
+          return createExecResult(createEmptyAnchorCatalog());
+        }
+
+        if (options.outputSchema && prompt.includes("【分段审校输入】")) {
+          auditCount += 1;
+          if (auditCount === 1) {
+            return createExecResult(
+              wrapPerSegmentAudits(prompt, [
+                {
+                  segment_index: 1,
+                  audit: createAudit(false, [
+                    "位置：分段标题“Commit to ToolX（`.config.json`）”。问题：ToolX 首次出现缺少中文对照；需补成合法的中英锚定形式。"
+                  ])
+                }
+              ])
+            );
+          }
+
+          return createExecResult(wrapPerSegmentAudits(prompt, [{ segment_index: 1, audit: createAudit(true) }]));
+        }
+
+        if (options.outputSchema || prompt.includes("只返回 JSON")) {
+          return createExecResult(JSON.stringify(createAudit(true)));
+        }
+
+        const currentTranslation = extractPromptSection(prompt, "【当前译文】");
+        if (currentTranslation !== null) {
+          return createExecResult(currentTranslation);
+        }
+
+        return createExecResult(["# Title", "", "**提交到 ToolX（`.config.json`）：**", "", "正文。", ""].join("\n"));
+      }
+    },
+    formatter: async (markdown) => markdown
+  });
+
+  assert.match(result.markdown, /\*\*提交到 ToolX（`\.config\.json`）：\*\*/);
+});
+
 test("translateMarkdownArticle repeats list-item repair guidance when must_fix targets bullet items", async () => {
   const source = [
     "# Title",
@@ -3549,6 +3661,7 @@ test("translateMarkdownArticle keeps a source-shaped english-primary heading dur
               {
                 english: "cco Sandbox",
                 chineseHint: "cco 沙箱工具",
+                category: "tool",
                 familyKey: "cco-sandbox"
               }
             ])
@@ -3590,6 +3703,151 @@ test("translateMarkdownArticle keeps a source-shaped english-primary heading dur
 
   assert.match(result.markdown, /\*\*选项 2：cco Sandbox\*\*/);
   assert.doesNotMatch(result.markdown, /cco Sandbox（cco Sandbox/);
+});
+
+test("translateMarkdownArticle restores concept english-primary headings to bilingual canonical form", async () => {
+  const source = [
+    "# Title",
+    "",
+    "**Network Isolation**",
+    "",
+    "Body.",
+    ""
+  ].join("\n");
+
+  let auditCount = 0;
+  const result = await translateMarkdownArticle(source, {
+    executor: {
+      async execute(prompt, options) {
+        if (isDocumentAnalysisPrompt(prompt)) {
+          return createExecResult(
+            createAnchorCatalog([
+              {
+                english: "Network Isolation",
+                chineseHint: "网络隔离",
+                familyKey: "network-isolation",
+                displayPolicy: "english-primary",
+                chunkId: "chunk-1",
+                segmentId: "chunk-1-segment-1"
+              }
+            ])
+          );
+        }
+
+        if (options.outputSchema && prompt.includes("【分段审校输入】")) {
+          auditCount += 1;
+          if (auditCount === 1) {
+            return createExecResult(
+              wrapPerSegmentAudits(prompt, [
+                {
+                  segment_index: 1,
+                  audit: createAudit(false, [
+                    "当前分段标题“**Network Isolation**”首次出现需补中英对照，修复目标是改为合法锚定形式“Network Isolation（网络隔离）”。"
+                  ])
+                }
+              ])
+            );
+          }
+
+          return createExecResult(
+            wrapPerSegmentAudits(prompt, [{ segment_index: 1, audit: createAudit(true) }])
+          );
+        }
+
+        if (options.outputSchema || prompt.includes("只返回 JSON")) {
+          return createExecResult(JSON.stringify(createAudit(true)));
+        }
+
+        const currentTranslation = extractPromptSection(prompt, "【当前译文】");
+        if (currentTranslation !== null) {
+          return createExecResult(currentTranslation);
+        }
+
+        return createExecResult(["# Title", "", "**Network Isolation**", "", "正文。", ""].join("\n"));
+      }
+    },
+    formatter: async (markdown) => markdown
+  });
+
+  assert.match(result.markdown, /\*\*Network Isolation（网络隔离）\*\*/);
+});
+
+test("translateMarkdownArticle prefers explicit chinese canonical repair targets over incidental english mentions", async () => {
+  const source = [
+    "# Title",
+    "",
+    "## Sandbox Mode",
+    "",
+    "Claude Code sandboxes create OS-level restrictions.",
+    ""
+  ].join("\n");
+
+  let auditCount = 0;
+  const result = await translateMarkdownArticle(source, {
+    executor: {
+      async execute(prompt, options) {
+        if (isDocumentAnalysisPrompt(prompt)) {
+          return createExecResult(
+            createAnchorCatalog([
+              {
+                english: "Claude",
+                chineseHint: "Anthropic 的 AI 助手",
+                familyKey: "claude",
+                displayPolicy: "english-only"
+              },
+              {
+                english: "Claude Code",
+                chineseHint: "Anthropic 的命令行编码助手",
+                familyKey: "claude"
+              },
+              {
+                english: "Sandbox Mode",
+                chineseHint: "沙盒模式",
+                familyKey: "sandbox-mode"
+              }
+            ])
+          );
+        }
+
+        if (options.outputSchema && prompt.includes("【分段审校输入】")) {
+          auditCount += 1;
+          if (auditCount === 1) {
+            return createExecResult(
+              wrapPerSegmentAudits(prompt, [
+                {
+                  segment_index: 1,
+                  audit: createAudit(false, [
+                    "在“## 沙盒模式（Sandbox Mode）”下的首句，将“Claude Code 沙盒”改为与全文锚点一致的“沙盒模式”术语形式，避免缩写成“沙盒”。"
+                  ])
+                }
+              ])
+            );
+          }
+
+          return createExecResult(wrapPerSegmentAudits(prompt, [{ segment_index: 1, audit: createAudit(true) }]));
+        }
+
+        if (options.outputSchema || prompt.includes("只返回 JSON")) {
+          return createExecResult(JSON.stringify(createAudit(true)));
+        }
+
+        const currentTranslation = extractPromptSection(prompt, "【当前译文】");
+        if (currentTranslation !== null) {
+          return createExecResult(currentTranslation);
+        }
+
+        return createExecResult(
+          ["# Title", "", "## 沙盒模式（Sandbox Mode）", "", "Claude Code 沙盒会创建操作系统级限制。", ""].join(
+            "\n"
+          )
+        );
+      }
+    },
+    formatter: async (markdown) => markdown
+  });
+
+  assert.match(result.markdown, /沙盒模式会创建操作系统级限制。/);
+  assert.doesNotMatch(result.markdown, /Claude Code 沙盒/);
 });
 
 test("translateMarkdownArticle adds attribution guidance for caption-like segments", async () => {

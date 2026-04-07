@@ -185,10 +185,24 @@ const ANCHOR_CATALOG_SCHEMA = {
       items: {
         type: "object",
         additionalProperties: false,
-        required: ["english", "chineseHint", "familyKey", "displayPolicy", "sourceForms", "firstOccurrence"],
+        required: [
+          "english",
+          "chineseHint",
+          "category",
+          "familyKey",
+          "displayPolicy",
+          "sourceForms",
+          "firstOccurrence"
+        ],
         properties: {
           english: { type: "string" },
           chineseHint: { type: "string" },
+          category: {
+            anyOf: [
+              { type: "string" },
+              { type: "null" }
+            ]
+          },
           familyKey: { type: "string" },
           displayPolicy: {
             anyOf: [
@@ -420,6 +434,10 @@ function parseAnchorCatalog(text: string): AnchorCatalog {
         segmentId: String((firstOccurrence as Record<string, unknown>).segmentId)
       }
     };
+
+    if (typeof anchor.category === "string" && anchor.category.trim()) {
+      parsedAnchor.category = anchor.category.trim();
+    }
 
     if (typeof anchor.displayPolicy === "string") {
       parsedAnchor.displayPolicy = anchor.displayPolicy as NonNullable<AnalysisAnchor["displayPolicy"]>;
@@ -909,6 +927,23 @@ function inferRepairAnchorId(
     (anchor) => segmentSource.toLowerCase().includes(anchor.english.trim().toLowerCase())
   );
 
+  const explicitChineseTargets = extractExplicitChineseTargetsFromMustFix([instruction]);
+  for (const target of explicitChineseTargets) {
+    const exactChineseAnchor = anchors.find(
+      (anchor) => normalizeRepairChineseTarget(anchor.chineseHint) === target
+    );
+    if (exactChineseAnchor) {
+      return exactChineseAnchor.anchorId;
+    }
+
+    const allowedDisplayAnchor = anchors.find((anchor) =>
+      (anchor.allowedDisplayForms ?? []).some((display) => normalizeRepairChineseTarget(display) === target)
+    );
+    if (allowedDisplayAnchor) {
+      return allowedDisplayAnchor.anchorId;
+    }
+  }
+
   const explicitTargets = extractExplicitEnglishTargetsFromMustFix([instruction]);
   for (const target of explicitTargets) {
     const normalizedTarget = target.toLowerCase();
@@ -942,6 +977,45 @@ function inferRepairAnchorId(
     }
   }
   return null;
+}
+
+function extractExplicitChineseTargetsFromMustFix(instructions: readonly string[]): string[] {
+  const targets = new Set<string>();
+
+  for (const instruction of instructions) {
+    const rewriteTarget = instruction.match(/与全文锚点一致的“([^”]+)”(?:术语形式|形式)?/)?.[1]?.trim();
+    if (rewriteTarget) {
+      const normalizedRewriteTarget = normalizeRepairChineseTarget(rewriteTarget);
+      if (looksLikeChineseRepairTarget(normalizedRewriteTarget)) {
+        targets.add(normalizedRewriteTarget);
+      }
+    }
+
+    const quotedTargets = [
+      ...[...instruction.matchAll(/“([^”]+)”/g)].map((match) => match[1]?.trim()),
+      ...[...instruction.matchAll(/`([^`]+)`/g)].map((match) => match[1]?.trim())
+    ];
+    for (const rawTarget of quotedTargets) {
+      if (!rawTarget) {
+        continue;
+      }
+
+      const normalizedTarget = normalizeRepairChineseTarget(rawTarget);
+      if (looksLikeChineseRepairTarget(normalizedTarget)) {
+        targets.add(normalizedTarget);
+      }
+    }
+  }
+
+  return [...targets];
+}
+
+function normalizeRepairChineseTarget(text: string): string {
+  return normalizeExplicitRepairLocationText(text).replace(/\s+/g, " ").trim();
+}
+
+function looksLikeChineseRepairTarget(text: string): boolean {
+  return /[\u4e00-\u9fff]/u.test(text) && !/[A-Za-z]/.test(text);
 }
 
 function containsWholePhraseInText(haystack: string, needle: string): boolean {
@@ -998,6 +1072,172 @@ function extractExplicitRepairLocationText(instruction: string): string | null {
   );
 }
 
+function synthesizeLocalRepairInstruction(
+  draftedSegment: DraftedSegmentState,
+  slice: PromptSlice,
+  audit: GateAudit,
+  instruction: string
+): string {
+  if (inferRepairFailureType(audit, instruction) !== "missing_anchor") {
+    return instruction;
+  }
+
+  if (inferRepairAnchorId(slice, draftedSegment.segment.source, instruction)) {
+    return instruction;
+  }
+
+  const locationText = extractExplicitRepairLocationText(instruction);
+  if (!locationText) {
+    return instruction;
+  }
+
+  const target = inferLocalRepairTarget(draftedSegment.segment.source, draftedSegment.restoredBody, locationText);
+  if (!target) {
+    return instruction;
+  }
+
+  return `位置：\`${target.chineseHint}\`。问题：首次出现的工具/专名未完整建立中英文对照。修复目标：在该位置本身需补为“${target.chineseHint}（${target.english}）”。`;
+}
+
+function inferLocalRepairTarget(
+  source: string,
+  restoredBody: string,
+  locationText: string
+): { chineseHint: string; english: string } | null {
+  const normalizedLocation = normalizeExplicitRepairLocationText(locationText);
+  if (!normalizedLocation || /[A-Za-z]/.test(normalizedLocation)) {
+    return null;
+  }
+
+  const sourceHeadingLines = extractLocalHeadingLikeLines(source);
+  const translatedHeadingLines = extractLocalHeadingLikeLines(restoredBody);
+  for (let index = 0; index < Math.min(sourceHeadingLines.length, translatedHeadingLines.length); index += 1) {
+    const sourceHeading = sourceHeadingLines[index];
+    const translatedHeading = translatedHeadingLines[index];
+    if (!sourceHeading || !translatedHeading) {
+      continue;
+    }
+
+    const normalizedTranslatedHeading = stripLocalMarkdownMarkers(translatedHeading.content).trim();
+    if (!normalizedTranslatedHeading.includes(normalizedLocation)) {
+      continue;
+    }
+
+    const english =
+      extractHeadingEnglishSuffixAfterConnector(sourceHeading.content, normalizedTranslatedHeading, normalizedLocation) ??
+      extractHeadingEnglishSuffixAfterColon(sourceHeading.content, normalizedTranslatedHeading, normalizedLocation) ??
+      null;
+    if (english) {
+      return {
+        chineseHint: normalizedLocation,
+        english
+      };
+    }
+  }
+
+  return null;
+}
+
+function normalizeExplicitRepairLocationText(locationText: string): string {
+  return locationText
+    .replace(/^#{1,6}\s+/, "")
+    .replace(/^\*\*(.+)\*\*$/, "$1")
+    .replace(/[*_`~]/g, "")
+    .trim();
+}
+
+type LocalHeadingLine = {
+  raw: string;
+  content: string;
+};
+
+function extractLocalHeadingLikeLines(text: string): LocalHeadingLine[] {
+  const headings: LocalHeadingLine[] = [];
+
+  for (const rawLine of text.split(/\r?\n/)) {
+    const trimmed = rawLine.trim();
+    if (!trimmed) {
+      continue;
+    }
+
+    const atxMatch = trimmed.match(/^#{1,6}[ \t]+(.+?)(?:[ \t]+#+)?$/);
+    if (atxMatch?.[1]) {
+      headings.push({ raw: rawLine, content: atxMatch[1].trim() });
+      continue;
+    }
+
+    const boldMatch = trimmed.match(/^\*\*(.+)\*\*$/);
+    if (boldMatch?.[1]) {
+      headings.push({ raw: rawLine, content: boldMatch[1].trim() });
+    }
+  }
+
+  return headings;
+}
+
+function stripLocalMarkdownMarkers(text: string): string {
+  return text.replace(/[*_`~]/g, "");
+}
+
+function extractHeadingEnglishSuffixAfterConnector(
+  sourceHeading: string,
+  translatedHeading: string,
+  chineseHint: string
+): string | null {
+  if (!translatedHeading.endsWith(chineseHint)) {
+    return null;
+  }
+
+  const words = sourceHeading.trim().split(/\s+/);
+  const connectorWords = new Set([
+    "change",
+    "changes",
+    "changing",
+    "protect",
+    "protects",
+    "protected",
+    "requires",
+    "require",
+    "requiring",
+    "using",
+    "use",
+    "with",
+    "without",
+    "for",
+    "against",
+    "into",
+    "toward",
+    "to"
+  ]);
+
+  for (let index = words.length - 1; index >= 0; index -= 1) {
+    const normalizedWord = words[index]?.replace(/[^A-Za-z]/g, "").toLowerCase();
+    if (!normalizedWord || !connectorWords.has(normalizedWord)) {
+      continue;
+    }
+
+    const suffix = words.slice(index + 1).join(" ").trim();
+    if (suffix && /[A-Za-z]/.test(suffix)) {
+      return suffix;
+    }
+  }
+
+  return null;
+}
+
+function extractHeadingEnglishSuffixAfterColon(
+  sourceHeading: string,
+  translatedHeading: string,
+  chineseHint: string
+): string | null {
+  if (!translatedHeading.endsWith(chineseHint)) {
+    return null;
+  }
+
+  const colonMatch = sourceHeading.match(/[:：]\s*([A-Za-z][A-Za-z0-9 .+/_-]*)$/);
+  return colonMatch?.[1]?.trim() ?? null;
+}
+
 function buildStructuredSegmentAuditResult(
   state: TranslationRunState,
   draftedSegment: DraftedSegmentState,
@@ -1007,15 +1247,18 @@ function buildStructuredSegmentAuditResult(
   const slice = buildSegmentTaskSlice(state, chunkId, draftedSegment.segmentId);
   const expandedAudit = expandMissingAnchorMustFixes(audit);
   const filteredAudit = suppressCoveredAnchorMustFix(state, draftedSegment, slice, expandedAudit);
-  const repairTasks: RepairTask[] = filteredAudit.must_fix.map((instruction, index) => ({
-    id: `${draftedSegment.segmentId}-repair-${state.repairs.length + index + 1}`,
-    segmentId: draftedSegment.segmentId,
-    anchorId: inferRepairAnchorId(slice, draftedSegment.segment.source, instruction),
-    failureType: inferRepairFailureType(filteredAudit, instruction),
-    locationLabel: inferRepairLocationLabelFromInstruction(draftedSegment.segment.source, instruction),
-    instruction,
-    status: "pending"
-  }));
+  const repairTasks: RepairTask[] = filteredAudit.must_fix.map((rawInstruction, index) => {
+    const instruction = synthesizeLocalRepairInstruction(draftedSegment, slice, filteredAudit, rawInstruction);
+    return {
+      id: `${draftedSegment.segmentId}-repair-${state.repairs.length + index + 1}`,
+      segmentId: draftedSegment.segmentId,
+      anchorId: inferRepairAnchorId(slice, draftedSegment.segment.source, instruction),
+      failureType: inferRepairFailureType(filteredAudit, instruction),
+      locationLabel: inferRepairLocationLabelFromInstruction(draftedSegment.segment.source, instruction),
+      instruction,
+      status: "pending"
+    };
+  });
 
   return {
     segmentId: draftedSegment.segmentId,
@@ -1076,6 +1319,10 @@ function suppressCoveredAnchorMustFix(
     const explicitLocationText = extractExplicitRepairLocationText(instruction);
     if (inferRepairFailureType(audit, instruction) === "missing_anchor") {
       const anchorId = inferRepairAnchorId(slice, draftedSegment.segment.source, instruction);
+      if (!anchorId) {
+        return hasSafeLocalFallbackAnchorTarget(draftedSegment, instruction);
+      }
+
       if (anchorId) {
         const anchor = anchors.find((item) => item.anchorId === anchorId);
         if (anchor && isAnchorDisplayAlreadySatisfied(draftedSegment, anchor)) {
@@ -1135,6 +1382,20 @@ function suppressCoveredAnchorMustFix(
     hard_checks: nextHardChecks,
     must_fix: remainingMustFix
   };
+}
+
+function hasSafeLocalFallbackAnchorTarget(
+  draftedSegment: DraftedSegmentState,
+  instruction: string
+): boolean {
+  const locationText = extractExplicitRepairLocationText(instruction);
+  if (!locationText) {
+    return false;
+  }
+
+  return (
+    inferLocalRepairTarget(draftedSegment.segment.source, draftedSegment.restoredBody, locationText) !== null
+  );
 }
 
 function isAnchorDisplayAlreadySatisfied(

@@ -26,6 +26,7 @@ export const DOCUMENT_ANALYSIS_PROMPT = `
    - firstOccurrence.chunkId
    - firstOccurrence.segmentId
    可选包含：
+   - category（如 product / tool / framework / platform / company / other）
    - displayPolicy（可选值：english-only / english-primary / chinese-primary / acronym-compound / auto）
 3. english 必须是原文里实际出现的英文形式，不要杜撰。
 4. chineseHint 只写最小必要的中文主译或中文说明，不要写整句。

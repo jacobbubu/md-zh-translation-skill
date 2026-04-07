@@ -97,6 +97,7 @@ export function buildKnownEntityCatalog(
     anchors.push({
       english,
       chineseHint: entity.preferred_chinese_hint,
+      category: entity.category,
       familyKey: entity.family_id,
       displayPolicy: mapKnownPolicyToAnchorPolicy(entity.display_policy),
       firstOccurrence,
@@ -136,9 +137,25 @@ export function normalizeDiscoveredAnchorCatalog(
   state: TranslationRunState,
   catalog: AnchorCatalog
 ): AnchorCatalog {
+  const normalizedAnchors: AnalysisAnchor[] = [];
+  const ignoredTerms = [...catalog.ignoredTerms];
+
+  for (const anchor of catalog.anchors) {
+    const promoted = promoteHeadingSurfaceForm(state, anchor);
+    const rejection = classifyDiscoveredAnchorRejection(promoted);
+    if (rejection) {
+      ignoredTerms.push({
+        english: promoted.english,
+        reason: rejection
+      });
+      continue;
+    }
+    normalizedAnchors.push(promoted);
+  }
+
   return {
-    anchors: catalog.anchors.map((anchor) => promoteHeadingSurfaceForm(state, anchor)),
-    ignoredTerms: [...catalog.ignoredTerms]
+    anchors: normalizedAnchors,
+    ignoredTerms
   };
 }
 
@@ -444,4 +461,38 @@ function buildBoundaryClass(phrase: string): string {
 
 function normalizeId(english: string): string {
   return english.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "candidate";
+}
+
+function classifyDiscoveredAnchorRejection(anchor: AnalysisAnchor): string | null {
+  const surfaces = dedupeForms(anchor.sourceForms ?? [], [], anchor.english);
+  if (
+    surfaces.some((surface) => looksLikeCliFlagSurface(surface)) ||
+    surfaces.some((surface) => looksLikePathOrConfigSurface(surface))
+  ) {
+    return "code-like surface form should not be promoted into anchor catalog";
+  }
+
+  return null;
+}
+
+function looksLikeCliFlagSurface(value: string): boolean {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return false;
+  }
+
+  return /(^|\s)--[A-Za-z0-9][A-Za-z0-9-]*(?=$|\s)/.test(trimmed);
+}
+
+function looksLikePathOrConfigSurface(value: string): boolean {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return false;
+  }
+
+  return (
+    /(^|[\s(])(?:\.{1,2}\/|~\/)/.test(trimmed) ||
+    /(^|[\s(])\.[A-Za-z0-9_-]+(?:\/[A-Za-z0-9._-]+)+/.test(trimmed) ||
+    /(^|[\s(])[A-Za-z0-9._-]+\.(?:json|ya?ml|toml|md|py|js|ts|tsx|jsx|sh)(?=$|[\s),:])/i.test(trimmed)
+  );
 }

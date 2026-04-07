@@ -52,6 +52,7 @@ export type AnchorState = {
   id: string;
   english: string;
   chineseHint: string;
+  category?: string;
   familyId: string;
   sourceForms: string[];
   displayPolicy: AnchorDisplayPolicy;
@@ -163,6 +164,7 @@ export type CreateTranslationRunStateInput = {
 export type AnalysisAnchor = {
   english: string;
   chineseHint: string;
+  category?: string;
   familyKey: string;
   displayPolicy?: AnchorDisplayPolicy;
   sourceForms?: string[];
@@ -192,6 +194,7 @@ export type PromptSlice = {
     anchorId: string;
     english: string;
     chineseHint: string;
+    category?: string;
     familyId: string;
     requiresBilingual: boolean;
     displayPolicy: AnchorDisplayPolicy;
@@ -204,6 +207,7 @@ export type PromptSlice = {
     anchorId: string;
     english: string;
     chineseHint: string;
+    category?: string;
     familyId: string;
     requiresBilingual: boolean;
     displayPolicy: AnchorDisplayPolicy;
@@ -216,6 +220,7 @@ export type PromptSlice = {
     anchorId: string;
     english: string;
     chineseHint: string;
+    category?: string;
     familyId: string;
     requiresBilingual: boolean;
     displayPolicy: AnchorDisplayPolicy;
@@ -472,6 +477,7 @@ function buildAnchorState(
     id: `anchor-${index + 1}`,
     english: anchor.english.trim(),
     chineseHint: anchor.chineseHint.trim(),
+    ...(anchor.category?.trim() ? { category: anchor.category.trim() } : {}),
     familyId: anchor.familyKey.trim() || normalizeFamilyKey(anchor.english),
     sourceForms: (anchor.sourceForms ?? [anchor.english]).map((item) => item.trim()).filter(Boolean),
     displayPolicy: anchor.displayPolicy ?? inferAnchorDisplayPolicy(anchor.english.trim(), anchor.chineseHint.trim()),
@@ -495,6 +501,7 @@ function toPromptAnchor(anchor: AnchorState, allowRepeatText: boolean) {
     anchorId: anchor.id,
     english: anchor.english,
     chineseHint: anchor.chineseHint,
+    ...(anchor.category ? { category: anchor.category } : {}),
     familyId: anchor.familyId,
     requiresBilingual: anchor.requiresBilingual,
     displayPolicy: anchor.displayPolicy,
@@ -521,7 +528,8 @@ function containsAnchorText(source: string, english: string): boolean {
 }
 
 function containsAnyAnchorText(source: string, forms: readonly string[]): boolean {
-  return forms.some((form) => containsWholePhrase(source, form));
+  const normalizedSource = normalizeSourceForAnchorMatching(source);
+  return forms.some((form) => containsWholePhrase(normalizedSource, form));
 }
 
 function normalizeFamilyKey(english: string): string {
@@ -581,6 +589,13 @@ function containsWholePhrase(text: string, phrase: string): boolean {
   const boundaryClass = buildBoundaryClass(trimmed);
   const pattern = new RegExp(`(^|[^${boundaryClass}])${escapeRegExp(trimmed)}($|[^${boundaryClass}])`, "i");
   return pattern.test(text);
+}
+
+function normalizeSourceForAnchorMatching(source: string): string {
+  return source
+    .replace(/[*_~`]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 function escapeRegExp(value: string): string {

@@ -17,12 +17,14 @@ function createAnchor(
   english: string,
   chineseHint: string,
   familyId = anchorId,
-  displayPolicy: PromptAnchor["displayPolicy"] = "auto"
+  displayPolicy: PromptAnchor["displayPolicy"] = "auto",
+  category?: string
 ): PromptAnchor {
   return {
     anchorId,
     english,
     chineseHint,
+    ...(category ? { category } : {}),
     familyId,
     requiresBilingual: displayPolicy !== "english-only",
     displayPolicy
@@ -100,6 +102,19 @@ test("normalizeSegmentAnchorText strips freshness prefixes from chinese-primary 
     normalized,
     "Claude Code 的沙箱模式（sandbox mode）用一种更有创新性的方式同时解决了这两个问题。"
   );
+});
+
+test("normalizeSegmentAnchorText moves chinese-primary inline explanations outside the anchor parentheses", () => {
+  const slice = createSlice({
+    requiredAnchors: [createAnchor("anchor-1", "Supply chain attacks", "供应链攻击")]
+  });
+
+  const normalized = normalizeSegmentAnchorText(
+    "供应链攻击（Supply chain attacks，受感染的 npm 包试图窃取数据）",
+    slice
+  );
+
+  assert.equal(normalized, "供应链攻击（Supply chain attacks）：受感染的 npm 包试图窃取数据");
 });
 
 test("normalizeSegmentAnchorText collapses exact duplicate english-only parentheses", () => {
@@ -296,7 +311,7 @@ test("normalizeHeadingLikeAnchorText keeps a single trailing colon when restorin
 test("normalizeHeadingLikeAnchorText preserves source-shaped english-primary headings without adding a chinese explainer", () => {
   const slice = createSlice({
     requiredAnchors: [
-      createAnchor("anchor-1", "cco Sandbox", "cco 沙箱工具", "cco_sandbox", "english-primary")
+      createAnchor("anchor-1", "cco Sandbox", "cco 沙箱工具", "cco_sandbox", "english-primary", "tool")
     ]
   });
   const source = "**Option 2: cco Sandbox**";
@@ -309,6 +324,26 @@ test("normalizeHeadingLikeAnchorText preserves source-shaped english-primary hea
     const normalized = normalizeHeadingLikeAnchorText(source, translated, slice);
     assert.equal(normalized, "**选项 2：cco Sandbox**");
   }
+});
+
+test("normalizeHeadingLikeAnchorText restores a concept english-primary heading to bilingual canonical form", () => {
+  const slice = createSlice({
+    requiredAnchors: [
+      createAnchor(
+        "anchor-1",
+        "Network Isolation",
+        "网络隔离",
+        "network_isolation",
+        "english-primary"
+      )
+    ]
+  });
+  const source = "**Network Isolation**";
+  const translated = "**Network Isolation**";
+
+  const normalized = normalizeHeadingLikeAnchorText(source, translated, slice);
+
+  assert.equal(normalized, "**Network Isolation（网络隔离）**");
 });
 
 test("normalizeHeadingLikeAnchorText skips full english back-reference for operational headings", () => {
@@ -545,7 +580,7 @@ test("normalizeExplicitRepairAnchorText preserves missing source heading qualifi
 test("normalizeExplicitRepairAnchorText keeps english-primary headings in source shape during repair fallback", () => {
   const slice = createSlice({
     requiredAnchors: [
-      createAnchor("anchor-1", "cco Sandbox", "cco 沙箱工具", "cco_sandbox", "english-primary")
+      createAnchor("anchor-1", "cco Sandbox", "cco 沙箱工具", "cco_sandbox", "english-primary", "tool")
     ],
     pendingRepairs: [
       {
@@ -564,6 +599,36 @@ test("normalizeExplicitRepairAnchorText keeps english-primary headings in source
   const normalized = normalizeExplicitRepairAnchorText(source, translated, slice);
 
   assert.equal(normalized, "**选项 2：cco Sandbox**");
+});
+
+test("normalizeExplicitRepairAnchorText restores concept english-primary headings to bilingual canonical form", () => {
+  const slice = createSlice({
+    requiredAnchors: [
+      createAnchor(
+        "anchor-1",
+        "Command Restrictions",
+        "命令限制",
+        "command_restrictions",
+        "english-primary"
+      )
+    ],
+    pendingRepairs: [
+      {
+        repairId: "repair-1",
+        anchorId: "anchor-1",
+        failureType: "missing_anchor",
+        locationLabel: "标题",
+        instruction:
+          "当前分段标题“**Command Restrictions**”首次出现需补中英对照，修复目标是改为合法锚定形式“Command Restrictions（命令限制）”。"
+      }
+    ]
+  });
+  const source = "**Command Restrictions**";
+  const translated = "**Command Restrictions**";
+
+  const normalized = normalizeExplicitRepairAnchorText(source, translated, slice);
+
+  assert.equal(normalized, "**Command Restrictions（命令限制）**");
 });
 
 test("normalizeExplicitRepairAnchorText injects a named anchor back into a heading line", () => {

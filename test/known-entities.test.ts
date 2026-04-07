@@ -23,6 +23,7 @@ test("loadKnownEntities exposes the bundled formal known-entity table", () => {
 
   assert.equal(knownEntities.version, 1);
   assert.ok(knownEntities.entities.some((entity) => entity.id === "claude"));
+  assert.ok(knownEntities.entities.some((entity) => entity.id === "git"));
   assert.ok(knownEntities.entities.some((entity) => entity.id === "linux"));
   assert.ok(knownEntities.entities.some((entity) => entity.id === "macos"));
   assert.ok(knownEntities.entities.some((entity) => entity.id === "anthropic"));
@@ -84,7 +85,7 @@ test("buildKnownEntityCatalog applies formal display policies for promoted entit
           "",
           "pip and cargo can also access AWS credentials when allowed.",
           "",
-          "Linux and macOS differ from Windows, while Anthropic ships tooling for Node.js and Python."
+          "Git operations run alongside Linux and macOS and differ from Windows, while Anthropic ships tooling for Node.js and Python."
         ].join("\n"),
         separatorAfter: "",
         headingPath: ["Sample"],
@@ -100,7 +101,7 @@ test("buildKnownEntityCatalog applies formal display policies for promoted entit
               "",
               "pip and cargo can also access AWS credentials when allowed.",
               "",
-              "Linux and macOS differ from Windows, while Anthropic ships tooling for Node.js and Python."
+              "Git operations run alongside Linux and macOS and differ from Windows, while Anthropic ships tooling for Node.js and Python."
             ].join("\n"),
             separatorAfter: "",
             spanIds: [],
@@ -148,7 +149,7 @@ test("buildKnownEntityCatalog applies formal display policies for promoted entit
   assert.ok(awsCredentials);
   assert.equal(awsCredentials.displayPolicy, "acronym-compound");
 
-  for (const english of ["Linux", "macOS", "Windows", "Anthropic", "Node.js", "Python"]) {
+  for (const english of ["Git", "Linux", "macOS", "Windows", "Anthropic", "Node.js", "Python"]) {
     const anchor = slice.requiredAnchors.find((item) => item.english === english);
     assert.ok(anchor, `${english} should be present in required anchors`);
     assert.equal(anchor.displayPolicy, "english-only");
@@ -375,6 +376,108 @@ test("normalizeDiscoveredAnchorCatalog promotes a heading surface over an earlie
     chunkId: "chunk-2",
     segmentId: "chunk-2-segment-1"
   });
+});
+
+test("normalizeDiscoveredAnchorCatalog rejects discovered CLI flag anchors", () => {
+  const state = createTranslationRunState({
+    sourcePathHint: "sample.md",
+    documentTitle: "Sample",
+    frontmatterPresent: false,
+    protectedSpans: [],
+    chunks: [
+      {
+        source: "The `--dangerously-skip-permissions` flag exists as an escape hatch.\n",
+        separatorAfter: "",
+        headingPath: ["Sample"],
+        segments: [
+          {
+            kind: "translatable",
+            source: "The `--dangerously-skip-permissions` flag exists as an escape hatch.\n",
+            separatorAfter: "",
+            spanIds: [],
+            headingHints: [],
+            specialNotes: []
+          }
+        ]
+      }
+    ]
+  });
+
+  const normalized = normalizeDiscoveredAnchorCatalog(state, {
+    anchors: [
+      {
+        english: "--dangerously-skip-permissions flag",
+        chineseHint: "跳过权限标志",
+        familyKey: "dangerously-skip-permissions-flag",
+        displayPolicy: "english-primary",
+        sourceForms: ["--dangerously-skip-permissions flag"],
+        firstOccurrence: {
+          chunkId: "chunk-1",
+          segmentId: "chunk-1-segment-1"
+        }
+      }
+    ],
+    ignoredTerms: []
+  });
+
+  assert.equal(normalized.anchors.length, 0);
+  assert.deepEqual(normalized.ignoredTerms, [
+    {
+      english: "--dangerously-skip-permissions flag",
+      reason: "code-like surface form should not be promoted into anchor catalog"
+    }
+  ]);
+});
+
+test("normalizeDiscoveredAnchorCatalog rejects discovered config-path anchors", () => {
+  const state = createTranslationRunState({
+    sourcePathHint: "sample.md",
+    documentTitle: "Sample",
+    frontmatterPresent: false,
+    protectedSpans: [],
+    chunks: [
+      {
+        source: "Open .claude/settings.json to configure the sandbox.\n",
+        separatorAfter: "",
+        headingPath: ["Sample"],
+        segments: [
+          {
+            kind: "translatable",
+            source: "Open .claude/settings.json to configure the sandbox.\n",
+            separatorAfter: "",
+            spanIds: [],
+            headingHints: [],
+            specialNotes: []
+          }
+        ]
+      }
+    ]
+  });
+
+  const normalized = normalizeDiscoveredAnchorCatalog(state, {
+    anchors: [
+      {
+        english: ".claude/settings.json",
+        chineseHint: "沙盒配置文件",
+        familyKey: "claude-settings-json",
+        displayPolicy: "english-primary",
+        sourceForms: [".claude/settings.json"],
+        firstOccurrence: {
+          chunkId: "chunk-1",
+          segmentId: "chunk-1-segment-1"
+        }
+      }
+    ],
+    ignoredTerms: []
+  });
+
+  assert.equal(normalized.anchors.length, 0);
+  assert.deepEqual(normalized.ignoredTerms, [
+    {
+      english: ".claude/settings.json",
+      reason: "code-like surface form should not be promoted into anchor catalog"
+    }
+  ]);
 });
 
 test("writeKnownEntityCandidatesIfRequested persists unknown anchors into a candidate file", async () => {

@@ -35,6 +35,17 @@
       "notes": "默认允许裸英文首现。"
     },
     {
+      "id": "git",
+      "surface_forms": ["Git"],
+      "aliases": [],
+      "category": "tool",
+      "display_policy": "bare_english_ok",
+      "preferred_english": "Git",
+      "preferred_chinese_hint": "分布式版本控制系统",
+      "family_id": "git",
+      "notes": "常见版本控制工具名，默认允许裸英文首现。"
+    },
+    {
       "id": "docker",
       "surface_forms": ["Docker"],
       "aliases": [],

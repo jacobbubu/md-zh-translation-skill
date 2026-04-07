@@ -311,6 +311,54 @@ test("translation state infers english-primary display policy for english-led to
   assert.equal(slice.requiredAnchors[0]?.displayMode, "english-primary");
 });
 
+test("translation state matches anchors through emphasis-fragmented source text", () => {
+  const state = createTranslationRunState({
+    sourcePathHint: "sample.md",
+    documentTitle: "Sample",
+    frontmatterPresent: false,
+    protectedSpans: [],
+    chunks: [
+      {
+        source: "This is enforced by Linux *Seatbel*t.",
+        separatorAfter: "",
+        headingPath: ["Sample"],
+        segments: [
+          {
+            kind: "translatable",
+            source: "This is enforced by Linux *Seatbel*t.",
+            separatorAfter: "",
+            spanIds: [],
+            headingHints: [],
+            specialNotes: []
+          }
+        ]
+      }
+    ]
+  });
+
+  const catalog: AnchorCatalog = {
+    anchors: [
+      {
+        english: "Seatbelt",
+        chineseHint: "Seatbelt",
+        familyKey: "seatbelt",
+        displayPolicy: "english-only",
+        firstOccurrence: {
+          chunkId: "chunk-1",
+          segmentId: "chunk-1-segment-1"
+        }
+      }
+    ],
+    ignoredTerms: []
+  };
+
+  applyAnchorCatalog(state, catalog);
+
+  const slice = buildSegmentTaskSlice(state, "chunk-1", "chunk-1-segment-1");
+  assert.equal(slice.requiredAnchors[0]?.english, "Seatbelt");
+  assert.equal(slice.requiredAnchors[0]?.displayPolicy, "english-only");
+});
+
 test("translation state exposes canonical display metadata for english-primary anchors", () => {
   const state = createTranslationRunState({
     sourcePathHint: "sample.md",

@@ -1,7 +1,7 @@
 import type { PromptSlice } from "./translation-state.js";
 
 export type PromptAnchor = PromptSlice["requiredAnchors"][number];
-type AnchorLike = Pick<PromptAnchor, "english" | "chineseHint" | "displayPolicy"> & {
+type AnchorLike = Pick<PromptAnchor, "english" | "chineseHint" | "displayPolicy" | "category"> & {
   allowRepeatText?: boolean;
 };
 export type AnchorDisplayMode =
@@ -16,6 +16,8 @@ export type AnchorDisplay = {
   canonical: string;
   repeatText: string;
 };
+
+type EnglishPrimaryHeadingKind = "source-template" | "concept";
 
 export function coalesceRequiredAnchors(requiredAnchors: readonly PromptAnchor[]): PromptAnchor[] {
   return requiredAnchors.filter((anchor) => !isShadowedByLongerAnchor(anchor, requiredAnchors));
@@ -307,10 +309,12 @@ function buildHeadingTemplateContent(anchor: PromptAnchor, translatedHeadingCont
     return "";
   }
 
-  if (display.mode === "english-primary" || display.mode === "english-only") {
+  if (display.mode === "english-only") {
     return normalizedEnglish;
   }
-
+  if (display.mode === "english-primary") {
+    return normalizedEnglish;
+  }
   return buildCanonicalHeadingContent(anchor, translatedHeadingContent);
 }
 
@@ -344,6 +348,12 @@ export function normalizeExplicitRepairAnchorText(
       const sourceHeading = extractHeadingLikeLine(sourceLine);
       const translatedHeading = extractHeadingLikeLine(translatedLine);
 
+      const matchingAnchor = resolvePromptAnchorForExplicitRepair(target, slice);
+      const english =
+        matchingAnchor?.english ??
+        target.english ??
+        resolveHeadingEnglishFromSource(target.chineseHint, sourceHeadingLines, translatedHeadingLines);
+
       if (sourceHeading && translatedHeading) {
         if (shouldSkipWholeHeadingAnchorInjectionFromSource(sourceHeading.content)) {
           const strippedHeading = stripOperationalHeadingAnchor(translatedHeading.content, sourceHeading.content);
@@ -353,15 +363,6 @@ export function normalizeExplicitRepairAnchorText(
             continue;
           }
         }
-      }
-
-      const matchingAnchor = resolvePromptAnchorForExplicitRepair(target, slice);
-      const english =
-        matchingAnchor?.english ??
-        target.english ??
-        resolveHeadingEnglishFromSource(target.chineseHint, sourceHeadingLines, translatedHeadingLines);
-      if (!english) {
-        continue;
       }
 
       if (sourceHeading && translatedHeading) {
@@ -400,32 +401,58 @@ export function normalizeExplicitRepairAnchorText(
           if (templateRestoredHeading !== translatedLine) {
             translatedLine = templateRestoredHeading;
             changed = true;
+          }
+
+          const refreshedHeading = extractHeadingLikeLine(translatedLine);
+          if (!refreshedHeading) {
             continue;
           }
 
-          if (shouldSkipWholeHeadingAnchorInjection(sourceHeading.content, english)) {
-            const strippedHeading = stripOperationalHeadingAnchor(translatedHeading.content, english);
-            if (strippedHeading !== translatedHeading.content) {
-              translatedLine = translatedLine.replace(translatedHeading.content, strippedHeading);
+          if (english && shouldSkipWholeHeadingAnchorInjection(sourceHeading.content, english)) {
+            const strippedHeading = stripOperationalHeadingAnchor(refreshedHeading.content, english);
+            if (strippedHeading !== refreshedHeading.content) {
+              translatedLine = translatedLine.replace(refreshedHeading.content, strippedHeading);
               changed = true;
               continue;
             }
           }
 
+          const explicitRepairAnchor =
+            matchingAnchor ??
+            (canUseSyntheticExplicitRepairAnchor(target)
+              ? createSyntheticExplicitRepairAnchor(target)
+              : null);
           const normalizedHeading =
-            matchingAnchor
+            explicitRepairAnchor
               ? injectAnchorIntoHeadingRepairContent(
-                  translatedHeading.content,
+                  refreshedHeading.content,
                   target.chineseHint,
-                  matchingAnchor
+                  explicitRepairAnchor
                 )
-              : normalizeHeadingRepairContent(translatedHeading.content, english);
-          if (normalizedHeading !== translatedHeading.content) {
-            translatedLine = translatedLine.replace(translatedHeading.content, normalizedHeading);
+              : english
+                ? normalizeHeadingRepairContent(refreshedHeading.content, english)
+                : refreshedHeading.content;
+          if (normalizedHeading !== refreshedHeading.content) {
+            translatedLine = translatedLine.replace(refreshedHeading.content, normalizedHeading);
             changed = true;
             continue;
           }
         }
+      }
+
+      if (target.currentText) {
+        const replacement = target.chineseHint;
+        if (replacement && replacement !== target.currentText) {
+          const rewrittenLine = replaceExplicitRepairCurrentText(translatedLine, target.currentText, replacement);
+          if (rewrittenLine !== translatedLine) {
+            translatedLine = rewrittenLine;
+            changed = true;
+            continue;
+          }
+        }
+      }
+      if (!english) {
+        continue;
       }
 
       if (
@@ -471,7 +498,10 @@ function restoreHeadingTemplateLine(
       normalizeAnchorEnglishForSourceMatch(anchor.english)
   );
   if (exactAnchor) {
-    const canonicalContent = buildHeadingTemplateContent(exactAnchor, translatedHeading.content);
+    const canonicalContent =
+      classifyEnglishPrimaryHeadingKind(sourceHeading.content, exactAnchor) === "concept"
+        ? buildCanonicalHeadingContent(exactAnchor, translatedHeading.content)
+        : buildHeadingTemplateContent(exactAnchor, translatedHeading.content);
     if (canonicalContent && canonicalContent !== translatedHeading.content) {
       return translatedRawLine.replace(translatedHeading.content, canonicalContent);
     }
@@ -488,7 +518,10 @@ function restoreHeadingTemplateLine(
       continue;
     }
 
-    const canonicalSuffix = buildHeadingTemplateContent(anchor, translatedHeading.content);
+    const canonicalSuffix =
+      classifyEnglishPrimaryHeadingKind(sourceHeading.content, anchor) === "concept"
+        ? buildCanonicalHeadingContent(anchor, translatedHeading.content)
+        : buildHeadingTemplateContent(anchor, translatedHeading.content);
     if (!canonicalSuffix) {
       continue;
     }
@@ -706,6 +739,30 @@ function findFuzzyChineseHeadingAnchorCandidate(
   return null;
 }
 
+function createSyntheticExplicitRepairAnchor(target: ExplicitRepairTarget): PromptAnchor | null {
+  if (!target.english) {
+    return null;
+  }
+
+  return {
+    anchorId: `synthetic:${target.english}`,
+    english: target.english,
+    chineseHint: target.chineseHint,
+    familyId: `synthetic:${target.english}`,
+    requiresBilingual: true,
+    displayPolicy: "chinese-primary"
+  };
+}
+
+function canUseSyntheticExplicitRepairAnchor(target: ExplicitRepairTarget): boolean {
+  return (
+    Boolean(target.english) &&
+    !/[A-Za-z]/.test(target.chineseHint) &&
+    !/[：:]/.test(target.chineseHint) &&
+    !/[（(]/.test(target.chineseHint)
+  );
+}
+
 function isChineseHeadingAnchorChar(char: string): boolean {
   return /[\u4e00-\u9fff]/u.test(char);
 }
@@ -714,12 +771,23 @@ function resolvePromptAnchorForExplicitRepair(
   target: ExplicitRepairTarget,
   slice: PromptSlice
 ): PromptAnchor | null {
-  const targetEnglish = target.english?.toLowerCase();
   const anchors = dedupePromptAnchors([
     ...slice.requiredAnchors,
     ...slice.repeatAnchors,
     ...slice.establishedAnchors
   ]);
+  const normalizedChineseHint = normalizeAnchorText(target.chineseHint);
+  const chineseMatch = anchors.find(
+    (anchor) =>
+      normalizeAnchorText(anchor.chineseHint) === normalizedChineseHint ||
+      normalizeAnchorText(anchor.canonicalDisplay ?? "") === normalizedChineseHint ||
+      (anchor.allowedDisplayForms ?? []).some((display) => normalizeAnchorText(display) === normalizedChineseHint)
+  );
+  if (chineseMatch) {
+    return chineseMatch;
+  }
+
+  const targetEnglish = target.english?.toLowerCase();
   if (!targetEnglish) {
     return anchors.find((anchor) => containsSourceAnchorPhrase(target.chineseHint, anchor.english)) ?? null;
   }
@@ -761,6 +829,9 @@ function normalizeSingleAnchor(
     normalized = normalized.replace(new RegExp(`${escapedChinese}（${escapedChinese}）`, "g"), canonical);
     normalized = normalizeMixedChinesePrimaryParentheses(normalized, chineseHint, english, canonical);
     normalized = normalizePrefixedChinesePrimaryParentheses(normalized, chineseHint, english, canonical);
+    if (display.mode === "chinese-primary") {
+      normalized = normalizeChinesePrimaryInlineExplanation(normalized, chineseHint, english, canonical);
+    }
     if (display.mode === "acronym-compound") {
       normalized = normalizeAcronymCompoundParentheses(normalized, display);
     }
@@ -849,6 +920,21 @@ function normalizePrefixedChinesePrimaryParentheses(
   return text.replace(
     new RegExp(`(?:全新|新版|新的|新)${escapedChinese}（${escapedEnglish}）`, "g"),
     canonical
+  );
+}
+
+function normalizeChinesePrimaryInlineExplanation(
+  text: string,
+  chineseDisplay: string,
+  english: string,
+  canonical: string
+): string {
+  const escapedChinese = escapeRegExp(chineseDisplay);
+  const escapedEnglish = escapeRegExp(english);
+
+  return text.replace(
+    new RegExp(`${escapedChinese}（${escapedEnglish}\\s*[，,:：]\\s*([^）]+)）`, "g"),
+    (_match, explanation: string) => `${canonical}：${explanation.trim()}`
   );
 }
 
@@ -1087,7 +1173,81 @@ function shouldSkipEnglishPrimaryHeadingCanonicalInjection(
     return false;
   }
 
-  return containsSourceAnchorPhrase(sourceHeading.content, anchor.english);
+  if (!containsSourceAnchorPhrase(sourceHeading.content, anchor.english)) {
+    return false;
+  }
+
+  return classifyEnglishPrimaryHeadingKind(sourceHeading.content, anchor) === "source-template";
+}
+
+function classifyEnglishPrimaryHeadingKind(
+  sourceHeadingSource: string,
+  anchor: PromptAnchor
+): EnglishPrimaryHeadingKind {
+  const sourceHeadingContent = extractHeadingLikeLine(sourceHeadingSource)?.content ?? sourceHeadingSource.trim();
+  const display = resolveAnchorDisplay(anchor);
+  if (display.mode !== "english-primary") {
+    return "concept";
+  }
+
+  if (isProductLikeAnchorCategory(anchor.category)) {
+    return "source-template";
+  }
+
+  const exactEnglishMatch =
+    normalizeAnchorEnglishForSourceMatch(sourceHeadingContent) ===
+    normalizeAnchorEnglishForSourceMatch(anchor.english);
+
+  if (!exactEnglishMatch) {
+    return "source-template";
+  }
+
+  if (looksLikeBrandedEnglishPrimarySurface(anchor)) {
+    return "source-template";
+  }
+
+  return "concept";
+}
+
+function isProductLikeAnchorCategory(category: string | undefined): boolean {
+  if (!category) {
+    return false;
+  }
+
+  return new Set([
+    "product",
+    "company",
+    "framework",
+    "tool",
+    "package",
+    "platform"
+  ]).has(category.trim().toLowerCase());
+}
+
+function looksLikeBrandedEnglishPrimarySurface(anchor: PromptAnchor): boolean {
+  const english = anchor.english.trim();
+  if (!english) {
+    return false;
+  }
+
+  if (/[/.+_-]/.test(english) || /\d/.test(english)) {
+    return true;
+  }
+
+  const tokens = english.split(/\s+/).filter(Boolean);
+  if (
+    tokens.some((token) =>
+      /^[A-Z]{2,}$/.test(token) ||
+      /^[a-z]{2,}$/.test(token) ||
+      /[a-z][A-Z]/.test(token) ||
+      /[A-Z][a-z]+[A-Z]/.test(token)
+    )
+  ) {
+    return true;
+  }
+
+  const firstToken = tokens[0] ?? "";
+  return Boolean(firstToken && anchor.chineseHint.trim().toLowerCase().startsWith(firstToken.toLowerCase()));
 }
 
 type HeadingLine = {
@@ -1117,14 +1277,30 @@ function extractHeadingLikeLine(rawLine: string): HeadingLine | null {
 type ExplicitRepairTarget = {
   chineseHint: string;
   english: string | null;
+  currentText: string | null;
 };
 
 function parseExplicitRepairTarget(instruction: string): ExplicitRepairTarget | null {
+  const rewriteMatch = instruction.match(/将“([^”]+)”改为与全文锚点一致的“([^”]+)”(?:术语形式|形式)?/u);
+  if (rewriteMatch?.[1] && rewriteMatch[2]) {
+    const rewrittenTarget = normalizeExplicitRepairChineseHint(
+      stripHeadingMarkers(stripInlineMarkdownMarkers(rewriteMatch[2]).trim())
+    );
+    if (rewrittenTarget && /[\u4e00-\u9fff]/u.test(rewrittenTarget) && !/[A-Za-z]/.test(rewrittenTarget)) {
+      return {
+        chineseHint: rewrittenTarget,
+        english: null,
+        currentText: stripHeadingMarkers(stripInlineMarkdownMarkers(rewriteMatch[1]).trim())
+      };
+    }
+  }
+
   const match = instruction.match(/需补为“([^（”]+)（([^）]+)）”/);
   if (match?.[1] && match[2]) {
     return {
       chineseHint: match[1].trim(),
-      english: match[2].trim()
+      english: match[2].trim(),
+      currentText: null
     };
   }
 
@@ -1149,7 +1325,7 @@ function parseExplicitRepairTarget(instruction: string): ExplicitRepairTarget | 
     return null;
   }
 
-  return { chineseHint, english };
+  return { chineseHint, english, currentText: null };
 }
 
 function stripInlineMarkdownMarkers(text: string): string {
@@ -1246,6 +1422,29 @@ function replaceWholePhraseOnce(text: string, needle: string, replacement: strin
 
   const pattern = new RegExp(`\\b${escapeRegExp(needle)}\\b`);
   return text.replace(pattern, replacement);
+}
+
+function replaceExplicitRepairCurrentText(text: string, currentText: string, replacement: string): string {
+  if (text.includes(currentText)) {
+    return replaceFirst(text, currentText, replacement);
+  }
+
+  const mixedMatch = currentText.match(/^([A-Za-z][A-Za-z0-9.+/_ -]*?)\s+([\u4e00-\u9fff][\u4e00-\u9fff0-9A-Za-z（）()·、，,:：\-–—\s]*)$/u);
+  if (!mixedMatch?.[1] || !mixedMatch[2]) {
+    return text;
+  }
+
+  const englishPrefix = mixedMatch[1].trim();
+  const chineseTail = mixedMatch[2].trim();
+  if (!englishPrefix || !chineseTail) {
+    return text;
+  }
+
+  const expandedPattern = new RegExp(
+    `${escapeRegExp(englishPrefix)}(?:（[^）\\n]+）)?\\s*${escapeRegExp(chineseTail)}`,
+    "g"
+  );
+  return text.replace(expandedPattern, replacement);
 }
 
 function normalizeRepeatedEnglishParenthesesWithLocalHints(text: string): string {
