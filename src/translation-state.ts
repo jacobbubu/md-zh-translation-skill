@@ -144,6 +144,8 @@ export type ChunkState = {
       segmentId: string | null;
       segmentIndex: number;
       mustFix: string[];
+      analysisPlanIds?: string[];
+      analysisTargets?: string[];
     }>;
   } | null;
 };
@@ -1073,6 +1075,8 @@ export function markChunkFailure(
       segmentId: string | null;
       segmentIndex: number;
       mustFix: string[];
+      analysisPlanIds?: string[];
+      analysisTargets?: string[];
     }>;
   }
 ): void {
@@ -1083,7 +1087,9 @@ export function markChunkFailure(
     segments: payload.segments.map((segment) => ({
       segmentId: segment.segmentId,
       segmentIndex: segment.segmentIndex,
-      mustFix: [...segment.mustFix]
+      mustFix: [...segment.mustFix],
+      ...(segment.analysisPlanIds?.length ? { analysisPlanIds: [...segment.analysisPlanIds] } : {}),
+      ...(segment.analysisTargets?.length ? { analysisTargets: [...segment.analysisTargets] } : {})
     }))
   };
 }

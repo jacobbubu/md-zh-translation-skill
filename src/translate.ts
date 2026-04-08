@@ -2731,10 +2731,20 @@ async function translateProtectedChunk(
       .filter((audit) => !isHardPass(audit))
       .map((audit) => {
         const draftedSegment = draftedSegments.find((item) => item.segment.index + 1 === audit.segment_index);
+        const slice = draftedSegment
+          ? buildSegmentTaskSlice(context.state, context.chunkId, draftedSegment.segmentId)
+          : null;
+        const analysisBindings = slice
+          ? collectChunkFailureAnalysisBindings(slice, audit.must_fix)
+          : { analysisPlanIds: [] as string[], analysisTargets: [] as string[] };
         return {
           segmentId: draftedSegment?.segmentId ?? null,
           segmentIndex: audit.segment_index,
-          mustFix: audit.must_fix.length > 0 ? [...audit.must_fix] : ["hard gate failed"]
+          mustFix: audit.must_fix.length > 0 ? [...audit.must_fix] : ["hard gate failed"],
+          ...(analysisBindings.analysisPlanIds.length
+            ? { analysisPlanIds: analysisBindings.analysisPlanIds }
+            : {}),
+          ...(analysisBindings.analysisTargets.length ? { analysisTargets: analysisBindings.analysisTargets } : {})
         };
       });
     const remaining = failedSegments
@@ -2762,6 +2772,30 @@ async function translateProtectedChunk(
     repairCyclesUsed,
     gateAudit: mergeGateAudits(bundledAudit.segments),
     nextLocalSpanIndex
+  };
+}
+
+function collectChunkFailureAnalysisBindings(
+  slice: PromptSlice,
+  mustFix: readonly string[]
+): { analysisPlanIds: string[]; analysisTargets: string[] } {
+  const matchedPlans = slice.analysisPlans.filter((plan) =>
+    mustFix.some((instruction) =>
+      findMatchingAnalysisPlansForInstruction(slice, instruction).some((matchedPlan) => matchedPlan.id === plan.id)
+    )
+  );
+
+  return {
+    analysisPlanIds: matchedPlans.map((plan) => plan.id),
+    analysisTargets: [
+      ...new Set(
+        matchedPlans.flatMap((plan) =>
+          [plan.sourceText, plan.targetText, plan.english, plan.chineseHint, ...(plan.governedTerms ?? [])].filter(
+            (value): value is string => Boolean(value?.trim())
+          )
+        )
+      )
+    ]
   };
 }
 

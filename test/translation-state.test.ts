@@ -177,7 +177,9 @@ test("translation state persists chunk-level failure details for bundled audit f
       {
         segmentId: "chunk-1-segment-1",
         segmentIndex: 1,
-        mustFix: ["标题缺少英文锚定"]
+        mustFix: ["标题缺少英文锚定"],
+        analysisPlanIds: ["heading:chunk-1-segment-1:system-requirements"],
+        analysisTargets: ["系统要求", "System Requirements"]
       }
     ]
   });
@@ -188,7 +190,9 @@ test("translation state persists chunk-level failure details for bundled audit f
     {
       segmentId: "chunk-1-segment-1",
       segmentIndex: 1,
-      mustFix: ["标题缺少英文锚定"]
+      mustFix: ["标题缺少英文锚定"],
+      analysisPlanIds: ["heading:chunk-1-segment-1:system-requirements"],
+      analysisTargets: ["系统要求", "System Requirements"]
     }
   ]);
 });
