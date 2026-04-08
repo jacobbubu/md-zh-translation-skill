@@ -571,9 +571,24 @@ export function normalizeExplicitRepairAnchorText(
       }
 
       if (target.currentText) {
-        const replacement = target.chineseHint;
+        const explicitRepairAnchor =
+          matchingAnchor ??
+          (canUseSyntheticExplicitRepairAnchor(target)
+            ? createSyntheticExplicitRepairAnchor(target)
+            : null);
+        const replacement =
+          explicitRepairAnchor
+            ? resolveAnchorDisplay(explicitRepairAnchor).canonical
+            : target.english
+              ? `${target.chineseHint}（${target.english}）`
+              : target.chineseHint;
         if (replacement && replacement !== target.currentText) {
-          const rewrittenLine = replaceExplicitRepairCurrentText(translatedLine, target.currentText, replacement);
+          const rewrittenLine = replaceExplicitRepairCurrentText(
+            translatedLine,
+            target.currentText,
+            replacement,
+            target.english
+          );
           if (rewrittenLine !== translatedLine) {
             translatedLine = rewrittenLine;
             changed = true;
@@ -1499,6 +1514,17 @@ type ExplicitRepairTarget = {
 };
 
 function parseExplicitRepairTarget(instruction: string): ExplicitRepairTarget | null {
+  const directBilingualRewriteMatch =
+    instruction.match(/将“([^”]+)”改为“([^（”]+)（([^）]+)）”/u) ??
+    instruction.match(/将`([^`]+)`改为`([^（`]+)（([^）]+)）`/u);
+  if (directBilingualRewriteMatch?.[1] && directBilingualRewriteMatch[2] && directBilingualRewriteMatch[3]) {
+    return {
+      chineseHint: directBilingualRewriteMatch[2].trim(),
+      english: directBilingualRewriteMatch[3].trim(),
+      currentText: directBilingualRewriteMatch[1].trim()
+    };
+  }
+
   const preserveMatch =
     instruction.match(/保留\s*`([^`]+)`[^。\n]*不要只写成\s*`([^`]+)`/) ??
     instruction.match(/保留\s*“([^”]+)”[^。\n]*不要只写成\s*“([^”]+)”/);
@@ -1658,7 +1684,25 @@ function replaceWholePhraseOnce(text: string, needle: string, replacement: strin
   return text.replace(pattern, replacement);
 }
 
-function replaceExplicitRepairCurrentText(text: string, currentText: string, replacement: string): string {
+function replaceExplicitRepairCurrentText(
+  text: string,
+  currentText: string,
+  replacement: string,
+  english: string | null
+): string {
+  if (/[A-Za-z]/.test(currentText)) {
+    const aliasRewritten = replaceExplicitRepairAliasText(text, currentText, english, replacement);
+    if (aliasRewritten !== text) {
+      return aliasRewritten;
+    }
+
+     const trimmedEnglish = english?.trim().toLowerCase() ?? "";
+     const trimmedCurrent = currentText.trim().toLowerCase();
+     if (trimmedEnglish && trimmedCurrent && trimmedEnglish.includes(trimmedCurrent) && trimmedEnglish !== trimmedCurrent) {
+       return text;
+     }
+  }
+
   if (text.includes(currentText)) {
     return replaceFirst(text, currentText, replacement);
   }
@@ -1679,6 +1723,28 @@ function replaceExplicitRepairCurrentText(text: string, currentText: string, rep
     "g"
   );
   return text.replace(expandedPattern, replacement);
+}
+
+function replaceExplicitRepairAliasText(
+  text: string,
+  currentText: string,
+  english: string | null,
+  replacement: string
+): string {
+  const trimmedCurrent = currentText.trim();
+  if (!trimmedCurrent) {
+    return text;
+  }
+
+  const remainder = english?.trim().toLowerCase().startsWith(trimmedCurrent.toLowerCase())
+    ? english.trim().slice(trimmedCurrent.length).trim()
+    : "";
+  const remainderFirstToken = remainder.split(/\s+/)[0]?.trim();
+  const negativeLookahead = remainderFirstToken
+    ? `(?!\\s+${escapeRegExp(remainderFirstToken)}\\b)`
+    : "";
+  const aliasPattern = new RegExp(`\\b${escapeRegExp(trimmedCurrent)}\\b${negativeLookahead}\\s*`);
+  return text.replace(aliasPattern, replacement);
 }
 
 function normalizeRepeatedEnglishParenthesesWithLocalHints(text: string): string {

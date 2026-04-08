@@ -4717,6 +4717,136 @@ test("translateMarkdownArticle synthesizes a local fallback anchor for an inline
   assert.match(output.markdown, /批准疲劳（approval fatigue）/);
 });
 
+test("translateMarkdownArticle infers an inline concept local fallback anchor from quoted location text", async () => {
+  const source = '> This creates what security researchers call "approval fatigue."\n';
+  let auditCount = 0;
+
+  const output = await translateMarkdownArticle(source, {
+    executor: {
+      async execute(prompt, options) {
+        if (isDocumentAnalysisPrompt(prompt)) {
+          return createExecResult(createAnchorCatalog([]));
+        }
+
+        if (isBundledAuditPrompt(prompt, options)) {
+          auditCount += 1;
+          if (auditCount === 1) {
+            return createExecResult(
+              wrapPerSegmentAudits(prompt, [
+                {
+                  segment_index: 1,
+                  audit: createAudit(false, [
+                    '位置：第二段引用“这就造成了安全研究人员所说的‘审批疲劳’……”。问题：术语 approval fatigue 在全文当前分块首次出现时未建立中英文对照。修复目标：在该引用句内为该术语补齐合法的首现中英文锚定，且不要把整句英文原文整句括注进去。'
+                  ])
+                }
+              ])
+            );
+          }
+
+          return createExecResult(wrapPerSegmentAudits(prompt, [{ segment_index: 1, audit: createAudit(true) }]));
+        }
+
+        if (prompt.includes("【must_fix】")) {
+          const currentTranslation = extractPromptSection(prompt, "【当前译文】") ?? "";
+          return createExecResult(currentTranslation);
+        }
+
+        if (options.outputSchema || prompt.includes('"hard_checks"') || prompt.includes("只返回 JSON")) {
+          return createExecResult(JSON.stringify(createAudit(true)));
+        }
+
+        const currentTranslation = extractPromptSection(prompt, "【当前译文】");
+        if (currentTranslation !== null) {
+          return createExecResult(currentTranslation);
+        }
+
+        return createExecResult("> 这就造成了安全研究人员所说的“审批疲劳”……");
+      }
+    },
+    formatter: async (markdown) => markdown
+  });
+
+  assert.match(output.markdown, /审批疲劳（approval fatigue）/);
+});
+
+test("translateMarkdownArticle rewrites an alias first mention to the canonical concept display inside a quoted sentence", async () => {
+  const source = [
+    '> Sandbox works by separating these two cases.',
+    "",
+    "## What Sandbox Mode Protects Against",
+    "",
+    "Sandbox mode addresses real attack vectors.",
+    ""
+  ].join("\n");
+  let auditCount = 0;
+
+  const output = await translateMarkdownArticle(source, {
+    executor: {
+      async execute(prompt, options) {
+        if (isDocumentAnalysisPrompt(prompt)) {
+          return createExecResult(
+            createAnchorCatalog([
+              {
+                english: "sandbox mode",
+                chineseHint: "沙盒模式",
+                familyKey: "sandbox-mode",
+                displayPolicy: "chinese-primary",
+                chunkId: "chunk-1",
+                segmentId: "chunk-1-segment-1"
+              }
+            ])
+          );
+        }
+
+        if (isBundledAuditPrompt(prompt, options)) {
+          auditCount += 1;
+          if (auditCount === 1) {
+            return createExecResult(
+              wrapPerSegmentAudits(prompt, [
+                {
+                  segment_index: 1,
+                  audit: createAudit(false, [
+                    '位置：引用段“Sandbox 的工作方式，就是把这两种情况区分开来。”；问题：Sandbox 在本分段中先于“沙盒模式（sandbox mode）”出现，但未在首次出现处建立稳定的中英对应；修复目标：在该引用句内就地补齐并与后文“沙盒模式（sandbox mode）”保持同一概念锚定，不要把修复转移到后文标题或正文。'
+                  ])
+                }
+              ])
+            );
+          }
+
+          return createExecResult(wrapPerSegmentAudits(prompt, [{ segment_index: 1, audit: createAudit(true) }]));
+        }
+
+        if (prompt.includes("【必须修复】")) {
+          const currentTranslation = extractPromptSection(prompt, "【当前译文】") ?? "";
+          return createExecResult(currentTranslation);
+        }
+
+        if (options.outputSchema || prompt.includes('"hard_checks"') || prompt.includes("只返回 JSON")) {
+          return createExecResult(JSON.stringify(createAudit(true)));
+        }
+
+        const currentTranslation = extractPromptSection(prompt, "【当前译文】");
+        if (currentTranslation !== null) {
+          return createExecResult(currentTranslation);
+        }
+
+        return createExecResult([
+          '> Sandbox 的工作方式，就是把这两种情况区分开来。',
+          "",
+          "## 沙盒模式保护什么",
+          "",
+          "沙盒模式可以处理真实的攻击向量。",
+          ""
+        ].join("\n"));
+      }
+    },
+    formatter: async (markdown) => markdown
+  });
+
+  assert.match(output.markdown, /沙盒模式（[Ss]andbox mode）的工作方式，就是把这两种情况区分开来/);
+  assert.match(output.markdown, /## 沙盒模式（[Ss]andbox mode）保护什么/);
+});
+
 test("translateMarkdownArticle synthesizes heading-local fallback anchors for configuration titles named by repair", async () => {
   const source = [
     "# Title",

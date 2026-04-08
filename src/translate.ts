@@ -1863,6 +1863,27 @@ function extractInlineLocalizedRepairTarget(
   return null;
 }
 
+function inferLocalizedRepairTargetFromLocationText(
+  locationText: string,
+  english: string
+): { english: string; chineseHint: string } | null {
+  const normalizedEnglish = english.trim();
+  if (!normalizedEnglish || looksCodeLikeLocalFallbackTarget(normalizedEnglish)) {
+    return null;
+  }
+
+  const quotedCandidates = [...locationText.matchAll(/[“"‘'「『]([^”"’'」』\n]{1,40})[”"’'」』]/gu)]
+    .map((match) => normalizeLocalFallbackChineseHint(match[1] ?? ""))
+    .filter((candidate) => candidate && looksLikeLocalizedRepairTarget(candidate));
+
+  const shortestCandidate = quotedCandidates.sort((left, right) => left.length - right.length)[0];
+  if (shortestCandidate) {
+    return { english: normalizedEnglish, chineseHint: shortestCandidate };
+  }
+
+  return null;
+}
+
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
@@ -1915,7 +1936,9 @@ function inferRepairTargetEnglish(
 function extractExplicitRepairLocationText(instruction: string): string | null {
   return (
     instruction.match(/位置：\s*`([^`\n]+)`/)?.[1]?.trim() ??
+    instruction.match(/位置：[^“`\n]*“([^”\n]+)”/)?.[1]?.trim() ??
     instruction.match(/位置：\s*“([^”\n]+)”/)?.[1]?.trim() ??
+    instruction.match(/位置：(.+?)[。；]问题[:：]/u)?.[1]?.trim() ??
     instruction.match(/当前(?:分段)?标题“([^”]+)”/)?.[1]?.trim() ??
     instruction.match(/`([^`]+)`/)?.[1]?.trim() ??
     null
@@ -1932,13 +1955,18 @@ function synthesizeLocalRepairInstruction(
     return instruction;
   }
 
-  const inferredAnchorId = inferRepairAnchorId(slice, draftedSegment.segment.source, instruction);
-  if (inferredAnchorId && !inferredAnchorId.startsWith("local:")) {
+  const locationText = extractExplicitRepairLocationText(instruction);
+  if (!locationText) {
     return instruction;
   }
 
-  const locationText = extractExplicitRepairLocationText(instruction);
-  if (!locationText) {
+  const aliasCanonicalTarget = extractAliasCanonicalRepairTarget(instruction, locationText);
+  if (aliasCanonicalTarget) {
+    return `位置：\`${locationText}\`。问题：首次出现的概念别名未与全文 canonical 锚定保持一致。修复目标：将“${aliasCanonicalTarget.currentText}”改为“${aliasCanonicalTarget.chineseHint}（${aliasCanonicalTarget.english}）”，并保持其余内容不变。`;
+  }
+
+  const inferredAnchorId = inferRepairAnchorId(slice, draftedSegment.segment.source, instruction);
+  if (inferredAnchorId && !inferredAnchorId.startsWith("local:")) {
     return instruction;
   }
 
@@ -1951,13 +1979,55 @@ function synthesizeLocalRepairInstruction(
     containsWholePhraseInText(draftedSegment.segment.source, targetEnglish)
   );
   for (const englishTarget of explicitEnglishTargets) {
-    const inlineTarget = extractInlineLocalizedRepairTarget(instruction, englishTarget);
+    const inlineTarget =
+      extractInlineLocalizedRepairTarget(instruction, englishTarget) ??
+      inferLocalizedRepairTargetFromLocationText(locationText, englishTarget);
     if (inlineTarget) {
       return `位置：\`${inlineTarget.chineseHint}\`。问题：首次出现的工具/专名未完整建立中英文对照。修复目标：在该位置本身需补为“${inlineTarget.chineseHint}（${inlineTarget.english}）”。`;
     }
   }
 
   return instruction;
+}
+
+function extractAliasCanonicalRepairTarget(
+  instruction: string,
+  locationText: string
+): { currentText: string; chineseHint: string; english: string } | null {
+  const canonicalMatch = instruction.match(/“([^”\n]+)（([^）\n]+)）”/u);
+  if (!canonicalMatch?.[1] || !canonicalMatch[2]) {
+    return null;
+  }
+
+  const chineseHint = canonicalMatch[1].trim();
+  const english = canonicalMatch[2].trim();
+  if (!chineseHint || !english) {
+    return null;
+  }
+
+  const englishFragments = [...locationText.matchAll(/\b([A-Za-z][A-Za-z0-9.+/_ -]{0,79})\b/g)]
+    .map((match) => match[1]?.trim())
+    .filter((value): value is string => Boolean(value))
+    .sort((left, right) => right.length - left.length);
+
+  const alias = englishFragments.find((candidate) => {
+    const normalizedCandidate = candidate.toLowerCase();
+    const normalizedEnglish = english.toLowerCase();
+    return (
+      normalizedCandidate !== normalizedEnglish &&
+      normalizedEnglish.includes(normalizedCandidate)
+    );
+  });
+
+  if (!alias) {
+    return null;
+  }
+
+  return {
+    currentText: alias,
+    chineseHint,
+    english
+  };
 }
 
 function inferLocalRepairTarget(
@@ -2213,6 +2283,13 @@ function suppressCoveredAnchorMustFix(
 
       if (anchorId) {
         const anchor = anchors.find((item) => item.anchorId === anchorId);
+        if (
+          anchor &&
+          explicitLocationText &&
+          !isAnchorDisplaySatisfiedAtExplicitLocation(draftedSegment, explicitLocationText, anchor)
+        ) {
+          return true;
+        }
         if (anchor && isAnchorDisplayAlreadySatisfied(draftedSegment, anchor)) {
           return false;
         }
@@ -2284,6 +2361,22 @@ function hasSafeLocalFallbackAnchorTarget(
   return (
     inferLocalRepairTarget(draftedSegment.segment.source, draftedSegment.restoredBody, locationText) !== null
   );
+}
+
+function isAnchorDisplaySatisfiedAtExplicitLocation(
+  draftedSegment: DraftedSegmentState,
+  explicitLocationText: string,
+  anchor: PromptSlice["requiredAnchors"][number]
+): boolean {
+  const restoredLine = draftedSegment.restoredBody
+    .split(/\r?\n/)
+    .find((line) => line.includes(explicitLocationText));
+
+  if (!restoredLine) {
+    return false;
+  }
+
+  return lineSatisfiesAnchorDisplay(restoredLine, anchor);
 }
 
 function isAnchorDisplayAlreadySatisfied(
@@ -3184,7 +3277,7 @@ function extractExplicitEnglishTargetsFromMustFix(mustFix: readonly string[]): s
     }
 
     for (const match of item.matchAll(
-      /(?:核心术语|英文目标|英文词|英文原名|产品名|工具名|项目名|模型名|CLI 名称|命令名|框架名|平台名|机制名|概念)\s+([A-Za-z][A-Za-z0-9./+&:_ -]{0,79}?)(?=\s*(?:首次|首现|在|需|应|未|缺少|没有|作为|并|，|。|；|：|$))/g
+      /(?:核心术语|术语|英文目标|英文词|英文原名|产品名|工具名|项目名|模型名|CLI 名称|命令名|框架名|平台名|机制名|概念)\s+([A-Za-z][A-Za-z0-9./+&:_ -]{0,79}?)(?=\s*(?:首次|首现|在|需|应|未|缺少|没有|作为|并|，|。|；|：|$))/g
     )) {
       const candidate = match[1]?.trim();
       if (!candidate) {
