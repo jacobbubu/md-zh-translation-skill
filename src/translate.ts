@@ -2291,6 +2291,7 @@ function buildStructuredSegmentAuditResult(
   const filteredAudit = suppressCoveredAnchorMustFix(state, draftedSegment, slice, expandedAudit);
   const repairTasks: RepairTask[] = filteredAudit.must_fix.map((rawInstruction, index) => {
     const instruction = synthesizeLocalRepairInstruction(draftedSegment, slice, filteredAudit, rawInstruction);
+    const analysisBindings = collectRepairTaskAnalysisBindings(slice, instruction);
     return {
       id: `${draftedSegment.segmentId}-repair-${state.repairs.length + index + 1}`,
       segmentId: draftedSegment.segmentId,
@@ -2298,6 +2299,9 @@ function buildStructuredSegmentAuditResult(
       failureType: inferRepairFailureType(filteredAudit, instruction),
       locationLabel: inferRepairLocationLabelFromInstruction(draftedSegment.segment.source, instruction),
       instruction,
+      ...(analysisBindings.analysisPlanIds.length ? { analysisPlanIds: analysisBindings.analysisPlanIds } : {}),
+      ...(analysisBindings.analysisPlanKinds.length ? { analysisPlanKinds: analysisBindings.analysisPlanKinds } : {}),
+      ...(analysisBindings.analysisTargets.length ? { analysisTargets: analysisBindings.analysisTargets } : {}),
       status: "pending"
     };
   });
@@ -2307,6 +2311,30 @@ function buildStructuredSegmentAuditResult(
     hardChecks: filteredAudit.hard_checks,
     repairTasks,
     rawMustFix: filteredAudit.must_fix
+  };
+}
+
+function collectRepairTaskAnalysisBindings(
+  slice: PromptSlice,
+  instruction: string
+): {
+  analysisPlanIds: string[];
+  analysisPlanKinds: Array<PromptSlice["analysisPlans"][number]["kind"]>;
+  analysisTargets: string[];
+} {
+  const matchedPlans = findMatchingAnalysisPlansForInstruction(slice, instruction);
+  return {
+    analysisPlanIds: matchedPlans.map((plan) => plan.id),
+    analysisPlanKinds: [...new Set(matchedPlans.map((plan) => plan.kind))],
+    analysisTargets: [
+      ...new Set(
+        matchedPlans.flatMap((plan) =>
+          [plan.sourceText, plan.targetText, plan.english, plan.chineseHint, ...(plan.governedTerms ?? [])].filter(
+            (value): value is string => Boolean(value?.trim())
+          )
+        )
+      )
+    ]
   };
 }
 
@@ -2359,6 +2387,10 @@ function suppressCoveredAnchorMustFix(
   const remainingMustFix = audit.must_fix.filter((instruction) => {
     const anchors = [...slice.requiredAnchors, ...slice.repeatAnchors, ...slice.establishedAnchors];
     const explicitLocationText = extractExplicitRepairLocationText(instruction);
+    if (isAnalysisPlanTargetAlreadySatisfied(slice, draftedSegment, instruction, explicitLocationText)) {
+      return false;
+    }
+
     if (inferRepairFailureType(audit, instruction) === "missing_anchor") {
       const anchorId = inferRepairAnchorId(slice, draftedSegment.segment.source, instruction);
       if (!anchorId) {
@@ -2431,6 +2463,36 @@ function suppressCoveredAnchorMustFix(
     hard_checks: nextHardChecks,
     must_fix: remainingMustFix
   };
+}
+
+function isAnalysisPlanTargetAlreadySatisfied(
+  slice: PromptSlice,
+  draftedSegment: DraftedSegmentState,
+  instruction: string,
+  explicitLocationText: string | null
+): boolean {
+  const matchedPlans = findMatchingAnalysisPlansForInstruction(slice, instruction).filter(
+    (plan) => plan.targetText?.trim()
+  );
+  if (matchedPlans.length === 0) {
+    return false;
+  }
+
+  const restoredLines = draftedSegment.restoredBody.split(/\r?\n/);
+  const targetTexts = matchedPlans
+    .map((plan) => plan.targetText?.trim())
+    .filter((value): value is string => Boolean(value));
+
+  if (explicitLocationText) {
+    const restoredLine = restoredLines.find((line) => line.includes(explicitLocationText));
+    if (!restoredLine) {
+      return false;
+    }
+
+    return targetTexts.some((targetText) => restoredLine.includes(targetText));
+  }
+
+  return targetTexts.some((targetText) => draftedSegment.restoredBody.includes(targetText));
 }
 
 function hasSafeLocalFallbackAnchorTarget(
@@ -3427,21 +3489,33 @@ function buildRepairPromptContext(
   mustFix: readonly string[]
 ): ChunkPromptContext {
   const extraNotes = [...promptContext.specialNotes];
-  const matchedAnalysisPlans =
-    promptContext.stateSlice?.analysisPlans.filter((plan) =>
-      mustFix.some((instruction) =>
-        findMatchingAnalysisPlansForInstruction(promptContext.stateSlice as PromptSlice, instruction).some(
-          (matchedPlan) => matchedPlan.id === plan.id
+  const matchedPendingRepairs =
+    promptContext.stateSlice?.pendingRepairs.filter((repair) => mustFix.includes(repair.instruction)) ?? [];
+  const matchedAnalysisTargets = [
+    ...new Set(matchedPendingRepairs.flatMap((repair) => repair.analysisTargets ?? []))
+  ];
+  if (matchedAnalysisTargets.length > 0) {
+    extraNotes.push(
+      `本次 must_fix 已关联到这些 IR 目标：${matchedAnalysisTargets.join(" | ")}。`,
+      "修复时优先服从这些结构化 IR 目标，不要再自由改写同一标题、术语或强调结构的语义目标。"
+    );
+  } else {
+    const matchedAnalysisPlans =
+      promptContext.stateSlice?.analysisPlans.filter((plan) =>
+        mustFix.some((instruction) =>
+          findMatchingAnalysisPlansForInstruction(promptContext.stateSlice as PromptSlice, instruction).some(
+            (matchedPlan) => matchedPlan.id === plan.id
+          )
         )
-      )
-    ) ?? [];
-  if (matchedAnalysisPlans.length > 0) {
+      ) ?? [];
+    if (matchedAnalysisPlans.length > 0) {
     extraNotes.push(
       `本次 must_fix 已关联到这些 IR 计划：${matchedAnalysisPlans
         .map((plan) => `${plan.kind}:${plan.sourceText}${plan.targetText ? ` -> ${plan.targetText}` : ""}`)
         .join(" | ")}。`,
       "修复时优先服从这些结构化 IR 计划，不要再自由改写同一标题、术语或强调结构的语义目标。"
     );
+    }
   }
   const explicitEnglishTargets = extractExplicitEnglishTargetsFromMustFix(mustFix);
   const conceptFamilyTargets = extractConceptFamilyTargets(explicitEnglishTargets);

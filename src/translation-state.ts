@@ -86,6 +86,9 @@ export type RepairTask = {
   failureType: RepairFailureType;
   locationLabel: string;
   instruction: string;
+  analysisPlanIds?: string[];
+  analysisPlanKinds?: Array<PromptAnalysisPlan["kind"]>;
+  analysisTargets?: string[];
   status: "pending" | "applied" | "verified" | "failed";
 };
 
@@ -511,7 +514,10 @@ export function buildSegmentTaskSlice(
       anchorId: task.anchorId,
       failureType: task.failureType,
       locationLabel: task.locationLabel,
-      instruction: task.instruction
+      instruction: task.instruction,
+      ...(task.analysisPlanIds?.length ? { analysisPlanIds: [...task.analysisPlanIds] } : {}),
+      ...(task.analysisPlanKinds?.length ? { analysisPlanKinds: [...task.analysisPlanKinds] } : {}),
+      ...(task.analysisTargets?.length ? { analysisTargets: [...task.analysisTargets] } : {})
     }));
   const headingPlanAnchors = synthesizeHeadingPlanPromptAnchors(
     segmentId,
@@ -724,6 +730,10 @@ function attachAnalysisPlansToPendingRepairs(
   analysisPlans: readonly PromptAnalysisPlan[]
 ): PromptSlice["pendingRepairs"] {
   return pendingRepairs.map((repair) => {
+    if (repair.analysisPlanIds?.length || repair.analysisTargets?.length) {
+      return repair;
+    }
+
     const matchedPlans = findMatchingAnalysisPlansForRepair(repair, analysisPlans);
     if (matchedPlans.length === 0) {
       return repair;

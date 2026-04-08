@@ -2206,6 +2206,48 @@ test("translateMarkdownArticle repeats in-sentence repair guidance when must_fix
   assert.match(notes, /不要把修复转移到同一分段的前一句、后一句、标题、列表项或总结句里/);
 });
 
+test("translateMarkdownArticle surfaces IR targets in repair guidance when pending repairs are already bound", () => {
+  const context = buildRepairPromptContextForTest(
+    createMinimalChunkPromptContext({
+      stateSlice: {
+        documentTitle: "Title",
+        chunkId: "chunk-1",
+        segmentId: "chunk-1-segment-1",
+        chunkIndex: 1,
+        segmentIndex: 1,
+        headingPath: ["Title"],
+        headingHints: [],
+        headingPlans: [],
+        emphasisPlans: [],
+        requiredAnchors: [],
+        repeatAnchors: [],
+        establishedAnchors: [],
+        protectedSpanIds: [],
+        pendingRepairs: [
+          {
+            repairId: "repair-1",
+            anchorId: "anchor-1",
+            failureType: "missing_anchor",
+            locationLabel: "当前句",
+            instruction: "当前句“Sandbox mode is now active.”中的“sandbox mode”需补为“沙盒模式（sandbox mode）”。",
+            analysisPlanIds: ["anchor:anchor-1"],
+            analysisPlanKinds: ["anchor"],
+            analysisTargets: ["sandbox mode", "沙盒模式（sandbox mode）"]
+          }
+        ],
+        headingPlanGovernedAnchorIds: [],
+        analysisPlans: [],
+        analysisPlanDraft: '<SEGMENT id="chunk-1-segment-1">\n  <PLAN id="anchor:anchor-1" kind="anchor" scope="required" source="sandbox mode" target="沙盒模式（sandbox mode）" />\n</SEGMENT>'
+      }
+    }),
+    ["当前句“Sandbox mode is now active.”中的“sandbox mode”需补为“沙盒模式（sandbox mode）”。"]
+  );
+
+  const notes = context.specialNotes.join("\n");
+  assert.match(notes, /本次 must_fix 已关联到这些 IR 目标：sandbox mode \| 沙盒模式（sandbox mode）/);
+  assert.match(notes, /修复时优先服从这些结构化 IR 目标/);
+});
+
 test("translateMarkdownArticle repeats explicit English target guidance when must_fix names a quoted term", async () => {
   const source = [
     "# Title",
