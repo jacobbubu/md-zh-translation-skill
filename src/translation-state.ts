@@ -230,6 +230,21 @@ export type AnchorCatalog = {
 export type HeadingPlanState = AnalysisHeadingPlan;
 export type EmphasisPlanState = AnalysisEmphasisPlan;
 
+export type PromptAnalysisPlan = {
+  id: string;
+  kind: "anchor" | "heading" | "emphasis";
+  scope: "required" | "repeat" | "established" | "local";
+  sourceText: string;
+  targetText?: string;
+  anchorId?: string;
+  english?: string;
+  chineseHint?: string;
+  category?: string;
+  displayPolicy?: AnchorDisplayPolicy;
+  strategy?: HeadingPlanStrategy | EmphasisPlanStrategy;
+  governedTerms?: string[];
+};
+
 export type PromptSlice = {
   documentTitle: string | null;
   chunkId: string;
@@ -305,6 +320,8 @@ export type PromptSlice = {
     instruction: string;
   }>;
   headingPlanGovernedAnchorIds: string[];
+  analysisPlans: PromptAnalysisPlan[];
+  analysisPlanDraft: string;
 };
 
 export function buildLocalFallbackAnchorId(segmentId: string, english: string): string {
@@ -511,6 +528,18 @@ export function buildSegmentTaskSlice(
     pendingRepairs,
     [...requiredAnchors, ...repeatAnchors, ...establishedAnchors, ...headingPlanAnchors, ...headingHintAnchors]
   );
+  const analysisPlans = buildPromptAnalysisPlans(
+    segment.headingPlans,
+    segment.emphasisPlans,
+    coalesceRequiredAnchors([
+      ...requiredAnchors,
+      ...headingPlanAnchors,
+      ...headingHintAnchors,
+      ...localFallbackAnchors
+    ]),
+    repeatAnchors,
+    establishedAnchors
+  );
 
   return {
     documentTitle: state.document.title,
@@ -549,8 +578,124 @@ export function buildSegmentTaskSlice(
     establishedAnchors,
     protectedSpanIds: [...segment.spanIds],
     pendingRepairs,
-    headingPlanGovernedAnchorIds: [...headingPlanGovernedAnchorIds]
+    headingPlanGovernedAnchorIds: [...headingPlanGovernedAnchorIds],
+    analysisPlans,
+    analysisPlanDraft: renderPromptAnalysisPlanDraft(segmentId, analysisPlans)
   };
+}
+
+function buildPromptAnalysisPlans(
+  headingPlans: readonly HeadingPlanState[],
+  emphasisPlans: readonly EmphasisPlanState[],
+  requiredAnchors: PromptSlice["requiredAnchors"],
+  repeatAnchors: PromptSlice["repeatAnchors"],
+  establishedAnchors: PromptSlice["establishedAnchors"]
+): PromptAnalysisPlan[] {
+  const plans: PromptAnalysisPlan[] = [];
+
+  for (const anchor of requiredAnchors) {
+    plans.push(anchorToPromptAnalysisPlan(anchor, "required"));
+  }
+
+  for (const anchor of repeatAnchors) {
+    plans.push(anchorToPromptAnalysisPlan(anchor, "repeat"));
+  }
+
+  for (const anchor of establishedAnchors) {
+    plans.push(anchorToPromptAnalysisPlan(anchor, "established"));
+  }
+
+  for (const plan of headingPlans) {
+    plans.push({
+      id: `heading:${plan.segmentId}:${plan.headingIndex ?? normalizeHeadingPlanningKey(plan.sourceHeading)}`,
+      kind: "heading",
+      scope: "local",
+      sourceText: plan.sourceHeading,
+      ...(plan.targetHeading ? { targetText: plan.targetHeading } : {}),
+      ...(plan.english ? { english: plan.english } : {}),
+      ...(plan.chineseHint ? { chineseHint: plan.chineseHint } : {}),
+      ...(plan.category ? { category: plan.category } : {}),
+      ...(plan.displayPolicy ? { displayPolicy: plan.displayPolicy } : {}),
+      strategy: plan.strategy,
+      ...(plan.governedTerms?.length ? { governedTerms: [...plan.governedTerms] } : {})
+    });
+  }
+
+  for (const plan of emphasisPlans) {
+    plans.push({
+      id: `emphasis:${plan.segmentId}:${plan.emphasisIndex ?? plan.lineIndex ?? normalizeHeadingPlanningKey(plan.sourceText)}`,
+      kind: "emphasis",
+      scope: "local",
+      sourceText: plan.sourceText,
+      ...(plan.targetText ? { targetText: plan.targetText } : {}),
+      strategy: plan.strategy,
+      ...(plan.governedTerms?.length ? { governedTerms: [...plan.governedTerms] } : {})
+    });
+  }
+
+  return plans;
+}
+
+function anchorToPromptAnalysisPlan(
+  anchor: PromptSlice["requiredAnchors"][number],
+  scope: PromptAnalysisPlan["scope"]
+): PromptAnalysisPlan {
+  return {
+    id: `anchor:${anchor.anchorId}`,
+    kind: "anchor",
+    scope,
+    sourceText: anchor.english,
+    ...(anchor.canonicalDisplay ? { targetText: anchor.canonicalDisplay } : {}),
+    anchorId: anchor.anchorId,
+    english: anchor.english,
+    chineseHint: anchor.chineseHint,
+    ...(anchor.category ? { category: anchor.category } : {}),
+    displayPolicy: anchor.displayPolicy,
+    ...(anchor.allowedDisplayForms?.length ? { governedTerms: [...anchor.allowedDisplayForms] } : {})
+  };
+}
+
+function renderPromptAnalysisPlanDraft(segmentId: string, plans: readonly PromptAnalysisPlan[]): string {
+  if (plans.length === 0) {
+    return `<SEGMENT id="${segmentId}">\n</SEGMENT>`;
+  }
+
+  const lines = [`<SEGMENT id="${segmentId}">`];
+  for (const plan of plans) {
+    const attrs = [
+      `id="${escapePlanDraftAttribute(plan.id)}"`,
+      `kind="${plan.kind}"`,
+      `scope="${plan.scope}"`
+    ];
+    if (plan.strategy) {
+      attrs.push(`strategy="${plan.strategy}"`);
+    }
+    if (plan.displayPolicy) {
+      attrs.push(`display="${plan.displayPolicy}"`);
+    }
+    if (plan.anchorId) {
+      attrs.push(`anchorId="${escapePlanDraftAttribute(plan.anchorId)}"`);
+    }
+
+    const body = [
+      `source="${escapePlanDraftAttribute(plan.sourceText)}"`,
+      ...(plan.targetText ? [`target="${escapePlanDraftAttribute(plan.targetText)}"`] : []),
+      ...(plan.english ? [`english="${escapePlanDraftAttribute(plan.english)}"`] : []),
+      ...(plan.chineseHint ? [`chinese="${escapePlanDraftAttribute(plan.chineseHint)}"`] : []),
+      ...(plan.category ? [`category="${escapePlanDraftAttribute(plan.category)}"`] : []),
+      ...(plan.governedTerms?.length
+        ? [`governed="${escapePlanDraftAttribute(plan.governedTerms.join(" | "))}"`]
+        : [])
+    ];
+
+    lines.push(`  <PLAN ${attrs.join(" ")} ${body.join(" ")} />`);
+  }
+  lines.push(`</SEGMENT>`);
+  return lines.join("\n");
+}
+
+function escapePlanDraftAttribute(value: string): string {
+  return value.replace(/&/g, "&amp;").replace(/"/g, "&quot;");
 }
 
 function collectHeadingPlanGovernedAnchorIds(

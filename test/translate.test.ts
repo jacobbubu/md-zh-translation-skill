@@ -321,6 +321,7 @@ function createMinimalChunkPromptContext(
     segmentHeadings: [],
     headingPlanSummaries: [],
     emphasisPlanSummaries: [],
+    analysisPlanDraft: '<SEGMENT id="chunk-1-segment-1">\n</SEGMENT>',
     requiredAnchors: [],
     repeatAnchors: [],
     establishedAnchors: [],
@@ -4494,6 +4495,8 @@ test("translateMarkdownArticle injects structured anchor state into draft prompt
   const draftPrompt = prompts.find((prompt) => prompt.includes("当前分段必须建立的首现锚点"));
   assert.ok(draftPrompt);
   assert.match(draftPrompt, /提示注入攻击（Prompt injection attacks）/);
+  assert.match(draftPrompt, /【当前分段 IR】/);
+  assert.match(draftPrompt, /<PLAN id="anchor:anchor-1" kind="anchor"/);
   assert.match(draftPrompt, /【状态切片\(JSON\)】/);
 });
 

@@ -251,6 +251,81 @@ test("translation state coalesces a shorter required anchor when a longer same-s
   );
 });
 
+test("translation state builds a unified analysis IR draft for headings, anchors, and emphasis", () => {
+  const state = createTranslationRunState({
+    sourcePathHint: "sample.md",
+    documentTitle: "Sample",
+    frontmatterPresent: false,
+    protectedSpans: [],
+    chunks: [
+      {
+        source: "## Permission Problem\n\n**now has a sandbox mode**",
+        separatorAfter: "",
+        headingPath: ["Sample"],
+        segments: [
+          {
+            kind: "translatable",
+            source: "## Permission Problem\n\n**now has a sandbox mode**",
+            separatorAfter: "",
+            spanIds: [],
+            headingHints: ["Permission Problem"],
+            specialNotes: []
+          }
+        ]
+      }
+    ]
+  });
+
+  applyAnchorCatalog(state, {
+    anchors: [
+      {
+        english: "sandbox mode",
+        chineseHint: "沙盒模式",
+        familyKey: "sandbox mode",
+        displayPolicy: "chinese-primary",
+        firstOccurrence: {
+          chunkId: "chunk-1",
+          segmentId: "chunk-1-segment-1"
+        }
+      }
+    ],
+    headingPlans: [
+      {
+        chunkId: "chunk-1",
+        segmentId: "chunk-1-segment-1",
+        headingIndex: 1,
+        sourceHeading: "Permission Problem",
+        strategy: "natural-heading",
+        targetHeading: "权限问题"
+      }
+    ],
+    emphasisPlans: [
+      {
+        chunkId: "chunk-1",
+        segmentId: "chunk-1-segment-1",
+        emphasisIndex: 1,
+        sourceText: "now has a sandbox mode",
+        strategy: "preserve-strong",
+        targetText: "现在有了沙盒模式（sandbox mode）"
+      }
+    ],
+    ignoredTerms: []
+  });
+
+  const slice = buildSegmentTaskSlice(state, "chunk-1", "chunk-1-segment-1");
+  assert.ok(slice.analysisPlans.some((plan) => plan.kind === "heading" && plan.targetText === "权限问题"));
+  assert.ok(slice.analysisPlans.some((plan) => plan.kind === "anchor" && plan.english === "sandbox mode"));
+  assert.ok(
+    slice.analysisPlans.some(
+      (plan) => plan.kind === "emphasis" && plan.targetText === "现在有了沙盒模式（sandbox mode）"
+    )
+  );
+  assert.match(slice.analysisPlanDraft, /<SEGMENT id="chunk-1-segment-1">/);
+  assert.match(slice.analysisPlanDraft, /kind="heading"/);
+  assert.match(slice.analysisPlanDraft, /kind="anchor"/);
+  assert.match(slice.analysisPlanDraft, /kind="emphasis"/);
+});
+
 test("translation state synthesizes a local fallback anchor for a longer list-item qualifier named by repair", () => {
   const state = createTranslationRunState({
     sourcePathHint: "sample.md",

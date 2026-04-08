@@ -1546,6 +1546,7 @@ function buildSegmentPromptContext(
     segmentHeadings: extractSegmentHeadingHints(source),
     headingPlanSummaries: slice.headingPlans.map(summarizeHeadingPlan),
     emphasisPlanSummaries: slice.emphasisPlans.map(summarizeEmphasisPlan),
+    analysisPlanDraft: slice.analysisPlanDraft,
     specialNotes: extractSegmentSpecialNotes(source),
     requiredAnchors: slice.requiredAnchors.map(summarizePromptAnchor),
     repeatAnchors: slice.repeatAnchors.map(summarizePromptAnchor),
@@ -1576,6 +1577,7 @@ function buildChunkStylePromptContext(
     segmentHeadings: extractSegmentHeadingHints(source),
     headingPlanSummaries: [],
     emphasisPlanSummaries: [],
+    analysisPlanDraft: "<SEGMENT id=\"chunk-style\">\n</SEGMENT>",
     specialNotes: extractSegmentSpecialNotes(source),
     requiredAnchors: [],
     repeatAnchors: [],
@@ -4199,6 +4201,7 @@ export type ChunkPromptContext = {
   segmentHeadings: string[];
   headingPlanSummaries: string[];
   emphasisPlanSummaries: string[];
+  analysisPlanDraft: string;
   requiredAnchors: string[];
   repeatAnchors: string[];
   establishedAnchors: string[];
@@ -4236,6 +4239,8 @@ function withChunkContextAt(prompt: string, context: ChunkPromptContext, marker:
     `当前分段标题：${segmentHeadings}`,
     `当前分段标题计划：${headingPlanSummaries}`,
     `当前分段强调计划：${emphasisPlanSummaries}`,
+    "【当前分段 IR】",
+    context.analysisPlanDraft,
     `当前分段必须建立的首现锚点：${requiredAnchors}`,
     `当前分段里已在前文建立过、禁止重复补锚的项目：${repeatAnchors}`,
     `全文已建立的锚点摘要：${establishedAnchors}`,
@@ -4247,6 +4252,7 @@ function withChunkContextAt(prompt: string, context: ChunkPromptContext, marker:
     "如果 stateSlice.headingPlans 为某个标题给出了 targetHeading，则该标题的语义与最终目标文本由 headingPlan 决定；不要再让全局 anchor 对同一标题追加冲突的中英锚定要求。",
     "如果 headingPlan 同时给出了 governedTerms，则这些术语在对应标题里的处理方式已经由该计划决定；审校时不要再按全局 anchor 对该标题单独追加强制格式。",
     "标题场景下，headingPlan 的 targetHeading 优先于全局 anchor catalog；全局 anchor 只能为没有 targetHeading 的标题补充约束。",
+    "analysisPlanDraft 是当前分段的结构化 sidecar plan。若其中某条 PLAN 已给出 source、target、display 或 strategy，请优先按这份计划执行，不要再自由改写同一结构的语义目标。",
     "如果 stateSlice.requiredAnchors 给出了 canonicalDisplay 或 allowedDisplayForms，则这些形式就是当前分段可接受的合法锚定结果；像“Claude（Anthropic 的 AI 助手）”这类英文原名（中文说明）形式，或像“Claude”这类允许裸英文首现的形式，都视为已经完成首现锚定，不得再按“缺少英文对照”判错。",
     "repeatAnchors 表示：这些项目已经在全文前文完成首现锚定，即使它们在当前分块标题、加粗标题、列表项标题或正文里是本块第一次出现，也不得再补首现中英文对照。",
     "pendingRepairs 表示：这些修复任务已经绑定到当前分段，修复时必须就地完成，不要把锚点挪到别处。",

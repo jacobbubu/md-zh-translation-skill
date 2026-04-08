@@ -49,6 +49,8 @@ function createSlice(overrides: Partial<PromptSlice>): PromptSlice {
     protectedSpanIds: [],
     pendingRepairs: [],
     headingPlanGovernedAnchorIds: [],
+    analysisPlans: [],
+    analysisPlanDraft: '<SEGMENT id="chunk-1-segment-1">\n</SEGMENT>',
     ...overrides
   };
 }
