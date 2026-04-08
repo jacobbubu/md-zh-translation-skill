@@ -403,6 +403,64 @@ test("translation state links pending repairs to matching analysis IR plans", ()
   assert.ok(slice.pendingRepairs[0]?.analysisTargets?.includes("sandbox mode"));
 });
 
+test("translation state synthesizes local fallback anchors from bound IR targets even when repair text is vague", () => {
+  const state = createTranslationRunState({
+    sourcePathHint: "sample.md",
+    documentTitle: "Title",
+    frontmatterPresent: false,
+    protectedSpans: [],
+    chunks: [
+      {
+        source: "> This creates approval fatigue in teams.",
+        separatorAfter: "",
+        headingPath: ["Title"],
+        segments: [
+          {
+            kind: "translatable",
+            source: "> This creates approval fatigue in teams.",
+            separatorAfter: "",
+            spanIds: [],
+            headingHints: [],
+            specialNotes: ["当前分段包含引用段落"]
+          }
+        ]
+      }
+    ]
+  });
+
+  applySegmentAudit(state, {
+    segmentId: "chunk-1-segment-1",
+    hardChecks: {
+      paragraph_match: { pass: true, problem: "" },
+      first_mention_bilingual: { pass: false, problem: "missing anchor" },
+      numbers_units_logic: { pass: true, problem: "" },
+      chinese_punctuation: { pass: true, problem: "" },
+      unit_conversion_boundary: { pass: true, problem: "" },
+      protected_span_integrity: { pass: true, problem: "" }
+    },
+    repairTasks: [
+      {
+        id: "repair-1",
+        segmentId: "chunk-1-segment-1",
+        anchorId: null,
+        failureType: "missing_anchor",
+        locationLabel: "引用段",
+        instruction: "需在引用句本身补齐首现锚定。",
+        analysisPlanIds: ["anchor:local-approval-fatigue"],
+        analysisPlanKinds: ["anchor"],
+        analysisTargets: ["approval fatigue", "批准疲劳（approval fatigue）"],
+        status: "pending"
+      }
+    ],
+    rawMustFix: ["需在引用句本身补齐首现锚定。"]
+  });
+
+  const slice = buildSegmentTaskSlice(state, "chunk-1", "chunk-1-segment-1");
+  const localAnchor = slice.requiredAnchors.find((anchor) => anchor.english === "approval fatigue");
+  assert.ok(localAnchor);
+  assert.equal(localAnchor?.canonicalDisplay, "批准疲劳（approval fatigue）");
+});
+
 test("translation state synthesizes a local fallback anchor for a longer list-item qualifier named by repair", () => {
   const state = createTranslationRunState({
     sourcePathHint: "sample.md",

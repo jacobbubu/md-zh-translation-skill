@@ -1278,7 +1278,9 @@ function synthesizeLocalFallbackPromptAnchors(
   const seenEnglish = new Set(existingAnchors.map((anchor) => anchor.english.trim().toLowerCase()));
 
   for (const repair of pendingRepairs) {
-    const target = extractLocalFallbackAnchorTarget(repair.locationLabel, repair.instruction);
+    const target =
+      extractLocalFallbackAnchorTargetFromBoundIR(repair) ??
+      extractLocalFallbackAnchorTarget(repair.locationLabel, repair.instruction);
     if (!target) {
       continue;
     }
@@ -1315,6 +1317,39 @@ function synthesizeLocalFallbackPromptAnchors(
   }
 
   return synthesized;
+}
+
+function extractLocalFallbackAnchorTargetFromBoundIR(
+  repair: PromptSlice["pendingRepairs"][number]
+): { english: string; chineseHint: string; displayPolicy: "english-only" | "chinese-primary" } | null {
+  const targets = repair.analysisTargets ?? [];
+  const bilingualTarget = targets.find((target) => /（[^）]*[A-Za-z][^）]*）/.test(target));
+  if (bilingualTarget) {
+    const match = bilingualTarget.match(/^(.+?)（([^）]+)）$/u);
+    const chineseHint = match?.[1]?.trim() ?? "";
+    const english = match?.[2]?.trim() ?? "";
+    if (chineseHint && english && /[\u4e00-\u9fff]/u.test(chineseHint) && !looksCodeLikeAnchorTarget(english)) {
+      return {
+        english,
+        chineseHint,
+        displayPolicy: "chinese-primary"
+      };
+    }
+  }
+
+  const englishTargets = targets.filter((target) => /[A-Za-z]/.test(target) && !looksCodeLikeAnchorTarget(target));
+  const chineseTargets = targets.filter((target) => /[\u4e00-\u9fff]/u.test(target) && !/[A-Za-z]/.test(target));
+  const english = englishTargets.sort((left, right) => right.length - left.length)[0]?.trim();
+  const chineseHint = chineseTargets.sort((left, right) => right.length - left.length)[0]?.trim();
+  if (english && chineseHint) {
+    return {
+      english,
+      chineseHint,
+      displayPolicy: "chinese-primary"
+    };
+  }
+
+  return null;
 }
 
 function extractLocalFallbackAnchorTarget(
