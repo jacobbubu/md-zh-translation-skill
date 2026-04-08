@@ -584,6 +584,27 @@ export function buildSegmentTaskSlice(
   };
 }
 
+export function renderTranslationIRSidecar(state: TranslationRunState): string {
+  const lines = [`<DOCUMENT title="${escapePlanDraftAttribute(state.document.title ?? "")}">`];
+
+  for (const chunk of state.chunks) {
+    lines.push(`  <CHUNK id="${chunk.id}" index="${chunk.index + 1}">`);
+    for (const segmentId of chunk.segmentIds) {
+      const segment = getSegmentState(state, segmentId);
+      const slice = buildSegmentTaskSlice(state, chunk.id, segmentId);
+      const indentedDraft = slice.analysisPlanDraft
+        .split("\n")
+        .map((line) => `    ${line}`)
+        .join("\n");
+      lines.push(indentedDraft);
+    }
+    lines.push(`  </CHUNK>`);
+  }
+
+  lines.push(`</DOCUMENT>`);
+  return `${lines.join("\n")}\n`;
+}
+
 function buildPromptAnalysisPlans(
   headingPlans: readonly HeadingPlanState[],
   emphasisPlans: readonly EmphasisPlanState[],

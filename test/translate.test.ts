@@ -5177,6 +5177,33 @@ test("translateMarkdownArticle exports debug state when MDZH_DEBUG_STATE_PATH is
   }
 });
 
+test("translateMarkdownArticle exports analysis IR sidecar when MDZH_DEBUG_IR_PATH is set", async () => {
+  const tempDir = await mkdtemp(path.join(tmpdir(), "mdzh-ir-"));
+  const irPath = path.join(tempDir, "analysis.ir");
+  const previous = process.env.MDZH_DEBUG_IR_PATH;
+  process.env.MDZH_DEBUG_IR_PATH = irPath;
+
+  try {
+    await translateMarkdownArticle("## Permission Problem\n\n**now has a sandbox mode**", {
+      executor: new PromptAwareExecutor(),
+      formatter: async (markdown) => markdown,
+      sourcePathHint: "ir.md"
+    });
+
+    const exported = await readFile(irPath, "utf8");
+    assert.match(exported, /<DOCUMENT title=".*">/);
+    assert.match(exported, /<SEGMENT id="chunk-1-segment-1">/);
+    assert.match(exported, /kind="anchor"/);
+  } finally {
+    if (previous === undefined) {
+      delete process.env.MDZH_DEBUG_IR_PATH;
+    } else {
+      process.env.MDZH_DEBUG_IR_PATH = previous;
+    }
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});
+
 test("translateMarkdownArticle reports known-entity analysis stages to progress hooks", async () => {
   const tempDir = await mkdtemp(path.join(tmpdir(), "mdzh-known-entity-progress-"));
   const candidatePath = path.join(tempDir, "known_entities_candidates.json");

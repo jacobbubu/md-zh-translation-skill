@@ -46,6 +46,7 @@ import {
   markChunkFailure,
   markChunkPhase,
   markSegmentStyled,
+  renderTranslationIRSidecar,
   setChunkFinalBody,
   type AnchorCatalog,
   type AnalysisAnchor,
@@ -1334,12 +1335,20 @@ async function analyzeDocumentForAnchors(
 
 async function writeDebugStateIfRequested(state: TranslationRunState): Promise<void> {
   const debugStatePath = process.env.MDZH_DEBUG_STATE_PATH?.trim();
-  if (!debugStatePath) {
+  const debugIrPath = process.env.MDZH_DEBUG_IR_PATH?.trim();
+  if (!debugStatePath && !debugIrPath) {
     return;
   }
 
-  await mkdir(path.dirname(debugStatePath), { recursive: true });
-  await writeFile(debugStatePath, `${JSON.stringify(state, null, 2)}\n`, "utf8");
+  if (debugStatePath) {
+    await mkdir(path.dirname(debugStatePath), { recursive: true });
+    await writeFile(debugStatePath, `${JSON.stringify(state, null, 2)}\n`, "utf8");
+  }
+
+  if (debugIrPath) {
+    await mkdir(path.dirname(debugIrPath), { recursive: true });
+    await writeFile(debugIrPath, renderTranslationIRSidecar(state), "utf8");
+  }
 }
 
 export async function translateMarkdownArticle(source: string, options: TranslateOptions = {}): Promise<TranslateResult> {
