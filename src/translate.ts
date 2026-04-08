@@ -1537,6 +1537,14 @@ function summarizeEmphasisPlan(plan: PromptSlice["emphasisPlans"][number]): stri
   return `${plan.sourceText} -> strategy=${plan.strategy}; target=${plan.targetText?.trim() || "无"}`;
 }
 
+function summarizePendingRepair(task: PromptSlice["pendingRepairs"][number]): string {
+  const planSummary =
+    task.analysisTargets && task.analysisTargets.length > 0
+      ? `；IR=${task.analysisTargets.join(" / ")}`
+      : "";
+  return `${task.instruction}${planSummary}`;
+}
+
 function buildSegmentPromptContext(
   state: TranslationRunState,
   chunk: MarkdownChunk,
@@ -1560,7 +1568,7 @@ function buildSegmentPromptContext(
     requiredAnchors: slice.requiredAnchors.map(summarizePromptAnchor),
     repeatAnchors: slice.repeatAnchors.map(summarizePromptAnchor),
     establishedAnchors: slice.establishedAnchors.map(summarizePromptAnchor),
-    pendingRepairs: slice.pendingRepairs.map((task) => task.instruction),
+    pendingRepairs: slice.pendingRepairs.map(summarizePendingRepair),
     stateSlice: slice
   };
 }
@@ -1680,6 +1688,11 @@ function inferRepairAnchorId(
   segmentSource: string,
   instruction: string
 ): string | null {
+  const analysisPlanAnchorId = inferRepairAnchorIdFromAnalysisPlans(slice, instruction);
+  if (analysisPlanAnchorId) {
+    return analysisPlanAnchorId;
+  }
+
   const haystack = instruction.toLowerCase();
   const anchors = [...slice.requiredAnchors, ...slice.repeatAnchors, ...slice.establishedAnchors].filter(
     (anchor) => segmentSource.toLowerCase().includes(anchor.english.trim().toLowerCase())
@@ -1742,6 +1755,61 @@ function inferRepairAnchorId(
     }
   }
   return null;
+}
+
+function inferRepairAnchorIdFromAnalysisPlans(slice: PromptSlice, instruction: string): string | null {
+  const matchedPlans = findMatchingAnalysisPlansForInstruction(slice, instruction);
+  for (const plan of matchedPlans) {
+    if (plan.anchorId) {
+      return plan.anchorId;
+    }
+
+    const matchedAnchor = [...slice.requiredAnchors, ...slice.repeatAnchors, ...slice.establishedAnchors].find(
+      (anchor) =>
+        (plan.english && anchor.english === plan.english) ||
+        (plan.chineseHint && normalizeRepairChineseTarget(anchor.chineseHint) === normalizeRepairChineseTarget(plan.chineseHint))
+    );
+    if (matchedAnchor) {
+      return matchedAnchor.anchorId;
+    }
+  }
+
+  return null;
+}
+
+function findMatchingAnalysisPlansForInstruction(
+  slice: PromptSlice,
+  instruction: string
+): PromptSlice["analysisPlans"] {
+  const normalizedInstruction = normalizeAnalysisPlanRepairText(instruction);
+  if (!normalizedInstruction) {
+    return [];
+  }
+
+  return slice.analysisPlans.filter((plan) => {
+    const candidates = [
+      plan.sourceText,
+      plan.targetText,
+      plan.english,
+      plan.chineseHint,
+      ...(plan.governedTerms ?? [])
+    ]
+      .map((value) => normalizeAnalysisPlanRepairText(value ?? ""))
+      .filter(Boolean);
+
+    return candidates.some(
+      (candidate) =>
+        normalizedInstruction.includes(candidate) || candidate.includes(normalizedInstruction)
+    );
+  });
+}
+
+function normalizeAnalysisPlanRepairText(text: string): string {
+  return text
+    .replace(/[`“”‘’"「」『』]/g, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
 }
 
 function shouldUseLocalFallbackAnchor(instruction: string, english: string): boolean {
@@ -1917,6 +1985,11 @@ function inferRepairTargetEnglish(
   segmentSource: string,
   instruction: string
 ): string | null {
+  const matchedPlan = findMatchingAnalysisPlansForInstruction(slice, instruction).find((plan) => plan.english?.trim());
+  if (matchedPlan?.english?.trim()) {
+    return matchedPlan.english.trim();
+  }
+
   const anchorId = inferRepairAnchorId(slice, segmentSource, instruction);
   if (anchorId) {
     const anchors = [...slice.requiredAnchors, ...slice.repeatAnchors, ...slice.establishedAnchors];
@@ -3354,6 +3427,22 @@ function buildRepairPromptContext(
   mustFix: readonly string[]
 ): ChunkPromptContext {
   const extraNotes = [...promptContext.specialNotes];
+  const matchedAnalysisPlans =
+    promptContext.stateSlice?.analysisPlans.filter((plan) =>
+      mustFix.some((instruction) =>
+        findMatchingAnalysisPlansForInstruction(promptContext.stateSlice as PromptSlice, instruction).some(
+          (matchedPlan) => matchedPlan.id === plan.id
+        )
+      )
+    ) ?? [];
+  if (matchedAnalysisPlans.length > 0) {
+    extraNotes.push(
+      `本次 must_fix 已关联到这些 IR 计划：${matchedAnalysisPlans
+        .map((plan) => `${plan.kind}:${plan.sourceText}${plan.targetText ? ` -> ${plan.targetText}` : ""}`)
+        .join(" | ")}。`,
+      "修复时优先服从这些结构化 IR 计划，不要再自由改写同一标题、术语或强调结构的语义目标。"
+    );
+  }
   const explicitEnglishTargets = extractExplicitEnglishTargetsFromMustFix(mustFix);
   const conceptFamilyTargets = extractConceptFamilyTargets(explicitEnglishTargets);
   const duplicatePendingAnchorGroups = collectDuplicatePendingAnchorGroups(promptContext);

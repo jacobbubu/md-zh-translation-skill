@@ -326,6 +326,79 @@ test("translation state builds a unified analysis IR draft for headings, anchors
   assert.match(slice.analysisPlanDraft, /kind="emphasis"/);
 });
 
+test("translation state links pending repairs to matching analysis IR plans", () => {
+  const state = createTranslationRunState({
+    sourcePathHint: "sample.md",
+    documentTitle: "Title",
+    frontmatterPresent: false,
+    protectedSpans: [],
+    chunks: [
+      {
+        source: "Sandbox mode is now active.",
+        separatorAfter: "",
+        headingPath: ["Title"],
+        segments: [
+          {
+            kind: "translatable",
+            source: "Sandbox mode is now active.",
+            separatorAfter: "",
+            spanIds: [],
+            headingHints: [],
+            specialNotes: []
+          }
+        ]
+      }
+    ]
+  });
+
+  applyAnchorCatalog(state, {
+    anchors: [
+      {
+        english: "sandbox mode",
+        chineseHint: "沙盒模式",
+        familyKey: "sandbox mode",
+        displayPolicy: "chinese-primary",
+        firstOccurrence: {
+          chunkId: "chunk-1",
+          segmentId: "chunk-1-segment-1"
+        }
+      }
+    ],
+    headingPlans: [],
+    emphasisPlans: [],
+    ignoredTerms: []
+  });
+
+  applySegmentAudit(state, {
+    segmentId: "chunk-1-segment-1",
+    hardChecks: {
+      paragraph_match: { pass: true, problem: "" },
+      first_mention_bilingual: { pass: false, problem: "missing anchor" },
+      numbers_units_logic: { pass: true, problem: "" },
+      chinese_punctuation: { pass: true, problem: "" },
+      unit_conversion_boundary: { pass: true, problem: "" },
+      protected_span_integrity: { pass: true, problem: "" }
+    },
+    repairTasks: [
+      {
+        id: "repair-1",
+        segmentId: "chunk-1-segment-1",
+        anchorId: "anchor-1",
+        failureType: "missing_anchor",
+        locationLabel: "当前句",
+        instruction: "当前句“Sandbox mode is now active.”中的“sandbox mode”需补为“沙盒模式（sandbox mode）”。",
+        status: "pending"
+      }
+    ],
+    rawMustFix: ["当前句“Sandbox mode is now active.”中的“sandbox mode”需补为“沙盒模式（sandbox mode）”。"]
+  });
+
+  const slice = buildSegmentTaskSlice(state, "chunk-1", "chunk-1-segment-1");
+  assert.deepEqual(slice.pendingRepairs[0]?.analysisPlanIds, ["anchor:anchor-1"]);
+  assert.deepEqual(slice.pendingRepairs[0]?.analysisPlanKinds, ["anchor"]);
+  assert.ok(slice.pendingRepairs[0]?.analysisTargets?.includes("sandbox mode"));
+});
+
 test("translation state synthesizes a local fallback anchor for a longer list-item qualifier named by repair", () => {
   const state = createTranslationRunState({
     sourcePathHint: "sample.md",

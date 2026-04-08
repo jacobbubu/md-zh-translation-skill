@@ -318,6 +318,9 @@ export type PromptSlice = {
     failureType: RepairFailureType;
     locationLabel: string;
     instruction: string;
+    analysisPlanIds?: string[];
+    analysisPlanKinds?: Array<PromptAnalysisPlan["kind"]>;
+    analysisTargets?: string[];
   }>;
   headingPlanGovernedAnchorIds: string[];
   analysisPlans: PromptAnalysisPlan[];
@@ -501,7 +504,7 @@ export function buildSegmentTaskSlice(
     )
     .map((anchor) => toPromptAnchor(anchor, true))
     .slice(0, 24);
-  const pendingRepairs = state.repairs
+  const rawPendingRepairs = state.repairs
     .filter((task) => task.segmentId === segmentId && task.status === "pending")
     .map((task) => ({
       repairId: task.id,
@@ -525,7 +528,7 @@ export function buildSegmentTaskSlice(
   const localFallbackAnchors = synthesizeLocalFallbackPromptAnchors(
     segmentId,
     segment.source,
-    pendingRepairs,
+    rawPendingRepairs,
     [...requiredAnchors, ...repeatAnchors, ...establishedAnchors, ...headingPlanAnchors, ...headingHintAnchors]
   );
   const analysisPlans = buildPromptAnalysisPlans(
@@ -540,6 +543,7 @@ export function buildSegmentTaskSlice(
     repeatAnchors,
     establishedAnchors
   );
+  const pendingRepairs = attachAnalysisPlansToPendingRepairs(rawPendingRepairs, analysisPlans);
 
   return {
     documentTitle: state.document.title,
@@ -713,6 +717,67 @@ function renderPromptAnalysisPlanDraft(segmentId: string, plans: readonly Prompt
   }
   lines.push(`</SEGMENT>`);
   return lines.join("\n");
+}
+
+function attachAnalysisPlansToPendingRepairs(
+  pendingRepairs: PromptSlice["pendingRepairs"],
+  analysisPlans: readonly PromptAnalysisPlan[]
+): PromptSlice["pendingRepairs"] {
+  return pendingRepairs.map((repair) => {
+    const matchedPlans = findMatchingAnalysisPlansForRepair(repair, analysisPlans);
+    if (matchedPlans.length === 0) {
+      return repair;
+    }
+
+    const analysisTargets = matchedPlans.flatMap((plan) => collectAnalysisPlanTargetTexts(plan));
+    return {
+      ...repair,
+      analysisPlanIds: matchedPlans.map((plan) => plan.id),
+      analysisPlanKinds: [...new Set(matchedPlans.map((plan) => plan.kind))],
+      analysisTargets: [...new Set(analysisTargets)]
+    };
+  });
+}
+
+function findMatchingAnalysisPlansForRepair(
+  repair: PromptSlice["pendingRepairs"][number],
+  analysisPlans: readonly PromptAnalysisPlan[]
+): PromptAnalysisPlan[] {
+  const instructionText = normalizeAnalysisRepairMatchText(repair.instruction);
+  const locationText = normalizeAnalysisRepairMatchText(repair.locationLabel);
+  return analysisPlans.filter((plan) => {
+    const candidates = collectAnalysisPlanTargetTexts(plan).map(normalizeAnalysisRepairMatchText);
+    return candidates.some((candidate) => {
+      if (!candidate) {
+        return false;
+      }
+
+      return (
+        instructionText.includes(candidate) ||
+        candidate.includes(instructionText) ||
+        locationText.includes(candidate) ||
+        candidate.includes(locationText)
+      );
+    });
+  });
+}
+
+function collectAnalysisPlanTargetTexts(plan: PromptAnalysisPlan): string[] {
+  return [
+    plan.sourceText,
+    plan.targetText,
+    plan.english,
+    plan.chineseHint,
+    ...(plan.governedTerms ?? [])
+  ].filter((value): value is string => Boolean(value?.trim()));
+}
+
+function normalizeAnalysisRepairMatchText(text: string): string {
+  return text
+    .replace(/[`“”‘’"「」『』]/g, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
 }
 
 function escapePlanDraftAttribute(value: string): string {
