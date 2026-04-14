@@ -793,6 +793,52 @@ test("translateMarkdownArticle routes a standalone blockquote with protected fla
   assert.match(result.markdown, /--dangerously-skip-permissions/);
 });
 
+test("translateMarkdownArticle normalizes protected link label spacing and malformed inline emphasis before audit", async () => {
+  const source = [
+    "This is not Claude code by default, but it’s isolation enforced by Linux [bubblewrap ](https://github.com/containers/bubblewrap) or [macOS](https://en.wikipedia.org/wiki/MacOS) * Seatbel*t — the same security primitives that protect containers and system services.",
+    ""
+  ].join("\n");
+
+  const result = await translateMarkdownArticle(source, {
+    executor: {
+      async execute(prompt, options) {
+        if (isDocumentAnalysisPrompt(prompt)) {
+          return createExecResult(createEmptyAnchorCatalog());
+        }
+
+        if (options.outputSchema && prompt.includes("### BLOCK 1")) {
+          return createExecResult(
+            JSON.stringify({
+              blocks: [
+                "默认情况下，这并不是 Claude Code（Anthropic 的命令行编码助手） 代码，而是由 Linux [bubblewrap（安全隔离组件） ](@@MDZH_LINK_DESTINATION_0001@@) 或 [macOS](@@MDZH_LINK_DESTINATION_0002@@) * Seatbel*t 强制实施的隔离。"
+              ]
+            })
+          );
+        }
+
+        if (options.outputSchema || prompt.includes('"hard_checks"') || prompt.includes("只返回 JSON")) {
+          return createExecResult(wrapAuditForSegments(prompt, createAudit(true)));
+        }
+
+        const current = extractPromptSection(prompt, "【当前译文】");
+        if (current !== null) {
+          return createExecResult(current);
+        }
+
+        return createExecResult(
+          "默认情况下，这并不是 Claude Code（Anthropic 的命令行编码助手） 代码，而是由 Linux [bubblewrap（安全隔离组件） ](https://github.com/containers/bubblewrap) 或 [macOS](https://en.wikipedia.org/wiki/MacOS) * Seatbel*t 强制实施的隔离。"
+        );
+      }
+    },
+    formatter: async (markdown) => markdown
+  });
+
+  assert.match(result.markdown, /\[bubblewrap（安全隔离组件）\]\(https:\/\/github\.com\/containers\/bubblewrap\)/);
+  assert.match(result.markdown, /\*Seatbelt\*/);
+  assert.doesNotMatch(result.markdown, /bubblewrap（安全隔离组件） \]/);
+  assert.doesNotMatch(result.markdown, /\* Seatbel\*t/);
+});
+
 test("translateMarkdownArticle routes a standalone list block through the JSON block lane", async () => {
   const source = [
     "- Pre-approved destinations (npm registry, GitHub, your APIs)",
@@ -835,6 +881,61 @@ test("translateMarkdownArticle routes a standalone list block through the JSON b
 
   assert.ok(prompts.some((prompt) => prompt.includes("### BLOCK 1 (list)")));
   assert.match(result.markdown, /npm registry/);
+});
+
+test("translateMarkdownArticle splits a heading-like block away from a following list", async () => {
+  const source = [
+    "**Network Isolation**",
+    "",
+    "- Pre-approved destinations (npm registry, GitHub, your APIs)",
+    "- Blocked destinations (random servers, pastebin sites, unknown domains)",
+    "- Request-based approval for new destinations",
+    ""
+  ].join("\n");
+
+  const prompts: string[] = [];
+  const executor: CodexExecutor = {
+    async execute(prompt: string, options: CodexExecOptions): Promise<CodexExecResult> {
+      prompts.push(prompt);
+      if (isDocumentAnalysisPrompt(prompt)) {
+        return createExecResult(createEmptyAnchorCatalog());
+      }
+      if (options.outputSchema && prompt.includes("### BLOCK")) {
+        const blockCount = (prompt.match(/^### BLOCK \d+ \([^)]+\)$/gm) ?? []).length || 1;
+        return createExecResult(JSON.stringify({ blocks: Array.from({ length: blockCount }, () => "占位正文") }));
+      }
+      if (options.outputSchema || prompt.includes('"hard_checks"') || prompt.includes("只返回 JSON")) {
+        return createExecResult(wrapAuditForSegments(prompt, createAudit(true)));
+      }
+      const current = extractPromptSection(prompt, "【当前译文】");
+      if (current !== null) {
+        return createExecResult(current);
+      }
+      const sourceSection = extractPromptSection(prompt, "【英文原文】");
+      return createExecResult(sourceSection ?? "");
+    }
+  };
+
+  await translateMarkdownArticle(source, {
+    executor,
+    formatter: async (markdown) => markdown
+  });
+
+  const promptBodies = prompts.filter((prompt) => !isDocumentAnalysisPrompt(prompt));
+  assert.ok(
+    promptBodies.some(
+      (prompt) =>
+        prompt.includes("**Network Isolation**") &&
+        !prompt.includes("- Pre-approved destinations")
+    )
+  );
+  assert.ok(
+    promptBodies.some(
+      (prompt) =>
+        prompt.includes("- Pre-approved destinations") &&
+        !prompt.includes("**Network Isolation**")
+    )
+  );
 });
 
 test("translateMarkdownArticle splits before a heading when pending content already contains list or blockquote blocks", async () => {

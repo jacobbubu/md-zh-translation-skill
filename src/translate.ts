@@ -2625,6 +2625,8 @@ export async function translateMarkdownArticle(source: string, options: Translat
     }
     formattedBody = restoreCodeLikeSourceShape(body, formattedBody);
     formattedBody = restoreSourceShapeExampleTokens(body, formattedBody);
+    formattedBody = normalizeMarkdownLinkLabelWhitespace(formattedBody);
+    formattedBody = normalizeMalformedInlineEnglishEmphasis(formattedBody);
     const markdown = reconstructMarkdown(frontmatter, formattedBody);
     await writeDebugStateIfRequested(state);
     return {
@@ -4774,6 +4776,14 @@ function restoreSourceShapeExampleTokens(source: string, translated: string): st
   return changed ? translatedLines.join("\n") : translated;
 }
 
+function normalizeMarkdownLinkLabelWhitespace(text: string): string {
+  return text.replace(/\[([^\]\n]*?)\s+\]\(([^)\n]+)\)/g, (_match, label, destination) => `[${label.trim()}](${destination})`);
+}
+
+function normalizeMalformedInlineEnglishEmphasis(text: string): string {
+  return text.replace(/\*\s*([A-Za-z][A-Za-z-]{2,})\*([A-Za-z])\b/g, (_match, stem, tail) => `*${stem}${tail}*`);
+}
+
 function extractSourceShapeExampleToken(line: string): string | null {
   const match = line.match(/^\s*(?:[-*+]|\d+[.)])\s+(.+?)\s+-\s+/);
   const candidate = match?.[1]?.trim();
@@ -5441,7 +5451,10 @@ async function translateProtectedSegment(
     protectedSource,
     restoredCodeLikeDraftText
   );
-  const canonicalProtectedBody = reprotectMarkdownSpans(restoredExampleTokenDraftText, combinedSpans);
+  const normalizedDraftSurfaceText = normalizeMalformedInlineEnglishEmphasis(
+    normalizeMarkdownLinkLabelWhitespace(restoredExampleTokenDraftText)
+  );
+  const canonicalProtectedBody = reprotectMarkdownSpans(normalizedDraftSurfaceText, combinedSpans);
   const restoredBody = restoreMarkdownSpans(canonicalProtectedBody, combinedSpans);
   applySegmentDraft(context.state, segmentId, {
     protectedSource,
@@ -6038,8 +6051,11 @@ async function repairDraftedSegment(
       draftedSegment.protectedSource,
       restoredCodeLikeRepairText
     );
+    const normalizedRepairSurfaceText = normalizeMalformedInlineEnglishEmphasis(
+      normalizeMarkdownLinkLabelWhitespace(restoredExampleTokenRepairText)
+    );
     draftedSegment.protectedBody = reprotectMarkdownSpans(
-      restoredExampleTokenRepairText,
+      normalizedRepairSurfaceText,
       draftedSegment.spans
     );
     draftedSegment.restoredBody = restoreMarkdownSpans(draftedSegment.protectedBody, draftedSegment.spans);
@@ -6963,6 +6979,14 @@ function shouldSplitPendingAtIntroBoundary(
     incomingContent.trim().length <= 220 &&
     !containsBlockquoteBlock(incomingContent) &&
     !isListLikeBlock(incomingContent)
+  ) {
+    return true;
+  }
+
+  if (
+    isHeadingLikeBlock(previousContent) &&
+    incomingPromptBlockKind === "list" &&
+    pending.length === 1
   ) {
     return true;
   }
