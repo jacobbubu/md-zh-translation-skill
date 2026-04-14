@@ -210,3 +210,7 @@ md-zh-translate mcp-config
 仓库根目录已经包含 `SKILL.md` 和 `agents/openai.yaml`。Codex 和 Claude Code 的 install 子命令会分别把 skill 安装到它们各自的默认目录。
 
 对 skill 使用者来说，公开接口仍然只有 `md-zh-translate`，不会暴露 prompt 研究和评测流程。
+
+## 补充文档
+
+- [known_entities 收编准则](./docs/known-entities-governance.md)

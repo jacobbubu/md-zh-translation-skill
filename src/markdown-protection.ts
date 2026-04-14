@@ -28,6 +28,13 @@ export type ProtectedMarkdown = {
   spans: ProtectedSpan[];
 };
 
+export type TranslatableStrongEmphasisSpan = {
+  index: number;
+  lineIndex: number;
+  raw: string;
+  sourceText: string;
+};
+
 function createPlaceholder(kind: ProtectedKind, index: number): string {
   return `@@MDZH_${kind.toUpperCase()}_${String(index).padStart(4, "0")}@@`;
 }
@@ -68,7 +75,7 @@ export function protectMarkdownSpans(body: string): ProtectedMarkdown {
     return id;
   };
 
-  let protectedBody = body;
+  let protectedBody = normalizeMarkdownProtectionShadow(body);
   protectedBody = protectFencedCodeBlocks(protectedBody, register);
   protectedBody = protectHtmlBlocks(protectedBody, register);
   protectedBody = mapOutsideInlineCode(protectedBody, (text) => {
@@ -84,7 +91,37 @@ export function protectMarkdownSpans(body: string): ProtectedMarkdown {
 
 export function protectSegmentFormattingSpans(body: string, startIndex = 1): ProtectedMarkdown {
   void startIndex;
-  return { protectedBody: body, spans: [] };
+  return { protectedBody: normalizeMarkdownProtectionShadow(body), spans: [] };
+}
+
+export function extractTranslatableStrongEmphasisSpans(body: string): TranslatableStrongEmphasisSpan[] {
+  const spans: TranslatableStrongEmphasisSpan[] = [];
+  const lines = body.split(/\r?\n/);
+
+  for (const [lineIndex, line] of lines.entries()) {
+    const pattern = /(\*\*[^*\n][^*\n]{0,80}\*\*|__[^_\n][^_\n]{0,80}__)/g;
+    for (const match of line.matchAll(pattern)) {
+      const raw = match[0] ?? "";
+      const trimmedLine = line.trim();
+      if (!raw || trimmedLine === raw.trim()) {
+        continue;
+      }
+
+      const sourceText = raw.slice(2, -2).trim();
+      if (!sourceText || !/[A-Za-z]/.test(sourceText)) {
+        continue;
+      }
+
+      spans.push({
+        index: spans.length + 1,
+        lineIndex: lineIndex + 1,
+        raw,
+        sourceText
+      });
+    }
+  }
+
+  return spans;
 }
 
 function protectFencedCodeBlocks(
@@ -126,6 +163,60 @@ function protectFencedCodeBlocks(
   }
 
   return output;
+}
+
+function normalizeMarkdownProtectionShadow(input: string): string {
+  const lines = input.split(/(?<=\n)/);
+  let output = "";
+  let plainText = "";
+  let index = 0;
+
+  const flushPlainText = () => {
+    if (!plainText) {
+      return;
+    }
+    output += mapOutsideInlineCode(plainText, normalizeMalformedInlineBoundaries);
+    plainText = "";
+  };
+
+  while (index < lines.length) {
+    const line = lines[index] ?? "";
+    const normalizedLine = line.replace(/\r?\n$/, "");
+    const opening = normalizedLine.match(/^([ \t]{0,3})(`{3,}|~{3,})(.*)$/);
+    if (!opening) {
+      plainText += line;
+      index += 1;
+      continue;
+    }
+
+    flushPlainText();
+
+    const fence = opening[2]!;
+    const fenceChar = fence[0];
+    output += line;
+    index += 1;
+
+    while (index < lines.length) {
+      const current = lines[index] ?? "";
+      output += current;
+      const normalizedCurrent = current.replace(/\r?\n$/, "");
+      const closing = normalizedCurrent.match(/^([ \t]{0,3})(`{3,}|~{3,})[ \t]*$/);
+      index += 1;
+      if (closing && closing[2]![0] === fenceChar && closing[2]!.length >= fence.length) {
+        break;
+      }
+    }
+  }
+
+  flushPlainText();
+  return output;
+}
+
+function normalizeMalformedInlineBoundaries(input: string): string {
+  return input.replace(
+    /(\]\([^)\n]+\)|<(?:(?:https?:\/\/|mailto:)[^>\s]+)>)(?=(?:[A-Za-z0-9]|[*_]))/g,
+    "$1 "
+  );
 }
 
 function mapOutsideInlineCode(input: string, transform: (text: string) => string): string {
@@ -266,6 +357,9 @@ function protectLinkDestinations(
   register: (kind: ProtectedKind, raw: string, extras?: Partial<ProtectedSpan>) => string
 ): string {
   return input.replace(/(!?\[[^\]\n]*\])\(([^()\n\s][^)\n]*)\)/g, (_match, label: string, destination: string) => {
+    if (looksLikePlaceholder(destination)) {
+      return `${label}(${destination})`;
+    }
     const kind: ProtectedKind = label.startsWith("![") ? "image_destination" : "link_destination";
     const labelText = label.slice(label.startsWith("![") ? 2 : 1, -1);
     return `${label}(${register(kind, destination, { labelText })})`;
@@ -277,6 +371,9 @@ function protectAutolinks(
   register: (kind: ProtectedKind, raw: string) => string
 ): string {
   return input.replace(/<((https?:\/\/|mailto:)[^>\s]+)>/gi, (_match, raw: string) => {
+    if (looksLikePlaceholder(raw)) {
+      return `<${raw}>`;
+    }
     return `<${register("autolink", raw)}>`;
   });
 }
@@ -287,9 +384,16 @@ function protectHtmlAttributes(
 ): string {
   return input.replace(/\b(href|src|poster)=("([^"]*)"|'([^']*)')/gi, (_match, attribute: string, quoted: string, doubleQuoted?: string, singleQuoted?: string) => {
     const rawValue = doubleQuoted ?? singleQuoted ?? "";
+    if (looksLikePlaceholder(rawValue)) {
+      return `${attribute}=${quoted}`;
+    }
     const quote = quoted[0] ?? '"';
     return `${attribute}=${quote}${register("html_attribute", rawValue)}${quote}`;
   });
+}
+
+function looksLikePlaceholder(value: string): boolean {
+  return /^@@MDZH_[A-Z_]+_\d{4,}@@$/.test(value.trim());
 }
 
 function protectHtmlBlocks(

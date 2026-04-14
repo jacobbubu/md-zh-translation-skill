@@ -177,6 +177,22 @@ test("reprotectMarkdownSpans rebuilds a missing markdown link destination from t
   );
 });
 
+test("protectMarkdownSpans normalizes malformed inline boundaries in its protection shadow", () => {
+  const source =
+    "This is enforced by Linux [bubblewrap ](https://example.com/bubblewrap)or [macOS](https://example.com/macos)* Seatbel*t.\n";
+
+  const protectedMarkdown = protectMarkdownSpans(source);
+
+  assert.match(
+    protectedMarkdown.protectedBody,
+    /\[bubblewrap ]\(@@MDZH_LINK_DESTINATION_0001@@\) or \[macOS]\(@@MDZH_LINK_DESTINATION_0002@@\) \* Seatbel\*t\./
+  );
+  assert.equal(
+    restoreMarkdownSpans(protectedMarkdown.protectedBody, protectedMarkdown.spans),
+    "This is enforced by Linux [bubblewrap ](https://example.com/bubblewrap) or [macOS](https://example.com/macos) * Seatbel*t.\n"
+  );
+});
+
 test("restoreMarkdownSpans still rejects code blocks that lost their placeholder", () => {
   const source = [
     "```ts",
@@ -238,6 +254,27 @@ test("protectSegmentFormattingSpans keeps inline markdown links visible around p
   assert.equal(
     restoreMarkdownSpans(protectedMarkdown.protectedBody, combinedSpans),
     "This is enforced by Linux [bubblewrap ](https://example.com/bubblewrap) or [macOS](https://example.com/macos).\n"
+  );
+});
+
+test("protectSegmentFormattingSpans applies the same malformed inline shadow normalization", () => {
+  const source =
+    "This is enforced by Linux [bubblewrap ](@@MDZH_LINK_DESTINATION_0067@@)or [macOS](@@MDZH_LINK_DESTINATION_0068@@)* Seatbel*t.\n";
+
+  const protectedMarkdown = protectSegmentFormattingSpans(source, 7200);
+  const nestedDestinationSpans = [
+    { id: "@@MDZH_LINK_DESTINATION_0067@@", kind: "link_destination" as const, raw: "https://example.com/bubblewrap" },
+    { id: "@@MDZH_LINK_DESTINATION_0068@@", kind: "link_destination" as const, raw: "https://example.com/macos" }
+  ];
+  const combinedSpans = [...protectedMarkdown.spans, ...nestedDestinationSpans];
+
+  assert.match(
+    protectedMarkdown.protectedBody,
+    /\[bubblewrap ]\(@@MDZH_LINK_DESTINATION_0067@@\) or \[macOS]\(@@MDZH_LINK_DESTINATION_0068@@\) \* Seatbel\*t\./
+  );
+  assert.equal(
+    restoreMarkdownSpans(protectedMarkdown.protectedBody, combinedSpans),
+    "This is enforced by Linux [bubblewrap ](https://example.com/bubblewrap) or [macOS](https://example.com/macos) * Seatbel*t.\n"
   );
 });
 

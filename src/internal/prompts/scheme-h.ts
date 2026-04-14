@@ -8,13 +8,19 @@ Markdown 结构要求：
 `.trim();
 
 export const DOCUMENT_ANALYSIS_PROMPT = `
-你是一名科技与科普翻译编辑的前置分析器。请阅读下面的整篇 Markdown 文档分析输入，并只返回 JSON，不要返回散文说明。
+你是一名科技与科普翻译编辑的前置分析器。请阅读下面的 Markdown 文档分析输入（可能是整篇，也可能是带前情摘要的分片），并只返回 JSON，不要返回散文说明。
 
 目标：
 1. 找出全文里需要建立“首次中英锚定”的候选专名、产品名、机构名、项目名和关键术语。
 2. 标出它们在全文中的首次出现位置（chunkId + segmentId）。
 3. 将同一概念家族的不同英文变体归并到同一个 familyKey。
-4. 对明显不需要强制双语锚定的通用词，放进 ignoredTerms。
+4. 如果你能高置信判断其首现显示策略，请额外给出 displayPolicy。
+5. 对标题（ATX 标题或单独成行的加粗标题）额外输出 headingPlans，让你来判定哪种恢复策略最合理，并直接给出目标标题文本。
+6. 对正文中可翻译的 Markdown 强调结构（如 **...**）额外输出 emphasisPlans，让你来决定强调后的目标文本。
+7. 如果 segment.input.blockLikeBlocks 存在，请对这些块尽量输出 blockPlans，让你来决定块级顺序与块文本是否需要被约束执行；尤其是标题、说明句、lead-in、列表、引用与代码块的相对顺序。
+8. 对局部别名首现（如 Sandbox 先于 sandbox mode）输出 aliasPlans，让你明确当前局部 mention 应直接改成什么。尤其是引用句、lead-in、标题前说明句里“局部短别名先出现、后文 canonical 再出现”的情况，必须优先产出 aliasPlans。
+9. 对同一家族英文 surface 在当前句里是普通名词而非专名的情况，输出 entityDisambiguationPlans，明确应避免哪种专名化误译以及最终目标文本。
+10. 对明显不需要强制双语锚定的通用词，放进 ignoredTerms。
 
 要求：
 1. 只返回 JSON。
@@ -24,12 +30,37 @@ export const DOCUMENT_ANALYSIS_PROMPT = `
    - familyKey
    - firstOccurrence.chunkId
    - firstOccurrence.segmentId
+   可选包含：
+   - category（如 product / tool / framework / platform / company / other）
+   - displayPolicy（可选值：english-only / english-primary / chinese-primary / acronym-compound / auto）
 3. english 必须是原文里实际出现的英文形式，不要杜撰。
 4. chineseHint 只写最小必要的中文主译或中文说明，不要写整句。
 5. familyKey 用于归并同一概念家族，保持稳定、简短、可复用。
-6. 只有真正需要首现双语锚定的项才放进 anchors。像 Earth、reptiles、paleontologist 这类通用名词、职业称谓、类群名或常见科学词，通常应放进 ignoredTerms。
-7. 如果同一项在标题、引用、列表项和正文中都出现，首次出现位置必须精确落在最先出现的那个 chunkId / segmentId。
-8. 不要输出重复的 anchors。
+6. displayPolicy 只在你有高置信时填写；没有把握时省略，让程序走默认策略。
+7. 只有真正需要首现双语锚定的项才放进 anchors。像 Earth、reptiles、paleontologist 这类通用名词、职业称谓、类群名或常见科学词，通常应放进 ignoredTerms。
+8. 如果同一项在标题、引用、列表项和正文中都出现，首次出现位置必须精确落在最先出现的那个 chunkId / segmentId。
+9. 不要输出重复的 anchors。
+11. 对每个 segment.input.headingLikeLines 中的标题，都应返回一条 headingPlans；即使该标题不需要补锚，也要返回 strategy = none 或 natural-heading。
+12. headingPlans 用于判定标题恢复策略，不等于把标题直接提升成全局 anchor。只有你确认标题里的术语需要参与恢复时，才填写 english / chineseHint。
+13. headingPlans.strategy 可选值：
+   - none：纯结构标题，不需要补锚，如 Examples / Notes
+   - concept：标题应恢复成标准双语概念标题
+   - source-template：标题应保留 source 模板，不要再注入中文说明
+   - mixed-qualifier：标题里只有后缀通用词需要补锚，如 Glob Patterns -> Patterns / 模式
+   - natural-heading：标题应自然译成中文，只保留真正需要保留的实体或产品名，不强制给普通说明性尾部补英文
+14. 对每条 headingPlans，都尽量给出 targetHeading：这是你认为最终最合理的标题文本（不带 Markdown 标记，但应包含你希望保留的冒号、括号和双语形式）。程序会优先执行 targetHeading。
+15. 如果标题像 “Claude Code Permission Problem” 这样是“实体名 + 普通说明性短语”，通常应判成 natural-heading，例如 targetHeading = "Claude Code 的权限问题"，而不是强行把 “Permission Problem” 做成双语术语标题。
+16. 如果标题里某些术语或实体的处理方式已经由这条 headingPlan 决定，请把它们写进 governedTerms。后续审校会以 governedTerms + targetHeading 为准，不再让全局 anchor 对同一标题追加冲突要求。
+17. 对每个 segment.input.emphasisLikeSpans 中的正文强调片段，如果强调应保留，请返回一条 emphasisPlan。targetText 只写强调内部最终应出现的完整文本，不带 Markdown 标记；如果其中包含需要首现锚定的术语，targetText 应直接写出最终锚定后的文本，而不是只写未补锚的中文骨架。
+18. 如果 emphasisPlan 覆盖的片段里包含某些术语或实体，请把它们写进 governedTerms。程序会优先按 governedTerms 对 targetText 做最终锚点对齐，再恢复 \`**...**\` 结构。
+19. emphasisPlans 只用于正文/列表/引用中的可翻译强调，不用于标题整行。
+20. 如果 segment.input.blockLikeBlocks 存在，请尽量为这些块返回 blockPlans。blockPlans 不负责决定术语如何翻译，而负责表达块顺序、块类型和块级 targetText。targetText 只在你高置信认为该块应被稳定恢复时填写。
+21. 如果 blockLikeBlocks 显示某段是 lead-in、解释句、列表项标题、引用或代码块边界，请按 source 的块顺序理解，不要把后文标题或列表项提前搬到前面。
+22. 如果 analysisScope.compactStructure = true，说明当前分片为了减轻执行成本省略了 blockLikeBlocks；此时仍应根据 source 本身理解标题、引用、强调和术语，但只有在高置信时才补 blockPlans。
+23. aliasPlans 用于“局部别名/局部 surface 需要与 canonical 概念对齐”的情况。currentText 必须尽量写该处局部 mention 在译文里最可能出现的当前写法，例如 “沙盒”；targetText 必须写该处最终应落成的完整 canonical 文本，例如 source 里写 Sandbox，而你判断它应与后文 sandbox mode 对齐，则应写 targetText = "沙盒模式（sandbox mode）"，而不是只写局部别名的直译。
+24. entityDisambiguationPlans 用于“同一家族 surface 在当前句里不是产品名/专名，而是普通名词或非专名短语”的情况。targetText 必须写这处最终应落成的自然中文文本；如有明显应避免的专名化写法，请写 forbiddenDisplays。
+25. 如果输入里包含 priorAccepted，说明那些 anchors / headingPlans / ignoredTerms 已经被前一片分析接受。不要机械重复输出它们；只补充当前分片新增或需要修正的内容。
+26. 如果 analysisScope.mode = shard，请只根据当前分片 source 与 priorAccepted 做判断；不要臆造当前分片中不存在的 source surface form。
 
 返回格式：
 {
@@ -38,10 +69,96 @@ export const DOCUMENT_ANALYSIS_PROMPT = `
       "english": "Prompt injection attacks",
       "chineseHint": "提示注入攻击",
       "familyKey": "prompt injection attacks",
+      "displayPolicy": "chinese-primary",
       "firstOccurrence": {
         "chunkId": "chunk-3",
         "segmentId": "chunk-3-segment-1"
       }
+    }
+  ],
+  "headingPlans": [
+    {
+      "chunkId": "chunk-16",
+      "segmentId": "chunk-16-segment-1",
+      "headingIndex": 1,
+      "sourceHeading": "Glob Patterns:",
+      "strategy": "mixed-qualifier",
+      "targetHeading": "Glob 模式（Patterns）：",
+      "governedTerms": ["Patterns"],
+      "english": "Patterns",
+      "chineseHint": "模式",
+      "displayPolicy": "chinese-primary"
+    },
+    {
+      "chunkId": "chunk-2",
+      "segmentId": "chunk-2-segment-1",
+      "headingIndex": 1,
+      "sourceHeading": "Claude Code Permission Problem",
+      "strategy": "natural-heading",
+      "targetHeading": "Claude Code 的权限问题",
+      "governedTerms": ["Claude Code", "Permission Problem"]
+    },
+    {
+      "chunkId": "chunk-16",
+      "segmentId": "chunk-16-segment-1",
+      "headingIndex": 2,
+      "sourceHeading": "Examples:",
+      "strategy": "none",
+      "targetHeading": "示例：",
+      "governedTerms": []
+    }
+  ],
+  "emphasisPlans": [
+    {
+      "chunkId": "chunk-1",
+      "segmentId": "chunk-1-segment-1",
+      "emphasisIndex": 1,
+      "lineIndex": 1,
+      "sourceText": "now has a sandbox mode",
+      "strategy": "preserve-strong",
+      "targetText": "现在有了沙盒模式（sandbox mode）",
+      "governedTerms": ["sandbox mode"]
+    }
+  ],
+  "blockPlans": [
+    {
+      "chunkId": "chunk-7",
+      "segmentId": "chunk-7-segment-12",
+      "blockIndex": 1,
+      "blockKind": "heading",
+      "sourceText": "## Testing Your Claude Code Sandbox Setup",
+      "targetText": "## 测试你的 Claude Code 沙盒设置"
+    },
+    {
+      "chunkId": "chunk-7",
+      "segmentId": "chunk-7-segment-12",
+      "blockIndex": 2,
+      "blockKind": "paragraph",
+      "sourceText": "Use the following checks to verify your sandbox setup."
+    }
+  ],
+  "aliasPlans": [
+    {
+      "chunkId": "chunk-3",
+      "segmentId": "chunk-3-segment-1",
+      "lineIndex": 1,
+      "sourceText": "> System permissions, by design, don’t distinguish between these scenarios. The Sandbox works by differentiating between these two cases.",
+      "currentText": "沙盒",
+      "targetText": "沙盒模式（sandbox mode）",
+      "english": "sandbox mode",
+      "chineseHint": "沙盒模式"
+    }
+  ],
+  "entityDisambiguationPlans": [
+    {
+      "chunkId": "chunk-3",
+      "segmentId": "chunk-3-segment-5",
+      "lineIndex": 1,
+      "sourceText": "This is not Claude code by default, but it’s isolation enforced by Linux bubblewrap or macOS Seatbelt...",
+      "currentText": "Claude Code",
+      "targetText": "Claude 的代码",
+      "english": "Claude Code",
+      "forbiddenDisplays": ["Claude Code（Anthropic 的命令行编码助手）"]
     }
   ],
   "ignoredTerms": [
@@ -108,6 +225,27 @@ export const GATE_AUDIT_PROMPT = `
   },
   "must_fix": [
     "逐条列出必须修复的问题，描述要具体、可执行"
+  ],
+  "repair_targets": [
+    {
+      "location": "第 1 个项目符号",
+      "kind": "list_item",
+      "currentText": "npm",
+      "targetText": "npm 注册表（npm registry）",
+      "english": "npm registry",
+      "chineseHint": "npm 注册表"
+    },
+    {
+      "location": "第 4 个块引用句",
+      "kind": "blockquote",
+      "currentText": "沙盒",
+      "targetText": "沙盒模式（sandbox mode）",
+      "english": "sandbox mode",
+      "chineseHint": "沙盒模式",
+      "sourceReferenceTexts": [
+        "The Sandbox works by differentiating between these two cases."
+      ]
+    }
   ]
 }
 
@@ -128,6 +266,10 @@ export const GATE_AUDIT_PROMPT = `
 - must_fix 必须原子化，一条只写一个具体问题。
 - 每条 must_fix 都要写清位置、问题和修复目标。
 - 如果某个 hard_check 判为 false，对应问题必须在 must_fix 中完整覆盖，不得遗漏。
+- repair_targets 是机器可执行的结构化修复目标；如果你已经能明确指出当前坏写法和目标写法，就必须填写。
+- repair_targets 的 location 必须和 must_fix 指向同一位置；kind 只可使用 anchor / heading / sentence / blockquote / list_item / lead_in / block / other。
+- 如果你已经明确知道应改成的最终文本，请优先填写 targetText；不要把“需改为 / 应改为 / 补成”等动词差异留给后处理猜。
+- 如果问题是“局部 alias / 局部短别名需与后文 canonical 保持同一概念锚定”，repair_targets 必须尽量填写 currentText、targetText，以及对应的 sourceReferenceTexts；不要只在 must_fix 里笼统描述“与后文保持一致”。
 - 如果 protected_span_integrity 不通过，必须明确写出具体污染位置或被破坏的占位符，但不要输出修订稿。
 
 ${MARKDOWN_RULES}
@@ -157,6 +299,27 @@ export const BUNDLED_GATE_AUDIT_PROMPT = `
       },
       "must_fix": [
         "逐条列出必须修复的问题，描述要具体、可执行"
+      ],
+      "repair_targets": [
+        {
+          "location": "第 1 个项目符号",
+          "kind": "list_item",
+          "currentText": "npm",
+          "targetText": "npm 注册表（npm registry）",
+          "english": "npm registry",
+          "chineseHint": "npm 注册表"
+        },
+        {
+          "location": "第 4 个块引用句",
+          "kind": "blockquote",
+          "currentText": "沙盒",
+          "targetText": "沙盒模式（sandbox mode）",
+          "english": "sandbox mode",
+          "chineseHint": "沙盒模式",
+          "sourceReferenceTexts": [
+            "The Sandbox works by differentiating between these two cases."
+          ]
+        }
       ]
     }
   ]
@@ -180,6 +343,10 @@ export const BUNDLED_GATE_AUDIT_PROMPT = `
 - must_fix 必须原子化，一条只写一个具体问题。
 - 每条 must_fix 都要写清位置、问题和修复目标。
 - 如果某个 hard_check 判为 false，对应问题必须在该 segment 的 must_fix 中完整覆盖，不得遗漏。
+- repair_targets 是机器可执行的结构化修复目标；如果你已经能明确指出当前坏写法和目标写法，就必须填写。
+- repair_targets 的 location 必须和对应 segment 的 must_fix 指向同一位置；kind 只可使用 anchor / heading / sentence / blockquote / list_item / lead_in / block / other。
+- 如果你已经明确知道应改成的最终文本，请优先填写 targetText；不要把“需改为 / 应改为 / 补成”等动词差异留给后处理猜。
+- 如果问题是“局部 alias / 局部短别名需与后文 canonical 保持同一概念锚定”，repair_targets 必须尽量填写 currentText、targetText，以及对应的 sourceReferenceTexts；不要只在 must_fix 里笼统描述“与后文保持一致”。
 - 如果 protected_span_integrity 不通过，必须明确写出具体污染位置或被破坏的占位符，但不要输出修订稿。
 
 ${MARKDOWN_RULES}
@@ -247,6 +414,78 @@ export function buildInitialPrompt(source: string): string {
 
 export function buildDocumentAnalysisPrompt(document: string): string {
   return DOCUMENT_ANALYSIS_PROMPT.replaceAll("{{document}}", document);
+}
+
+export function buildHeadingRecoveryAnalysisPrompt(document: string): string {
+  return `
+你是一名 Markdown 标题恢复分析器。请只根据下面的文档分析输入，补齐缺失的 headingPlans。
+
+要求：
+1. 只返回 JSON。
+2. 只返回 \`headingPlans\`，不要返回 anchors、emphasisPlans、blockPlans、aliasPlans、entityDisambiguationPlans。
+3. 对每个 segment.input.headingLikeLines 中的标题，尽量返回一条 headingPlan；即使该标题不需要补锚，也应返回 strategy = none 或 natural-heading。
+4. 你只负责标题恢复策略，不要新建全局 anchor。
+5. 如果 priorAccepted 中已有 headingPlans，不要重复返回；只补当前缺失的标题计划。
+6. 如果 analysisScope.mode = shard，请只处理当前分片里实际出现的标题。
+7. 每个 heading 项都附带该标题所在 segment 的 \`segmentContext\`。你必须结合标题所在段的真实 source 与 block 摘要判断：
+   - 这是自然中文标题
+   - 还是概念性标题，需要在标题本身补中英锚定
+   - 还是带列表/说明句的加粗伪标题，需要把锚定留在标题本身而不是转移到正文。
+
+返回格式：
+{
+  "headingPlans": [
+    {
+      "chunkId": "chunk-1",
+      "segmentId": "chunk-1-segment-1",
+      "headingIndex": 1,
+      "sourceHeading": "Prompt Injection Attacks",
+      "strategy": "concept",
+      "targetHeading": "提示注入攻击（Prompt Injection Attacks）",
+      "governedTerms": ["Prompt Injection Attacks"],
+      "english": "Prompt Injection Attacks",
+      "chineseHint": "提示注入攻击",
+      "displayPolicy": "chinese-primary"
+    }
+  ]
+}
+
+【文档分析输入】
+{{document}}
+`.trim().replaceAll("{{document}}", document);
+}
+
+export function buildEmphasisRecoveryAnalysisPrompt(document: string): string {
+  return `
+你是一名 Markdown 强调恢复分析器。请只根据下面的文档分析输入，补齐缺失的 emphasisPlans。
+
+要求：
+1. 只返回 JSON。
+2. 只返回 \`emphasisPlans\`，不要返回 anchors、headingPlans、blockPlans、aliasPlans、entityDisambiguationPlans。
+3. 对每个可翻译的 Markdown 强调片段，尽量给出一条 emphasisPlan。
+4. 只在该片段真的应保留强调时返回 strategy = preserve-strong；否则返回 strategy = none。
+5. targetText 只写强调内部最终应出现的完整文本，不带 Markdown 标记。
+6. 如果 priorAccepted 中已有 emphasisPlans，不要重复返回；只补当前缺失的强调计划。
+
+返回格式：
+{
+  "emphasisPlans": [
+    {
+      "chunkId": "chunk-1",
+      "segmentId": "chunk-1-segment-1",
+      "emphasisIndex": 1,
+      "lineIndex": 1,
+      "sourceText": "now has a sandbox mode",
+      "strategy": "preserve-strong",
+      "targetText": "现在有了沙盒模式（sandbox mode）",
+      "governedTerms": ["sandbox mode"]
+    }
+  ]
+}
+
+【文档分析输入】
+{{document}}
+`.trim().replaceAll("{{document}}", document);
 }
 
 export function buildGateAuditPrompt(source: string, translation: string): string {

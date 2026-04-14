@@ -29,6 +29,7 @@ export type CodexExecOptions = {
   reuseSession?: boolean;
   threadId?: string;
   reasoningEffort?: "minimal" | "low" | "medium" | "high" | "xhigh";
+  timeoutMs?: number;
 };
 
 export interface CodexExecutor {
@@ -101,6 +102,22 @@ function isRetryableCodexFailure(stderr: string): boolean {
   );
 }
 
+function isRetryableExecutionError(error: unknown, stderr: string): boolean {
+  if (isRetryableCodexFailure(stderr)) {
+    return true;
+  }
+
+  const message =
+    error instanceof Error ? error.message : typeof error === "string" ? error : "";
+  return /Codex returned an empty final message\./i.test(message);
+}
+
+function isResumeThreadFailure(error: unknown): boolean {
+  const message =
+    error instanceof Error ? error.message : typeof error === "string" ? error : "";
+  return /thread\/resume failed|no rollout found for thread id/i.test(message);
+}
+
 function sleep(milliseconds: number): Promise<void> {
   return new Promise((resolve) => {
     setTimeout(resolve, milliseconds);
@@ -156,8 +173,51 @@ export class DefaultCodexExecutor implements CodexExecutor {
         child.stdin.end();
 
         const exitCode = await new Promise<number>((resolve, reject) => {
-          child.once("error", reject);
-          child.once("close", (code) => resolve(code ?? 1));
+          let settled = false;
+          let timeoutHandle: NodeJS.Timeout | null = null;
+          let killHandle: NodeJS.Timeout | null = null;
+
+          const cleanup = () => {
+            if (timeoutHandle) {
+              clearTimeout(timeoutHandle);
+              timeoutHandle = null;
+            }
+            if (killHandle) {
+              clearTimeout(killHandle);
+              killHandle = null;
+            }
+          };
+
+          const rejectOnce = (error: Error) => {
+            if (settled) {
+              return;
+            }
+            settled = true;
+            cleanup();
+            reject(error);
+          };
+
+          const resolveOnce = (code: number) => {
+            if (settled) {
+              return;
+            }
+            settled = true;
+            cleanup();
+            resolve(code);
+          };
+
+          if (options.timeoutMs && options.timeoutMs > 0) {
+            timeoutHandle = setTimeout(() => {
+              child.kill("SIGTERM");
+              killHandle = setTimeout(() => {
+                child.kill("SIGKILL");
+              }, 1000);
+              rejectOnce(new CodexExecutionError(`Codex exec timed out after ${options.timeoutMs}ms.`));
+            }, options.timeoutMs);
+          }
+
+          child.once("error", (error) => rejectOnce(error));
+          child.once("close", (code) => resolveOnce(code ?? 1));
         });
 
         if (exitCode !== 0) {
@@ -189,7 +249,14 @@ export class DefaultCodexExecutor implements CodexExecutor {
           ...(threadId ? { threadId } : {})
         };
       } catch (error) {
-        if (isRetryableCodexFailure(stderr) && attempt < MAX_RETRYABLE_EXEC_FAILURES) {
+        if (options.threadId && isResumeThreadFailure(error)) {
+          const { threadId: _threadId, ...fallbackOptions } = options;
+          return this.execute(prompt, {
+            ...fallbackOptions,
+            reuseSession: false
+          });
+        }
+        if (isRetryableExecutionError(error, stderr) && attempt < MAX_RETRYABLE_EXEC_FAILURES) {
           const retryableError =
             error instanceof CodexExecutionError
               ? error
