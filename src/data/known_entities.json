@@ -178,6 +178,17 @@
       "notes": "同位置若被 npm registry 覆盖，可不单独补锚。"
     },
     {
+      "id": "npm-registry",
+      "surface_forms": ["npm registry"],
+      "aliases": [],
+      "category": "package",
+      "display_policy": "chinese_primary_with_en_anchor",
+      "preferred_english": "npm registry",
+      "preferred_chinese_hint": "npm 注册表",
+      "family_id": "npm_registry",
+      "notes": "稳定复合术语，优先保留完整限定，不要缩成 npm。"
+    },
+    {
       "id": "pip",
       "surface_forms": ["pip"],
       "aliases": [],
@@ -253,6 +264,28 @@
       "preferred_chinese_hint": "YOLO 模式",
       "family_id": "yolo_mode",
       "notes": "常见英文模式名，保留英文主名并补中文说明。"
+    },
+    {
+      "id": "bubblewrap",
+      "surface_forms": ["bubblewrap"],
+      "aliases": [],
+      "category": "tool",
+      "display_policy": "english_primary_with_cn_hint",
+      "preferred_english": "bubblewrap",
+      "preferred_chinese_hint": "安全隔离组件",
+      "family_id": "bubblewrap",
+      "notes": "常见 Linux 沙箱工具名，首次出现保留英文并补中文说明。"
+    },
+    {
+      "id": "seatbelt",
+      "surface_forms": ["Seatbelt"],
+      "aliases": [],
+      "category": "tool",
+      "display_policy": "english_primary_with_cn_hint",
+      "preferred_english": "Seatbelt",
+      "preferred_chinese_hint": "安全框架",
+      "family_id": "seatbelt",
+      "notes": "macOS 沙箱安全框架名，首次出现保留英文并补中文说明。"
     },
     {
       "id": "prompt-injection-attacks",

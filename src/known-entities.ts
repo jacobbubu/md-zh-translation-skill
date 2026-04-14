@@ -110,6 +110,9 @@ export function buildKnownEntityCatalog(
     anchors,
     headingPlans: [],
     emphasisPlans: [],
+    blockPlans: [],
+    aliasPlans: [],
+    entityDisambiguationPlans: [],
     ignoredTerms: []
   };
 }
@@ -134,6 +137,12 @@ export function mergeAnchorCatalogs(
     anchors,
     headingPlans: mergeHeadingPlans(formalCatalog.headingPlans ?? [], discoveredCatalog.headingPlans ?? []),
     emphasisPlans: [...(formalCatalog.emphasisPlans ?? []), ...(discoveredCatalog.emphasisPlans ?? [])],
+    blockPlans: mergeBlockPlans(formalCatalog.blockPlans ?? [], discoveredCatalog.blockPlans ?? []),
+    aliasPlans: [...(formalCatalog.aliasPlans ?? []), ...(discoveredCatalog.aliasPlans ?? [])],
+    entityDisambiguationPlans: [
+      ...(formalCatalog.entityDisambiguationPlans ?? []),
+      ...(discoveredCatalog.entityDisambiguationPlans ?? [])
+    ],
     ignoredTerms: [...formalCatalog.ignoredTerms, ...discoveredCatalog.ignoredTerms]
   };
 }
@@ -162,6 +171,12 @@ export function normalizeDiscoveredAnchorCatalog(
     anchors: normalizedAnchors,
     headingPlans: normalizeDiscoveredHeadingPlans(state, catalog.headingPlans ?? []),
     emphasisPlans: normalizeDiscoveredEmphasisPlans(state, catalog.emphasisPlans ?? []),
+    blockPlans: normalizeDiscoveredBlockPlans(state, catalog.blockPlans ?? []),
+    aliasPlans: normalizeDiscoveredAliasPlans(state, catalog.aliasPlans ?? []),
+    entityDisambiguationPlans: normalizeDiscoveredEntityDisambiguationPlans(
+      state,
+      catalog.entityDisambiguationPlans ?? []
+    ),
     ignoredTerms
   };
 }
@@ -230,6 +245,74 @@ function normalizeDiscoveredEmphasisPlans(
       ...(typeof plan.lineIndex === "number" ? { lineIndex: plan.lineIndex } : {}),
       ...(plan.targetText?.trim() ? { targetText: plan.targetText.trim() } : {})
     }));
+}
+
+function mergeBlockPlans(formalPlans: AnchorCatalog["blockPlans"], discoveredPlans: AnchorCatalog["blockPlans"]) {
+  const seen = new Set<string>();
+  const merged: NonNullable<AnchorCatalog["blockPlans"]> = [];
+
+  for (const plan of [...(formalPlans ?? []), ...(discoveredPlans ?? [])]) {
+    const key = `${plan.segmentId}::${plan.blockIndex}`;
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    merged.push(plan);
+  }
+
+  return merged;
+}
+
+function normalizeDiscoveredBlockPlans(
+  state: TranslationRunState,
+  blockPlans: NonNullable<AnchorCatalog["blockPlans"]>
+): NonNullable<AnchorCatalog["blockPlans"]> {
+  return blockPlans
+    .filter((plan) => {
+      const segment = state.segments.find((item) => item.id === plan.segmentId);
+      return Boolean(segment && plan.blockIndex >= 1);
+    })
+    .map((plan) => ({
+      ...plan,
+      sourceText: plan.sourceText.trim(),
+      ...(plan.targetText?.trim() ? { targetText: plan.targetText.trim() } : {})
+    }));
+}
+
+function normalizeDiscoveredAliasPlans(
+  state: TranslationRunState,
+  aliasPlans: NonNullable<AnchorCatalog["aliasPlans"]>
+): NonNullable<AnchorCatalog["aliasPlans"]> {
+  return aliasPlans
+    .filter((plan) => state.segments.some((segment) => segment.id === plan.segmentId))
+    .map((plan) => ({
+      ...plan,
+      sourceText: plan.sourceText.trim(),
+      targetText: plan.targetText.trim(),
+      ...(plan.currentText?.trim() ? { currentText: plan.currentText.trim() } : {}),
+      ...(plan.english?.trim() ? { english: plan.english.trim() } : {}),
+      ...(plan.chineseHint?.trim() ? { chineseHint: plan.chineseHint.trim() } : {})
+    }))
+    .filter((plan) => plan.sourceText.length > 0 && plan.targetText.length > 0);
+}
+
+function normalizeDiscoveredEntityDisambiguationPlans(
+  state: TranslationRunState,
+  plans: NonNullable<AnchorCatalog["entityDisambiguationPlans"]>
+): NonNullable<AnchorCatalog["entityDisambiguationPlans"]> {
+  return plans
+    .filter((plan) => state.segments.some((segment) => segment.id === plan.segmentId))
+    .map((plan) => ({
+      ...plan,
+      sourceText: plan.sourceText.trim(),
+      targetText: plan.targetText.trim(),
+      ...(plan.currentText?.trim() ? { currentText: plan.currentText.trim() } : {}),
+      ...(plan.english?.trim() ? { english: plan.english.trim() } : {}),
+      ...(Array.isArray(plan.forbiddenDisplays)
+        ? { forbiddenDisplays: plan.forbiddenDisplays.map((item) => item.trim()).filter(Boolean) }
+        : {})
+    }))
+    .filter((plan) => plan.sourceText.length > 0 && plan.targetText.length > 0);
 }
 
 export async function writeKnownEntityCandidatesIfRequested(

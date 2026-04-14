@@ -17,6 +17,13 @@
     "node": ">=20"
   },
   "scripts": {
+    "build:smoke-fixtures": "node scripts/build-smoke-fixtures.mjs",
+    "smoke:short": "node scripts/run-smoke.mjs --fixture short",
+    "smoke:full": "node scripts/run-smoke.mjs --fixture full",
+    "smoke:status": "node scripts/smoke-status.mjs",
+    "smoke:diagnose": "node scripts/smoke-diagnose.mjs",
+    "smoke:quality": "node scripts/smoke-quality.mjs",
+    "smoke:once": "node scripts/smoke-once.mjs",
     "build": "tsc -p tsconfig.json && node scripts/copy-runtime-data.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "tsx --test test/**/*.test.ts",

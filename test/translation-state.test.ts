@@ -146,6 +146,71 @@ test("translation state keeps repair tasks bound to the target segment only", ()
   assert.equal(state.repairs[0]?.status, "applied");
 });
 
+test("translation state carries sentence-local repair constraints into the prompt slice", () => {
+  const state = createTranslationRunState({
+    sourcePathHint: "sample.md",
+    documentTitle: null,
+    frontmatterPresent: false,
+    protectedSpans: [],
+    chunks: [
+      {
+        source: "Body",
+        separatorAfter: "",
+        headingPath: [],
+        segments: [
+          {
+            kind: "translatable",
+            source: "Body",
+            separatorAfter: "",
+            spanIds: [],
+            headingHints: [],
+            specialNotes: []
+          }
+        ]
+      }
+    ]
+  });
+
+  applySegmentAudit(state, {
+    segmentId: "chunk-1-segment-1",
+    hardChecks: {
+      paragraph_match: { pass: true, problem: "" },
+      first_mention_bilingual: { pass: false, problem: "missing anchor" },
+      numbers_units_logic: { pass: true, problem: "" },
+      chinese_punctuation: { pass: true, problem: "" },
+      unit_conversion_boundary: { pass: true, problem: "" },
+      protected_span_integrity: { pass: true, problem: "" }
+    },
+    repairTasks: [
+      {
+        id: "repair-1",
+        segmentId: "chunk-1-segment-1",
+        anchorId: null,
+        failureType: "other",
+        locationLabel: "正文句",
+        instruction:
+          "第 1 句“关键区别在于，强制是在 Linux 的内核层执行的...”应去掉新增的“Linux”限定，保持与原文仅“kernel level”一致。",
+        sentenceConstraint: {
+          quotedText: "关键区别在于，强制是在 Linux 的内核层执行的...",
+          forbiddenTerms: ["Linux"],
+          sourceReferenceTexts: ["kernel level"]
+        },
+        status: "pending"
+      }
+    ],
+    rawMustFix: [
+      "第 1 句“关键区别在于，强制是在 Linux 的内核层执行的...”应去掉新增的“Linux”限定，保持与原文仅“kernel level”一致。"
+    ]
+  });
+
+  const slice = buildSegmentTaskSlice(state, "chunk-1", "chunk-1-segment-1");
+  assert.deepEqual(slice.pendingRepairs[0]?.sentenceConstraint, {
+    quotedText: "关键区别在于，强制是在 Linux 的内核层执行的...",
+    forbiddenTerms: ["Linux"],
+    sourceReferenceTexts: ["kernel level"]
+  });
+});
+
 test("translation state persists chunk-level failure details for bundled audit failures", () => {
   const state = createTranslationRunState({
     sourcePathHint: "sample.md",
@@ -324,10 +389,17 @@ test("translation state builds a unified analysis IR draft for headings, anchors
       (plan) => plan.kind === "emphasis" && plan.targetText === "现在有了沙盒模式（sandbox mode）"
     )
   );
+  assert.ok(slice.analysisPlans.some((plan) => plan.kind === "block" && plan.blockKind === "heading"));
+  assert.ok(
+    slice.analysisPlans.some(
+      (plan) => plan.kind === "block" && plan.sourceText.includes("now has a sandbox mode")
+    )
+  );
   assert.match(slice.analysisPlanDraft, /<SEGMENT id="chunk-1-segment-1">/);
   assert.match(slice.analysisPlanDraft, /kind="heading"/);
   assert.match(slice.analysisPlanDraft, /kind="anchor"/);
   assert.match(slice.analysisPlanDraft, /kind="emphasis"/);
+  assert.match(slice.analysisPlanDraft, /kind="block"/);
 });
 
 test("translation state links pending repairs to matching analysis IR plans", () => {
@@ -530,6 +602,204 @@ test("translation state synthesizes a local fallback anchor for a longer list-it
 
   const slice = buildSegmentTaskSlice(state, "chunk-1", "chunk-1-segment-1");
   assert.equal(slice.requiredAnchors.some((anchor) => anchor.english === "npm registry"), true);
+});
+
+test("translation state synthesizes a local fallback anchor from a structured repair target", () => {
+  const state = createTranslationRunState({
+    sourcePathHint: "sample.md",
+    documentTitle: "Sample",
+    frontmatterPresent: false,
+    protectedSpans: [],
+    chunks: [
+      {
+        source: "- Pre-approved destinations (npm registry, GitHub, your APIs)",
+        separatorAfter: "",
+        headingPath: ["Sample"],
+        segments: [
+          {
+            kind: "translatable",
+            source: "- Pre-approved destinations (npm registry, GitHub, your APIs)",
+            separatorAfter: "",
+            spanIds: [],
+            headingHints: [],
+            specialNotes: []
+          }
+        ]
+      }
+    ]
+  });
+
+  applySegmentAudit(state, {
+    segmentId: "chunk-1-segment-1",
+    hardChecks: {
+      paragraph_match: { pass: true, problem: "" },
+      first_mention_bilingual: { pass: false, problem: "缺少首现锚定" },
+      numbers_units_logic: { pass: true, problem: "" },
+      chinese_punctuation: { pass: true, problem: "" },
+      unit_conversion_boundary: { pass: true, problem: "" },
+      protected_span_integrity: { pass: true, problem: "" }
+    },
+    repairTasks: [
+      {
+        id: "repair-1",
+        segmentId: "chunk-1-segment-1",
+        anchorId: null,
+        failureType: "missing_anchor",
+        locationLabel: "第 1 个项目符号",
+        instruction: "请按结构化目标修复本条项目符号。",
+        structuredTarget: {
+          location: "第 1 个项目符号",
+          kind: "list_item",
+          currentText: "npm",
+          targetText: "npm 注册表（npm registry）",
+          english: "npm registry",
+          chineseHint: "npm 注册表"
+        },
+        status: "pending"
+      }
+    ],
+    rawMustFix: ["请按结构化目标修复本条项目符号。"]
+  });
+
+  const slice = buildSegmentTaskSlice(state, "chunk-1", "chunk-1-segment-1");
+  assert.equal(slice.requiredAnchors.some((anchor) => anchor.english === "npm registry"), true);
+});
+
+test("translation state reconciles a shorter family local fallback target to an existing longer canonical anchor", () => {
+  const state = createTranslationRunState({
+    sourcePathHint: "sample.md",
+    documentTitle: "Sample",
+    frontmatterPresent: false,
+    protectedSpans: [],
+    chunks: [
+      {
+        source: "Run these tests to verify the sandbox is working well.\n\nsandbox mode is active.",
+        separatorAfter: "",
+        headingPath: ["Sample"],
+        segments: [
+          {
+            kind: "translatable",
+            source: "Run these tests to verify the sandbox is working well.\n\nsandbox mode is active.",
+            separatorAfter: "",
+            spanIds: [],
+            headingHints: [],
+            specialNotes: []
+          }
+        ]
+      }
+    ]
+  });
+
+  applyAnchorCatalog(state, {
+    anchors: [
+      {
+        english: "sandbox mode",
+        chineseHint: "沙盒模式",
+        familyKey: "sandbox-mode",
+        displayPolicy: "chinese-primary",
+        firstOccurrence: {
+          chunkId: "chunk-1",
+          segmentId: "chunk-1-segment-1"
+        }
+      }
+    ],
+    ignoredTerms: []
+  });
+
+  applySegmentAudit(state, {
+    segmentId: "chunk-1-segment-1",
+    hardChecks: {
+      paragraph_match: { pass: true, problem: "" },
+      first_mention_bilingual: { pass: false, problem: "missing anchor" },
+      numbers_units_logic: { pass: true, problem: "" },
+      chinese_punctuation: { pass: true, problem: "" },
+      unit_conversion_boundary: { pass: true, problem: "" },
+      protected_span_integrity: { pass: true, problem: "" }
+    },
+    repairTasks: [
+      {
+        id: "repair-1",
+        segmentId: "chunk-1-segment-1",
+        anchorId: null,
+        failureType: "other",
+        locationLabel: "第 2 个段落",
+        instruction: "第 2 个段落中的“沙盒模式（sandbox）”必须改为与既定锚点一致的“沙盒模式（sandbox mode）”或仅保留“沙盒模式”。",
+        structuredTarget: {
+          location: "第 2 个段落",
+          kind: "sentence",
+          currentText: "沙盒模式（sandbox）",
+          targetText: "沙盒模式（sandbox mode）",
+          english: "sandbox",
+          chineseHint: "沙盒模式"
+        },
+        status: "pending"
+      }
+    ],
+    rawMustFix: ["第 2 个段落中的“沙盒模式（sandbox）”必须改为与既定锚点一致的“沙盒模式（sandbox mode）”或仅保留“沙盒模式”。"]
+  });
+
+  const slice = buildSegmentTaskSlice(state, "chunk-1", "chunk-1-segment-1");
+  const sandboxModeAnchor = slice.requiredAnchors.find((anchor) => anchor.english === "sandbox mode");
+  const sandboxAnchor = slice.requiredAnchors.find((anchor) => anchor.english === "sandbox");
+  assert.ok(sandboxModeAnchor);
+  assert.equal(sandboxAnchor, undefined);
+});
+
+test("translation state suppresses conflicting product anchors when entity disambiguation governs the segment", () => {
+  const state = createTranslationRunState({
+    sourcePathHint: "sample.md",
+    documentTitle: "Sample",
+    frontmatterPresent: false,
+    protectedSpans: [],
+    chunks: [
+      {
+        source: "This is not Claude code by default.",
+        separatorAfter: "",
+        headingPath: ["Sample"],
+        segments: [
+          {
+            kind: "translatable",
+            source: "This is not Claude code by default.",
+            separatorAfter: "",
+            spanIds: [],
+            headingHints: [],
+            specialNotes: []
+          }
+        ]
+      }
+    ]
+  });
+
+  applyAnchorCatalog(state, {
+    anchors: [
+      {
+        english: "Claude Code",
+        chineseHint: "Anthropic 的命令行编码助手",
+        familyKey: "claude-code",
+        displayPolicy: "english-primary",
+        firstOccurrence: {
+          chunkId: "chunk-1",
+          segmentId: "chunk-1-segment-1"
+        }
+      }
+    ],
+    entityDisambiguationPlans: [
+      {
+        chunkId: "chunk-1",
+        segmentId: "chunk-1-segment-1",
+        sourceText: "This is not Claude code by default.",
+        english: "Claude code",
+        targetText: "Claude 代码",
+        forbiddenDisplays: ["Claude Code", "Claude Code（Anthropic 的命令行编码助手）"],
+        lineIndex: 1
+      }
+    ],
+    ignoredTerms: []
+  });
+
+  const slice = buildSegmentTaskSlice(state, "chunk-1", "chunk-1-segment-1");
+  assert.equal(slice.requiredAnchors.some((anchor) => anchor.english === "Claude Code"), false);
+  assert.equal(slice.analysisPlans.some((plan) => plan.kind === "disambiguation"), true);
 });
 
 test("translation state synthesizes a local fallback anchor for an inline concept named by repair", () => {
@@ -884,6 +1154,140 @@ test("translation state does not heuristically synthesize heading anchors withou
   assert.equal(slice.requiredAnchors.some((anchor) => anchor.english === "Supported Platforms"), false);
 });
 
+test("translation state synthesizes a constrained heading fallback when a global anchor exactly matches a heading hint", () => {
+  const state = createTranslationRunState({
+    sourcePathHint: "sample.md",
+    documentTitle: "Sample",
+    frontmatterPresent: false,
+    protectedSpans: [],
+    chunks: [
+      {
+        source: "### Prompt Injection Attacks",
+        separatorAfter: "",
+        headingPath: ["Sample"],
+        segments: [
+          {
+            kind: "translatable",
+            source: "### Prompt Injection Attacks",
+            separatorAfter: "",
+            spanIds: [],
+            headingHints: ["Prompt Injection Attacks"],
+            specialNotes: []
+          }
+        ]
+      }
+    ]
+  });
+
+  applyAnchorCatalog(state, {
+    anchors: [
+      {
+        english: "prompt injection attacks",
+        chineseHint: "提示注入攻击",
+        familyKey: "prompt-injection",
+        displayPolicy: "chinese-primary",
+        sourceForms: ["prompt injection attacks", "Prompt Injection Attacks"],
+        firstOccurrence: {
+          chunkId: "chunk-1",
+          segmentId: "chunk-1-segment-1"
+        }
+      }
+    ],
+    headingPlans: [],
+    ignoredTerms: []
+  });
+
+  const slice = buildSegmentTaskSlice(state, "chunk-1", "chunk-1-segment-1", {
+    currentRestoredBody: "### 提示注入攻击"
+  });
+
+  assert.equal(slice.requiredAnchors.some((anchor) => anchor.english === "prompt injection attacks"), true);
+  const headingFallback = slice.requiredAnchors.find((anchor) => anchor.english === "prompt injection attacks");
+  assert.ok(headingFallback);
+  assert.equal(headingFallback?.canonicalDisplay, "提示注入攻击（prompt injection attacks）");
+});
+
+test("translation state reconciles conflicting heading and block plans with an exact governed anchor", () => {
+  const state = createTranslationRunState({
+    sourcePathHint: "sample.md",
+    documentTitle: "Sample",
+    frontmatterPresent: false,
+    protectedSpans: [],
+    chunks: [
+      {
+        source: "# Title\n\n### Prompt Injection Attacks",
+        separatorAfter: "",
+        headingPath: ["Sample"],
+        segments: [
+          {
+            kind: "translatable",
+            source: "# Title\n\n### Prompt Injection Attacks",
+            separatorAfter: "",
+            spanIds: [],
+            headingHints: ["Title", "Prompt Injection Attacks"],
+            specialNotes: []
+          }
+        ]
+      }
+    ]
+  });
+
+  applyAnchorCatalog(state, {
+    anchors: [
+      {
+        english: "prompt injection attacks",
+        chineseHint: "提示注入攻击",
+        familyKey: "prompt-injection",
+        displayPolicy: "chinese-primary",
+        sourceForms: ["prompt injection attacks", "Prompt Injection Attacks"],
+        firstOccurrence: {
+          chunkId: "chunk-1",
+          segmentId: "chunk-1-segment-1"
+        }
+      }
+    ],
+    headingPlans: [
+      {
+        chunkId: "chunk-1",
+        segmentId: "chunk-1-segment-1",
+        headingIndex: 1,
+        sourceHeading: "Prompt Injection Attacks",
+        strategy: "concept",
+        targetHeading: "提示注入攻击",
+        english: "Prompt Injection Attacks",
+        chineseHint: "提示注入攻击",
+        displayPolicy: "chinese-primary"
+      }
+    ],
+    blockPlans: [
+      {
+        chunkId: "chunk-1",
+        segmentId: "chunk-1-segment-1",
+        blockIndex: 1,
+        blockKind: "heading",
+        sourceText: "### Prompt Injection Attacks",
+        targetText: "### 提示注入攻击"
+      }
+    ],
+    ignoredTerms: []
+  });
+
+  const slice = buildSegmentTaskSlice(state, "chunk-1", "chunk-1-segment-1", {
+    currentRestoredBody: "### 提示注入攻击"
+  });
+
+  assert.equal(slice.headingPlans[0]?.targetHeading, "提示注入攻击（Prompt Injection Attacks）");
+  assert.deepEqual(slice.blockPlans, [
+    {
+      blockIndex: 1,
+      blockKind: "heading",
+      sourceText: "### Prompt Injection Attacks",
+      targetText: "### 提示注入攻击（Prompt Injection Attacks）"
+    }
+  ]);
+  assert.equal(slice.requiredAnchors.some((anchor) => anchor.english === "prompt injection attacks"), true);
+});
+
 test("translation state prefers LLM heading plans over heuristic heading planning", () => {
   const state = createTranslationRunState({
     sourcePathHint: "sample.md",
@@ -950,6 +1354,159 @@ test("translation state prefers LLM heading plans over heuristic heading plannin
       ["Glob Patterns:", "mixed-qualifier", "Glob 模式（Patterns）："],
       ["Examples:", "none", "示例："]
     ]
+  );
+});
+
+test("translation state prefers LLM block plans over heuristic block planning", () => {
+  const state = createTranslationRunState({
+    sourcePathHint: "sample.md",
+    documentTitle: "Sample",
+    frontmatterPresent: false,
+    protectedSpans: [],
+    chunks: [
+      {
+        source: "Intro paragraph.\n\n- first\n- second",
+        separatorAfter: "",
+        headingPath: ["Sample"],
+        segments: [
+          {
+            kind: "translatable",
+            source: "Intro paragraph.\n\n- first\n- second",
+            separatorAfter: "",
+            spanIds: [],
+            headingHints: [],
+            specialNotes: []
+          }
+        ]
+      }
+    ]
+  });
+
+  applyAnchorCatalog(state, {
+    anchors: [],
+    headingPlans: [],
+    emphasisPlans: [],
+    blockPlans: [
+      {
+        chunkId: "chunk-1",
+        segmentId: "chunk-1-segment-1",
+        blockIndex: 1,
+        blockKind: "paragraph",
+        sourceText: "Intro paragraph.",
+        targetText: "介绍段落。"
+      },
+      {
+        chunkId: "chunk-1",
+        segmentId: "chunk-1-segment-1",
+        blockIndex: 2,
+        blockKind: "list",
+        sourceText: "- first\n- second",
+        targetText: "- 第一项\n- 第二项"
+      }
+    ],
+    ignoredTerms: []
+  });
+
+  const slice = buildSegmentTaskSlice(state, "chunk-1", "chunk-1-segment-1");
+
+  assert.deepEqual(slice.blockPlans, [
+    {
+      blockIndex: 1,
+      blockKind: "paragraph",
+      sourceText: "Intro paragraph.",
+      targetText: "介绍段落。"
+    },
+    {
+      blockIndex: 2,
+      blockKind: "list",
+      sourceText: "- first\n- second",
+      targetText: "- 第一项\n- 第二项"
+    }
+  ]);
+  assert.ok(slice.analysisPlanDraft.includes('kind="block"'));
+  assert.ok(slice.analysisPlanDraft.includes('source="Intro paragraph."'));
+  assert.ok(slice.analysisPlanDraft.includes('target="介绍段落。"'));
+});
+
+test("translation state reconciles emphasis and block targets to the canonical bilingual anchor display", () => {
+  const state = createTranslationRunState({
+    sourcePathHint: "sample.md",
+    documentTitle: "Sample",
+    frontmatterPresent: false,
+    protectedSpans: [],
+    chunks: [
+      {
+        source: "Claude Code **now has a sandbox mode** that makes the YOLO mode look amateurish.",
+        separatorAfter: "",
+        headingPath: ["Sample"],
+        segments: [
+          {
+            kind: "translatable",
+            source: "Claude Code **now has a sandbox mode** that makes the YOLO mode look amateurish.",
+            separatorAfter: "",
+            spanIds: [],
+            headingHints: [],
+            specialNotes: []
+          }
+        ]
+      }
+    ]
+  });
+
+  applyAnchorCatalog(state, {
+    anchors: [
+      {
+        english: "sandbox mode",
+        chineseHint: "沙盒模式",
+        familyKey: "sandbox mode",
+        displayPolicy: "chinese-primary",
+        firstOccurrence: {
+          chunkId: "chunk-1",
+          segmentId: "chunk-1-segment-1"
+        }
+      },
+      {
+        english: "YOLO mode",
+        chineseHint: "YOLO 模式",
+        familyKey: "yolo mode",
+        displayPolicy: "english-primary",
+        firstOccurrence: {
+          chunkId: "chunk-1",
+          segmentId: "chunk-1-segment-1"
+        }
+      }
+    ],
+    emphasisPlans: [
+      {
+        chunkId: "chunk-1",
+        segmentId: "chunk-1-segment-1",
+        emphasisIndex: 1,
+        lineIndex: 1,
+        sourceText: "now has a sandbox mode",
+        strategy: "preserve-strong",
+        targetText: "现在有了沙盒模式",
+        governedTerms: ["sandbox mode"]
+      }
+    ],
+    blockPlans: [
+      {
+        chunkId: "chunk-1",
+        segmentId: "chunk-1-segment-1",
+        blockIndex: 1,
+        blockKind: "paragraph",
+        sourceText: "Claude Code **now has a sandbox mode** that makes the YOLO mode look amateurish.",
+        targetText: "Claude Code 现在有了沙盒模式，让 YOLO 模式显得很业余。"
+      }
+    ],
+    ignoredTerms: []
+  });
+
+  const slice = buildSegmentTaskSlice(state, "chunk-1", "chunk-1-segment-1");
+
+  assert.equal(slice.emphasisPlans[0]?.targetText, "现在有了沙盒模式（sandbox mode）");
+  assert.equal(
+    slice.blockPlans[0]?.targetText,
+    "Claude Code 现在有了沙盒模式（sandbox mode），让 YOLO mode（YOLO 模式）显得很业余。"
   );
 });
 

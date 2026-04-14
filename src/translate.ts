@@ -1,17 +1,23 @@
-import { mkdir, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 import {
   buildDocumentAnalysisPrompt,
+  buildEmphasisRecoveryAnalysisPrompt,
+  buildHeadingRecoveryAnalysisPrompt,
   buildBundledGateAuditPrompt,
   buildGateAuditPrompt,
   buildInitialPrompt,
   buildRepairPrompt,
   buildStylePolishPrompt
 } from "./internal/prompts/scheme-h.js";
-import { DefaultCodexExecutor, type CodexExecutor } from "./codex-exec.js";
+import { DefaultCodexExecutor, type CodexExecOptions, type CodexExecResult, type CodexExecutor } from "./codex-exec.js";
 import {
   applyEmphasisPlanTargets,
+  applySemanticMentionPlans,
   describeAnchorDisplay,
   formatAnchorDisplay,
   injectPlannedAnchorText,
@@ -21,7 +27,7 @@ import {
   normalizeSourceSurfaceAnchorText,
   normalizeSegmentAnchorText
 } from "./anchor-normalization.js";
-import { FormattingError, HardGateError } from "./errors.js";
+import { CodexExecutionError, FormattingError, HardGateError } from "./errors.js";
 import { formatTranslatedBody, reconstructMarkdown } from "./format.js";
 import { planMarkdownChunks, type MarkdownChunk, type MarkdownChunkPlan } from "./markdown-chunks.js";
 import {
@@ -40,6 +46,7 @@ import {
   applySegmentDraft,
   buildLocalFallbackAnchorId,
   buildSegmentTaskSlice,
+  classifyPromptBlockKind,
   createTranslationRunState,
   getChunkSegments,
   getSegmentState,
@@ -48,8 +55,13 @@ import {
   markSegmentStyled,
   renderTranslationIRSidecar,
   setChunkFinalBody,
+  splitPromptBlocks,
+  summarizePromptBlockSource,
   type AnchorCatalog,
   type AnalysisAnchor,
+  type AnalysisBlockPlan,
+  type AnalysisAliasPlan,
+  type AnalysisEntityDisambiguationPlan,
   type AnalysisHeadingPlan,
   type AnalysisEmphasisPlan,
   type AuditCheckKey as StateAuditCheckKey,
@@ -57,6 +69,7 @@ import {
   type PromptSlice,
   type RepairFailureType,
   type RepairTask,
+  type StructuredRepairTarget,
   type SegmentAuditResult as StateSegmentAuditResult,
   type TranslationRunState
 } from "./translation-state.js";
@@ -71,8 +84,9 @@ import {
 const DEFAULT_MODEL = "gpt-5.4-mini";
 const MAX_REPAIR_CYCLES = 2;
 const MAX_MUST_FIX_PER_REPAIR_CALL = 1;
-const DRAFT_REASONING_EFFORT = "medium";
-const AUDIT_REASONING_EFFORT = "medium";
+const DRAFT_REASONING_EFFORT = "low";
+const AUDIT_REASONING_EFFORT = "low";
+const ANALYSIS_REASONING_EFFORT = "low";
 const REPAIR_REASONING_EFFORT = "low";
 const STYLE_REASONING_EFFORT = "low";
 const ANALYSIS_SHARD_MAX_CHUNKS = 3;
@@ -84,10 +98,19 @@ const ANALYSIS_SUMMARY_MAX_HEADINGS = 40;
 const ANALYSIS_SUMMARY_MAX_IGNORED = 30;
 const ANALYSIS_SHARD_TIMEOUT_MS = 120000;
 const ANALYSIS_HEARTBEAT_MS = 15000;
+const ANALYSIS_MIN_HEADING_PLAN_COVERAGE_RATIO = 0.5;
+const ANALYSIS_QUALITY_MIN_HEADING_LINES = 8;
+const DRAFT_TIMEOUT_MS = 180000;
+const REPAIR_TIMEOUT_MS = 120000;
+const AUDIT_TIMEOUT_MS = 120000;
+const STYLE_TIMEOUT_MS = 120000;
+const EXECUTION_HEARTBEAT_MS = 15000;
 const ANALYSIS_SHARD_MAX_ATTEMPTS = 3;
 const ANALYSIS_SHARD_MAX_SPLIT_DEPTH = 2;
 const ANALYSIS_SHARD_MIN_SPLIT_SOURCE_CHARS = 900;
 const ANALYSIS_FALLBACK_SHARD_CONCURRENCY = 2;
+const ANALYSIS_CACHE_SCHEMA_VERSION = 1;
+const BUNDLED_AUDIT_MAX_SEGMENTS = 6;
 type ReasoningEffort = "minimal" | "low" | "medium" | "high" | "xhigh";
 type StyleMode = "none" | "final";
 
@@ -114,6 +137,11 @@ type AnalysisShardSummary = {
     strategy: AnalysisHeadingPlan["strategy"];
     targetHeading?: string;
   }>;
+  blockPlans: Array<{
+    blockKind: AnalysisBlockPlan["blockKind"];
+    sourceText: string;
+    targetText?: string;
+  }>;
   ignoredTerms: Array<{
     english: string;
     reason: string;
@@ -131,6 +159,7 @@ type AuditCheckKey =
 export type GateAudit = {
   hard_checks: Record<AuditCheckKey, { pass: boolean; problem: string }>;
   must_fix: string[];
+  repair_targets?: StructuredRepairTarget[];
 };
 
 type IndexedGateAudit = GateAudit & {
@@ -158,6 +187,10 @@ export type TranslateOptions = {
   executor?: CodexExecutor;
   formatter?: typeof formatTranslatedBody;
   onProgress?: (message: string, stage: TranslateProgress) => void;
+  analysisCacheDir?: string;
+  disableAnalysisCache?: boolean;
+  checkpointDir?: string;
+  disableCheckpoint?: boolean;
 };
 
 export type TranslateResult = {
@@ -169,10 +202,26 @@ export type TranslateResult = {
   chunkCount: number;
 };
 
+let analysisImplementationFingerprintPromise: Promise<string> | null = null;
+
+type TranslationCheckpoint = {
+  schemaVersion: 1;
+  cacheKey: string;
+  savedAt: string;
+  state: TranslationRunState;
+  completedChunks: Array<{
+    chunkId: string;
+    body: string;
+    gateAudit: GateAudit;
+  }>;
+  repairCyclesUsed: number;
+  nextLocalSpanIndex: number;
+};
+
 const GATE_AUDIT_SCHEMA = {
   type: "object",
   additionalProperties: false,
-  required: ["hard_checks", "must_fix"],
+  required: ["hard_checks", "must_fix", "repair_targets"],
   properties: {
     hard_checks: {
       type: "object",
@@ -199,6 +248,42 @@ const GATE_AUDIT_SCHEMA = {
       items: {
         type: "string"
       }
+    },
+    repair_targets: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: [
+          "location",
+          "kind",
+          "currentText",
+          "targetText",
+          "english",
+          "chineseHint",
+          "forbiddenTerms",
+          "sourceReferenceTexts"
+        ],
+        properties: {
+          location: { type: "string" },
+          kind: {
+            type: "string",
+            enum: ["anchor", "heading", "sentence", "blockquote", "list_item", "lead_in", "block", "other"]
+          },
+          currentText: { type: ["string", "null"] },
+          targetText: { type: ["string", "null"] },
+          english: { type: ["string", "null"] },
+          chineseHint: { type: ["string", "null"] },
+          forbiddenTerms: {
+            type: ["array", "null"],
+            items: { type: "string" }
+          },
+          sourceReferenceTexts: {
+            type: ["array", "null"],
+            items: { type: "string" }
+          }
+        }
+      }
     }
   }
 } as const;
@@ -213,11 +298,12 @@ const BUNDLED_GATE_AUDIT_SCHEMA = {
       items: {
         type: "object",
         additionalProperties: false,
-        required: ["segment_index", "hard_checks", "must_fix"],
+        required: ["segment_index", "hard_checks", "must_fix", "repair_targets"],
         properties: {
           segment_index: { type: "integer", minimum: 1 },
           hard_checks: GATE_AUDIT_SCHEMA.properties.hard_checks,
-          must_fix: GATE_AUDIT_SCHEMA.properties.must_fix
+          must_fix: GATE_AUDIT_SCHEMA.properties.must_fix,
+          repair_targets: GATE_AUDIT_SCHEMA.properties.repair_targets
         }
       }
     }
@@ -227,7 +313,15 @@ const BUNDLED_GATE_AUDIT_SCHEMA = {
 const ANCHOR_CATALOG_SCHEMA = {
   type: "object",
   additionalProperties: false,
-  required: ["anchors", "headingPlans", "emphasisPlans", "ignoredTerms"],
+  required: [
+    "anchors",
+    "headingPlans",
+    "emphasisPlans",
+    "blockPlans",
+    "aliasPlans",
+    "entityDisambiguationPlans",
+    "ignoredTerms"
+  ],
   properties: {
     anchors: {
       type: "array",
@@ -389,6 +483,85 @@ const ANCHOR_CATALOG_SCHEMA = {
         }
       }
     },
+    blockPlans: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["chunkId", "segmentId", "blockIndex", "blockKind", "sourceText", "targetText"],
+        properties: {
+          chunkId: { type: "string" },
+          segmentId: { type: "string" },
+          blockIndex: { type: "integer", minimum: 1 },
+          blockKind: {
+            type: "string",
+            enum: ["heading", "blockquote", "list", "code", "paragraph"]
+          },
+          sourceText: { type: "string" },
+          targetText: {
+            anyOf: [{ type: "string" }, { type: "null" }]
+          }
+        }
+      }
+    },
+    aliasPlans: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["chunkId", "segmentId", "lineIndex", "sourceText", "currentText", "targetText", "english", "chineseHint"],
+        properties: {
+          chunkId: { type: "string" },
+          segmentId: { type: "string" },
+          lineIndex: {
+            anyOf: [{ type: "integer", minimum: 1 }, { type: "null" }]
+          },
+          sourceText: { type: "string" },
+          currentText: {
+            anyOf: [{ type: "string" }, { type: "null" }]
+          },
+          targetText: { type: "string" },
+          english: {
+            anyOf: [{ type: "string" }, { type: "null" }]
+          },
+          chineseHint: {
+            anyOf: [{ type: "string" }, { type: "null" }]
+          }
+        }
+      }
+    },
+    entityDisambiguationPlans: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["chunkId", "segmentId", "lineIndex", "sourceText", "currentText", "targetText", "english", "forbiddenDisplays"],
+        properties: {
+          chunkId: { type: "string" },
+          segmentId: { type: "string" },
+          lineIndex: {
+            anyOf: [{ type: "integer", minimum: 1 }, { type: "null" }]
+          },
+          sourceText: { type: "string" },
+          currentText: {
+            anyOf: [{ type: "string" }, { type: "null" }]
+          },
+          targetText: { type: "string" },
+          english: {
+            anyOf: [{ type: "string" }, { type: "null" }]
+          },
+          forbiddenDisplays: {
+            anyOf: [
+              {
+                type: "array",
+                items: { type: "string" }
+              },
+              { type: "null" }
+            ]
+          }
+        }
+      }
+    },
     ignoredTerms: {
       type: "array",
       items: {
@@ -450,6 +623,7 @@ function parseGateAuditValue(value: unknown): GateAudit {
   const data = value as Record<string, unknown>;
   const hardChecks = data.hard_checks;
   const mustFix = data.must_fix;
+  const repairTargets = data.repair_targets;
   const keys: AuditCheckKey[] = [
     "paragraph_match",
     "first_mention_bilingual",
@@ -480,10 +654,120 @@ function parseGateAuditValue(value: unknown): GateAudit {
     throw new HardGateError("Gate audit JSON must_fix must be an array of strings.");
   }
 
-  return {
+  const parsedRepairTargets = parseStructuredRepairTargets(repairTargets);
+
+  return downgradeFormatterOnlyAuditIssues({
     hard_checks: hardChecks as GateAudit["hard_checks"],
-    must_fix: mustFix.map((item) => normalizeAuditQuoteStyle(item.trim())).filter(Boolean)
+    must_fix: mustFix.map((item) => normalizeAuditQuoteStyle(item.trim())).filter(Boolean),
+    ...(parsedRepairTargets.length ? { repair_targets: parsedRepairTargets } : {})
+  });
+}
+
+function parseStructuredRepairTargets(value: unknown): StructuredRepairTarget[] {
+  if (value == null) {
+    return [];
+  }
+
+  if (!Array.isArray(value)) {
+    throw new HardGateError("Gate audit JSON repair_targets must be an array when present.");
+  }
+
+  return value.map((item, index) => {
+    if (!item || typeof item !== "object") {
+      throw new HardGateError(`Gate audit JSON repair_targets[${index}] is not an object.`);
+    }
+
+    const record = item as Record<string, unknown>;
+    if (typeof record.location !== "string" || typeof record.kind !== "string") {
+      throw new HardGateError(`Gate audit JSON repair_targets[${index}] is missing location or kind.`);
+    }
+
+    const target: StructuredRepairTarget = {
+      location: normalizeAuditQuoteStyle(record.location.trim()),
+      kind: record.kind as StructuredRepairTarget["kind"]
+    };
+
+    if (typeof record.currentText === "string" && record.currentText.trim()) {
+      target.currentText = normalizeAuditQuoteStyle(record.currentText.trim());
+    }
+    if (typeof record.targetText === "string" && record.targetText.trim()) {
+      target.targetText = normalizeAuditQuoteStyle(record.targetText.trim());
+    }
+    if (typeof record.english === "string" && record.english.trim()) {
+      target.english = normalizeAuditQuoteStyle(record.english.trim());
+    }
+    if (typeof record.chineseHint === "string" && record.chineseHint.trim()) {
+      target.chineseHint = normalizeAuditQuoteStyle(record.chineseHint.trim());
+    }
+    if (Array.isArray(record.forbiddenTerms)) {
+      const forbiddenTerms = record.forbiddenTerms
+        .filter((term): term is string => typeof term === "string")
+        .map((term) => normalizeAuditQuoteStyle(term.trim()))
+        .filter(Boolean);
+      if (forbiddenTerms.length) {
+        target.forbiddenTerms = forbiddenTerms;
+      }
+    }
+    if (Array.isArray(record.sourceReferenceTexts)) {
+      const sourceReferenceTexts = record.sourceReferenceTexts
+        .filter((term): term is string => typeof term === "string")
+        .map((term) => normalizeAuditQuoteStyle(term.trim()))
+        .filter(Boolean);
+      if (sourceReferenceTexts.length) {
+        target.sourceReferenceTexts = sourceReferenceTexts;
+      }
+    }
+
+    return target;
+  });
+}
+
+function downgradeFormatterOnlyAuditIssues(audit: GateAudit): GateAudit {
+  const repairTargets = audit.repair_targets ?? [];
+  const paired = Array.from({ length: Math.max(audit.must_fix.length, repairTargets.length) }, (_, index) => ({
+    instruction: audit.must_fix[index] ?? null,
+    target: repairTargets[index] ?? null
+  }));
+
+  const kept = paired.filter(({ instruction, target }) => !isFormatterOnlyRepairIssue(instruction, target));
+  const chinesePunctuationSuppressed = paired.length > kept.length;
+
+  const hardChecks = {
+    ...audit.hard_checks,
+    chinese_punctuation:
+      chinesePunctuationSuppressed &&
+      !Object.entries(audit.hard_checks).some(
+        ([key, value]) => key !== "chinese_punctuation" && value && typeof value === "object" && !(value as { pass: boolean }).pass
+      )
+        ? { pass: true, problem: "" }
+        : audit.hard_checks.chinese_punctuation
   };
+
+  return {
+    hard_checks: hardChecks,
+    must_fix: kept.map((entry) => entry.instruction).filter((item): item is string => Boolean(item)),
+    ...(kept.some((entry) => entry.target) ? { repair_targets: kept.map((entry) => entry.target).filter((item): item is StructuredRepairTarget => Boolean(item)) } : {})
+  };
+}
+
+function isFormatterOnlyRepairIssue(
+  instruction: string | null,
+  target: StructuredRepairTarget | null
+): boolean {
+  const text = [instruction, target?.currentText, target?.targetText, target?.location].filter(Boolean).join(" ");
+  if (!text) {
+    return false;
+  }
+
+  const mentionsSemanticContent =
+    /中英对照|双语|首现|锚定|术语|段落顺序|protected span|占位符|数字|单位|逻辑|Network|Claude|npm|registry|GitHub|Attack|Sandbox/i.test(
+      text
+    );
+  if (mentionsSemanticContent) {
+    return false;
+  }
+
+  return /半角|全角|冒号|引号|书名号|括号|标点/u.test(text);
 }
 
 export function parseGateAudit(text: string): GateAudit {
@@ -706,6 +990,118 @@ function parseAnchorCatalog(text: string): AnchorCatalog {
     return parsedPlan;
   });
 
+  const blockPlans = (Array.isArray(data.blockPlans) ? data.blockPlans : []).map((item, index) => {
+    if (!item || typeof item !== "object") {
+      throw new HardGateError(`Anchor catalog blockPlans[${index}] is not an object.`);
+    }
+    const plan = item as Record<string, unknown>;
+    if (
+      typeof plan.chunkId !== "string" ||
+      typeof plan.segmentId !== "string" ||
+      typeof plan.blockIndex !== "number" ||
+      typeof plan.blockKind !== "string" ||
+      typeof plan.sourceText !== "string"
+    ) {
+      throw new HardGateError(`Anchor catalog blockPlans[${index}] has an invalid shape.`);
+    }
+
+    const parsedPlan: AnalysisBlockPlan = {
+      chunkId: plan.chunkId.trim(),
+      segmentId: plan.segmentId.trim(),
+      blockIndex: plan.blockIndex,
+      blockKind: plan.blockKind as AnalysisBlockPlan["blockKind"],
+      sourceText: plan.sourceText.trim()
+    };
+
+    if (typeof plan.targetText === "string" && plan.targetText.trim()) {
+      parsedPlan.targetText = plan.targetText.trim();
+    }
+
+    return parsedPlan;
+  });
+
+  const aliasPlans = (Array.isArray(data.aliasPlans) ? data.aliasPlans : []).map((item, index) => {
+    if (!item || typeof item !== "object") {
+      throw new HardGateError(`Anchor catalog aliasPlans[${index}] is not an object.`);
+    }
+    const plan = item as Record<string, unknown>;
+    if (
+      typeof plan.chunkId !== "string" ||
+      typeof plan.segmentId !== "string" ||
+      typeof plan.sourceText !== "string" ||
+      typeof plan.targetText !== "string"
+    ) {
+      throw new HardGateError(`Anchor catalog aliasPlans[${index}] has an invalid shape.`);
+    }
+
+    const parsedPlan: AnalysisAliasPlan = {
+      chunkId: plan.chunkId.trim(),
+      segmentId: plan.segmentId.trim(),
+      sourceText: plan.sourceText.trim(),
+      targetText: plan.targetText.trim()
+    };
+
+    if (typeof plan.lineIndex === "number" && Number.isInteger(plan.lineIndex) && plan.lineIndex >= 1) {
+      parsedPlan.lineIndex = plan.lineIndex;
+    }
+    if (typeof plan.currentText === "string" && plan.currentText.trim()) {
+      parsedPlan.currentText = plan.currentText.trim();
+    }
+    if (typeof plan.english === "string" && plan.english.trim()) {
+      parsedPlan.english = plan.english.trim();
+    }
+    if (typeof plan.chineseHint === "string" && plan.chineseHint.trim()) {
+      parsedPlan.chineseHint = plan.chineseHint.trim();
+    }
+
+    return parsedPlan;
+  });
+
+  const entityDisambiguationPlans = (
+    Array.isArray(data.entityDisambiguationPlans) ? data.entityDisambiguationPlans : []
+  ).map((item, index) => {
+    if (!item || typeof item !== "object") {
+      throw new HardGateError(`Anchor catalog entityDisambiguationPlans[${index}] is not an object.`);
+    }
+    const plan = item as Record<string, unknown>;
+    if (
+      typeof plan.chunkId !== "string" ||
+      typeof plan.segmentId !== "string" ||
+      typeof plan.sourceText !== "string" ||
+      typeof plan.targetText !== "string"
+    ) {
+      throw new HardGateError(`Anchor catalog entityDisambiguationPlans[${index}] has an invalid shape.`);
+    }
+
+    const parsedPlan: AnalysisEntityDisambiguationPlan = {
+      chunkId: plan.chunkId.trim(),
+      segmentId: plan.segmentId.trim(),
+      sourceText: plan.sourceText.trim(),
+      targetText: plan.targetText.trim()
+    };
+
+    if (typeof plan.lineIndex === "number" && Number.isInteger(plan.lineIndex) && plan.lineIndex >= 1) {
+      parsedPlan.lineIndex = plan.lineIndex;
+    }
+    if (typeof plan.currentText === "string" && plan.currentText.trim()) {
+      parsedPlan.currentText = plan.currentText.trim();
+    }
+    if (typeof plan.english === "string" && plan.english.trim()) {
+      parsedPlan.english = plan.english.trim();
+    }
+    if (Array.isArray(plan.forbiddenDisplays)) {
+      const forbiddenDisplays = plan.forbiddenDisplays
+        .filter((item): item is string => typeof item === "string")
+        .map((item) => item.trim())
+        .filter(Boolean);
+      if (forbiddenDisplays.length > 0) {
+        parsedPlan.forbiddenDisplays = forbiddenDisplays;
+      }
+    }
+
+    return parsedPlan;
+  });
+
   const ignoredTerms = data.ignoredTerms.map((item, index) => {
     if (!item || typeof item !== "object") {
       throw new HardGateError(`Anchor catalog ignoredTerms[${index}] is not an object.`);
@@ -721,7 +1117,7 @@ function parseAnchorCatalog(text: string): AnchorCatalog {
     };
   });
 
-  return { anchors, headingPlans, emphasisPlans, ignoredTerms };
+  return { anchors, headingPlans, emphasisPlans, blockPlans, aliasPlans, entityDisambiguationPlans, ignoredTerms };
 }
 
 function isHardPass(audit: GateAudit): boolean {
@@ -741,6 +1137,44 @@ function validateStructuralGateChecks(audit: GateAudit): void {
 
 function report(options: TranslateOptions, stage: TranslateProgress, message: string): void {
   options.onProgress?.(message, stage);
+}
+
+async function executeStageWithTimeout(
+  executor: CodexExecutor,
+  prompt: string,
+  execOptions: CodexExecOptions,
+  meta: {
+    options: TranslateOptions;
+    stage: TranslateProgress;
+    timeoutMs: number;
+    heartbeatLabel: string;
+    onHeartbeat?: (message: string) => void;
+  }
+): Promise<CodexExecResult> {
+  const heartbeatMs = getExecutionHeartbeatMs();
+  const startedAt = Date.now();
+  const heartbeat = setInterval(() => {
+    const message = `${meta.heartbeatLabel} still waiting for model response (${Date.now() - startedAt}ms elapsed).`;
+    if (meta.onHeartbeat) {
+      meta.onHeartbeat(message);
+      return;
+    }
+    report(meta.options, meta.stage, message);
+  }, heartbeatMs);
+
+  try {
+    return await executor.execute(prompt, {
+      ...execOptions,
+      timeoutMs: meta.timeoutMs
+    });
+  } catch (error) {
+    if (error instanceof CodexExecutionError && /timed out after \d+ms\./i.test(error.message)) {
+      throw new CodexExecutionError(`${meta.heartbeatLabel} timed out after ${meta.timeoutMs}ms.`);
+    }
+    throw error;
+  } finally {
+    clearInterval(heartbeat);
+  }
 }
 
 function buildChunkSeeds(
@@ -788,6 +1222,39 @@ function getAnalysisHeartbeatMs(): number {
   return readPositiveIntEnv("MDZH_ANALYSIS_HEARTBEAT_MS", ANALYSIS_HEARTBEAT_MS);
 }
 
+function getAnalysisMinHeadingPlanCoverageRatio(): number {
+  const raw = process.env.MDZH_ANALYSIS_MIN_HEADING_PLAN_COVERAGE_RATIO?.trim();
+  if (!raw) {
+    return ANALYSIS_MIN_HEADING_PLAN_COVERAGE_RATIO;
+  }
+  const parsed = Number.parseFloat(raw);
+  return Number.isFinite(parsed) && parsed >= 0 && parsed <= 1 ? parsed : ANALYSIS_MIN_HEADING_PLAN_COVERAGE_RATIO;
+}
+
+function getAnalysisQualityMinHeadingLines(): number {
+  return readPositiveIntEnv("MDZH_ANALYSIS_QUALITY_MIN_HEADING_LINES", ANALYSIS_QUALITY_MIN_HEADING_LINES);
+}
+
+function getDraftTimeoutMs(): number {
+  return readPositiveIntEnv("MDZH_DRAFT_TIMEOUT_MS", DRAFT_TIMEOUT_MS);
+}
+
+function getRepairTimeoutMs(): number {
+  return readPositiveIntEnv("MDZH_REPAIR_TIMEOUT_MS", REPAIR_TIMEOUT_MS);
+}
+
+function getAuditTimeoutMs(): number {
+  return readPositiveIntEnv("MDZH_AUDIT_TIMEOUT_MS", AUDIT_TIMEOUT_MS);
+}
+
+function getStyleTimeoutMs(): number {
+  return readPositiveIntEnv("MDZH_STYLE_TIMEOUT_MS", STYLE_TIMEOUT_MS);
+}
+
+function getExecutionHeartbeatMs(): number {
+  return readPositiveIntEnv("MDZH_EXECUTION_HEARTBEAT_MS", EXECUTION_HEARTBEAT_MS);
+}
+
 function getAnalysisShardMaxAttempts(): number {
   return readPositiveIntEnv("MDZH_ANALYSIS_SHARD_MAX_ATTEMPTS", ANALYSIS_SHARD_MAX_ATTEMPTS);
 }
@@ -811,6 +1278,233 @@ function getAnalysisFallbackShardConcurrency(): number {
       ANALYSIS_FALLBACK_SHARD_CONCURRENCY
     )
   );
+}
+
+function isAnalysisCacheDisabled(options: TranslateOptions): boolean {
+  if (options.disableAnalysisCache) {
+    return true;
+  }
+
+  const raw = process.env.MDZH_DISABLE_ANALYSIS_CACHE?.trim().toLowerCase();
+  return raw === "1" || raw === "true" || raw === "yes" || raw === "on";
+}
+
+function resolveAnalysisCacheDir(cwd: string, options: TranslateOptions): string | null {
+  if (isAnalysisCacheDisabled(options)) {
+    return null;
+  }
+
+  const configured = options.analysisCacheDir ?? process.env.MDZH_ANALYSIS_CACHE_DIR?.trim();
+  if (configured) {
+    return path.isAbsolute(configured) ? configured : path.resolve(cwd, configured);
+  }
+
+  return path.join(tmpdir(), "mdzh-analysis-cache");
+}
+
+async function getAnalysisImplementationFingerprint(): Promise<string> {
+  if (!analysisImplementationFingerprintPromise) {
+    analysisImplementationFingerprintPromise = (async () => {
+      const hasher = createHash("sha256");
+      const runtimeFiles = [
+        fileURLToPath(import.meta.url),
+        fileURLToPath(new URL("./internal/prompts/scheme-h.js", import.meta.url)),
+        fileURLToPath(new URL("./translation-state.js", import.meta.url)),
+        fileURLToPath(new URL("./known-entities.js", import.meta.url)),
+        fileURLToPath(new URL("./data/known_entities.json", import.meta.url))
+      ];
+
+      for (const filePath of runtimeFiles) {
+        try {
+          hasher.update(await readFile(filePath));
+        } catch {
+          hasher.update(filePath);
+        }
+      }
+
+      return hasher.digest("hex");
+    })();
+  }
+
+  return analysisImplementationFingerprintPromise;
+}
+
+async function buildAnalysisCacheKey(
+  state: TranslationRunState,
+  knownEntities: ReturnType<typeof loadKnownEntities>,
+  context: Pick<ChunkTranslationContext, "postDraftModel" | "postDraftReasoningEffort" | "cwd" | "options">
+): Promise<string> {
+  const hasher = createHash("sha256");
+  const payload = {
+    schemaVersion: ANALYSIS_CACHE_SCHEMA_VERSION,
+    implementationFingerprint: await getAnalysisImplementationFingerprint(),
+    sourcePathHint: state.document.sourcePathHint,
+    documentTitle: state.document.title,
+    postDraftModel: context.postDraftModel,
+    analysisReasoningEffort: context.postDraftReasoningEffort ?? ANALYSIS_REASONING_EFFORT,
+    shardLimits: getAnalysisShardLimits(),
+    shardTimeoutMs: getAnalysisShardTimeoutMs(),
+    shardMaxAttempts: getAnalysisShardMaxAttempts(),
+    shardMaxSplitDepth: getAnalysisShardMaxSplitDepth(),
+    shardMinSplitSourceChars: getAnalysisShardMinSplitSourceChars(),
+    analysisMinHeadingPlanCoverageRatio: getAnalysisMinHeadingPlanCoverageRatio(),
+    analysisQualityMinHeadingLines: getAnalysisQualityMinHeadingLines(),
+    chunks: state.chunks.map((chunk) => ({
+      id: chunk.id,
+      source: chunk.source,
+      headingPath: chunk.headingPath
+    })),
+    segments: state.segments.map((segment) => ({
+      id: segment.id,
+      kind: segment.kind,
+      source: segment.source,
+      headingHints: segment.headingHints,
+      specialNotes: segment.specialNotes
+    })),
+    knownEntities
+  };
+  hasher.update(JSON.stringify(payload));
+  return hasher.digest("hex");
+}
+
+async function readAnalysisCatalogFromCache(
+  cacheDir: string,
+  cacheKey: string
+): Promise<AnchorCatalog | null> {
+  const cachePath = path.join(cacheDir, `${cacheKey}.json`);
+
+  try {
+    const parsed = JSON.parse(await readFile(cachePath, "utf8")) as {
+      schemaVersion?: number;
+      cacheKey?: string;
+      catalog?: AnchorCatalog;
+    };
+
+    if (
+      parsed.schemaVersion !== ANALYSIS_CACHE_SCHEMA_VERSION ||
+      parsed.cacheKey !== cacheKey ||
+      !parsed.catalog
+    ) {
+      return null;
+    }
+
+    return parsed.catalog;
+  } catch {
+    return null;
+  }
+}
+
+async function writeAnalysisCatalogToCache(
+  cacheDir: string,
+  cacheKey: string,
+  catalog: AnchorCatalog
+): Promise<string> {
+  const cachePath = path.join(cacheDir, `${cacheKey}.json`);
+  await mkdir(cacheDir, { recursive: true });
+  const tempPath = `${cachePath}.tmp-${process.pid}`;
+  await writeFile(
+    tempPath,
+    `${JSON.stringify(
+      {
+        schemaVersion: ANALYSIS_CACHE_SCHEMA_VERSION,
+        cacheKey,
+        createdAt: new Date().toISOString(),
+        catalog
+      },
+      null,
+      2
+    )}\n`,
+    "utf8"
+  );
+  await rename(tempPath, cachePath);
+  return cachePath;
+}
+
+function isCheckpointDisabled(options: TranslateOptions): boolean {
+  if (options.disableCheckpoint) {
+    return true;
+  }
+
+  const raw = process.env.MDZH_DISABLE_CHECKPOINT?.trim().toLowerCase();
+  return raw === "1" || raw === "true" || raw === "yes" || raw === "on";
+}
+
+function resolveCheckpointDir(cwd: string, options: TranslateOptions): string | null {
+  if (isCheckpointDisabled(options)) {
+    return null;
+  }
+
+  const configured = options.checkpointDir ?? process.env.MDZH_CHECKPOINT_DIR?.trim();
+  if (!configured) {
+    return null;
+  }
+
+  return path.isAbsolute(configured) ? configured : path.resolve(cwd, configured);
+}
+
+async function buildCheckpointCacheKey(
+  source: string,
+  sourcePathHint: string,
+  draftModel: string,
+  postDraftModel: string,
+  styleMode: StyleMode
+): Promise<string> {
+  const hasher = createHash("sha256");
+  hasher.update(
+    JSON.stringify({
+      schemaVersion: 1,
+      implementationFingerprint: await getAnalysisImplementationFingerprint(),
+      source,
+      sourcePathHint,
+      draftModel,
+      postDraftModel,
+      styleMode
+    })
+  );
+  return hasher.digest("hex");
+}
+
+async function readTranslationCheckpoint(
+  checkpointDir: string,
+  cacheKey: string
+): Promise<TranslationCheckpoint | null> {
+  const checkpointPath = path.join(checkpointDir, `${cacheKey}.json`);
+
+  try {
+    const parsed = JSON.parse(await readFile(checkpointPath, "utf8")) as TranslationCheckpoint;
+    if (parsed.schemaVersion !== 1 || parsed.cacheKey !== cacheKey) {
+      return null;
+    }
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+async function writeTranslationCheckpoint(
+  checkpointDir: string,
+  cacheKey: string,
+  checkpoint: Omit<TranslationCheckpoint, "schemaVersion" | "cacheKey" | "savedAt">
+): Promise<string> {
+  const checkpointPath = path.join(checkpointDir, `${cacheKey}.json`);
+  const tempPath = `${checkpointPath}.tmp-${process.pid}`;
+  await mkdir(checkpointDir, { recursive: true });
+  await writeFile(
+    tempPath,
+    `${JSON.stringify(
+      {
+        schemaVersion: 1,
+        cacheKey,
+        savedAt: new Date().toISOString(),
+        ...checkpoint
+      },
+      null,
+      2
+    )}\n`,
+    "utf8"
+  );
+  await rename(tempPath, checkpointPath);
+  return checkpointPath;
 }
 
 function getShardSegments(state: TranslationRunState, shard: AnalysisShard, chunkId: string) {
@@ -855,53 +1549,129 @@ function summarizeAnalysisShard(state: TranslationRunState, shard: AnalysisShard
 }
 
 function buildAnalysisShards(state: TranslationRunState): AnalysisShard[] {
+  type AnalysisSegmentUnit = {
+    chunkId: string;
+    segmentId: string;
+    sourceChars: number;
+    headingCount: number;
+    emphasisCount: number;
+  };
+
   const limits = getAnalysisShardLimits();
   const shards: AnalysisShard[] = [];
-  let currentChunkIds: string[] = [];
+  let currentUnits: AnalysisSegmentUnit[] = [];
   let sourceChars = 0;
   let headingCount = 0;
   let emphasisCount = 0;
 
   const flush = () => {
-    if (currentChunkIds.length === 0) {
+    if (currentUnits.length === 0) {
       return;
     }
+
+    const chunkIds: string[] = [];
+    const segmentIdsByChunk: Record<string, string[]> = {};
+    for (const unit of currentUnits) {
+      if (!chunkIds.includes(unit.chunkId)) {
+        chunkIds.push(unit.chunkId);
+      }
+      segmentIdsByChunk[unit.chunkId] ??= [];
+      segmentIdsByChunk[unit.chunkId]!.push(unit.segmentId);
+    }
+
     shards.push({
       id: `analysis-shard-${shards.length + 1}`,
       index: shards.length,
-      chunkIds: currentChunkIds,
+      chunkIds,
+      segmentIdsByChunk,
       sourceChars,
       headingCount,
       emphasisCount,
       depth: 0
     });
-    currentChunkIds = [];
+    currentUnits = [];
     sourceChars = 0;
     headingCount = 0;
     emphasisCount = 0;
   };
 
   for (const chunk of state.chunks) {
-    const chunkSummary = summarizeChunkForAnalysis(state, chunk.id);
-    const wouldExceed =
-      currentChunkIds.length > 0 &&
-      (currentChunkIds.length + 1 > limits.maxChunks ||
-        sourceChars + chunkSummary.sourceChars > limits.maxSourceChars ||
-        headingCount + chunkSummary.headingCount > limits.maxHeadings ||
-        emphasisCount + chunkSummary.emphasisCount > limits.maxEmphasis);
+    for (const segment of getChunkSegments(state, chunk.id)) {
+      const segmentSourceChars = segment.source.length;
+      const segmentHeadingCount = segment.headingHints.length;
+      const segmentEmphasisCount = extractTranslatableStrongEmphasisSpans(segment.source).length;
+      const nextChunkCount = new Set([...currentUnits.map((unit) => unit.chunkId), chunk.id]).size;
+      const nextSegmentCount = currentUnits.length + 1;
+      const nextSourceChars = sourceChars + segmentSourceChars;
+      const nextHeadingCount = headingCount + segmentHeadingCount;
+      const nextEmphasisCount = emphasisCount + segmentEmphasisCount;
+      const wouldExceed =
+        currentUnits.length > 0 &&
+        (nextChunkCount > limits.maxChunks ||
+          nextSourceChars > limits.maxSourceChars ||
+          nextHeadingCount > limits.maxHeadings ||
+          nextEmphasisCount > limits.maxEmphasis ||
+          wouldCreateDenseAnalysisShard(
+            limits,
+            nextChunkCount,
+            nextSegmentCount,
+            nextSourceChars,
+            nextHeadingCount,
+            nextEmphasisCount
+          ));
 
-    if (wouldExceed) {
-      flush();
+      if (wouldExceed) {
+        flush();
+      }
+
+      currentUnits.push({
+        chunkId: chunk.id,
+        segmentId: segment.id,
+        sourceChars: segmentSourceChars,
+        headingCount: segmentHeadingCount,
+        emphasisCount: segmentEmphasisCount
+      });
+      sourceChars += segmentSourceChars;
+      headingCount += segmentHeadingCount;
+      emphasisCount += segmentEmphasisCount;
     }
-
-    currentChunkIds.push(chunk.id);
-    sourceChars += chunkSummary.sourceChars;
-    headingCount += chunkSummary.headingCount;
-    emphasisCount += chunkSummary.emphasisCount;
   }
 
   flush();
   return shards;
+}
+
+function wouldCreateDenseAnalysisShard(
+  limits: ReturnType<typeof getAnalysisShardLimits>,
+  chunkCount: number,
+  segmentCount: number,
+  sourceChars: number,
+  headingCount: number,
+  emphasisCount: number
+): boolean {
+  if (segmentCount <= 1) {
+    return false;
+  }
+
+  const headingSoftCap = Math.max(6, Math.ceil(limits.maxHeadings * 0.75));
+  const sourceSoftCap = Math.max(2400, Math.ceil(limits.maxSourceChars * 0.6));
+  const emphasisSoftCap = Math.max(2, Math.ceil(limits.maxEmphasis * 0.5));
+  const compactHeadingSoftCap = Math.max(5, Math.ceil(limits.maxHeadings * 0.4));
+  const compactSourceSoftCap = Math.max(2800, Math.ceil(limits.maxSourceChars * 0.38));
+
+  if (chunkCount > 1 && (sourceChars >= 2400 || headingCount >= 4)) {
+    return true;
+  }
+
+  if (headingCount >= compactHeadingSoftCap && sourceChars >= compactSourceSoftCap) {
+    return true;
+  }
+
+  if (headingCount >= headingSoftCap && sourceChars >= sourceSoftCap) {
+    return true;
+  }
+
+  return sourceChars >= sourceSoftCap && emphasisCount >= emphasisSoftCap;
 }
 
 function createAnalysisShard(
@@ -958,14 +1728,15 @@ function splitArrayBalanced<T>(
 
 function splitAnalysisShard(state: TranslationRunState, shard: AnalysisShard): AnalysisShard[] {
   const minSplitSourceChars = getAnalysisShardMinSplitSourceChars();
-  if (shard.sourceChars < minSplitSourceChars * 2) {
-    return [];
-  }
-
-  const ensureViable = (children: AnalysisShard[]): AnalysisShard[] =>
-    children.every((child) => child.sourceChars >= minSplitSourceChars) ? children : [];
+  const minSegmentSplitSourceChars = Math.max(320, Math.floor(minSplitSourceChars * 0.4));
 
   if (shard.chunkIds.length > 1) {
+    if (shard.sourceChars < minSplitSourceChars * 2) {
+      return [];
+    }
+
+    const ensureViable = (children: AnalysisShard[]): AnalysisShard[] =>
+      children.every((child) => child.sourceChars >= minSplitSourceChars) ? children : [];
     const chunkSplit = splitArrayBalanced(shard.chunkIds, (chunkId) => summarizeChunkForAnalysis(state, chunkId).sourceChars);
     if (!chunkSplit) {
       return [];
@@ -985,23 +1756,30 @@ function splitAnalysisShard(state: TranslationRunState, shard: AnalysisShard): A
   if (!chunkId) {
     return [];
   }
+  if (shard.sourceChars < minSegmentSplitSourceChars * 2) {
+    return [];
+  }
   const segments = getShardSegments(state, shard, chunkId);
   const segmentSplit = splitArrayBalanced(segments, (segment) => segment.source.length);
   if (!segmentSplit) {
     return [];
   }
 
-  return ensureViable(segmentSplit.map((group, index) =>
-    createAnalysisShard(state, {
-      id: `${shard.id}-s${index + 1}`,
-      index: shard.index,
-      chunkIds: [chunkId],
-      segmentIdsByChunk: {
-        [chunkId]: group.map((segment) => segment.id)
-      },
-      depth: shard.depth + 1
-    })
-  ));
+  return segmentSplit.every((group) =>
+    group.reduce((total, segment) => total + segment.source.length, 0) >= minSegmentSplitSourceChars
+  )
+    ? segmentSplit.map((group, index) =>
+        createAnalysisShard(state, {
+          id: `${shard.id}-s${index + 1}`,
+          index: shard.index,
+          chunkIds: [chunkId],
+          segmentIdsByChunk: {
+            [chunkId]: group.map((segment) => segment.id)
+          },
+          depth: shard.depth + 1
+        })
+      )
+    : [];
 }
 
 function buildAnalysisShardSummary(catalog: AnchorCatalog): AnalysisShardSummary {
@@ -1017,6 +1795,11 @@ function buildAnalysisShardSummary(catalog: AnchorCatalog): AnalysisShardSummary
       strategy: plan.strategy,
       ...(plan.targetHeading ? { targetHeading: plan.targetHeading } : {})
     })),
+    blockPlans: (catalog.blockPlans ?? []).slice(0, ANALYSIS_SUMMARY_MAX_HEADINGS).map((plan) => ({
+      blockKind: plan.blockKind,
+      sourceText: plan.sourceText,
+      ...(plan.targetText ? { targetText: plan.targetText } : {})
+    })),
     ignoredTerms: catalog.ignoredTerms.slice(0, ANALYSIS_SUMMARY_MAX_IGNORED)
   };
 }
@@ -1027,6 +1810,11 @@ function buildDocumentAnalysisInput(
 ): string {
   const selectedChunkIds = new Set(options.shard?.chunkIds ?? state.chunks.map((chunk) => chunk.id));
   const selectedChunks = state.chunks.filter((chunk) => selectedChunkIds.has(chunk.id));
+  const compactStructure =
+    Boolean(options.shard) &&
+    ((options.shard?.sourceChars ?? 0) >= 2500 ||
+      (options.shard?.headingCount ?? 0) >= 5 ||
+      (options.shard?.chunkIds.length ?? 0) > 1);
   return JSON.stringify(
     {
       document: state.document,
@@ -1039,7 +1827,8 @@ function buildDocumentAnalysisInput(
             chunkIds: options.shard.chunkIds,
             sourceChars: options.shard.sourceChars,
             headingCount: options.shard.headingCount,
-            emphasisCount: options.shard.emphasisCount
+            emphasisCount: options.shard.emphasisCount,
+            compactStructure
           }
         : { mode: "full-document" },
       ...(options.priorSummary
@@ -1055,11 +1844,19 @@ function buildDocumentAnalysisInput(
           id: segment.id,
           index: segment.index + 1,
           kind: segment.kind,
-          headingHints: segment.headingHints,
           headingLikeLines: segment.headingHints.map((heading, index) => ({
             index: index + 1,
             sourceHeading: heading
           })),
+          ...(!compactStructure
+            ? {
+                blockLikeBlocks: splitPromptBlocks(segment.source).map((block, index) => ({
+                  index: index + 1,
+                  kind: classifyPromptBlockKind(block.content),
+                  sourceText: summarizePromptBlockSource(block.content)
+                }))
+              }
+            : {}),
           emphasisLikeSpans: extractTranslatableStrongEmphasisSpans(segment.source).map((span) => ({
             index: span.index,
             lineIndex: span.lineIndex,
@@ -1070,12 +1867,183 @@ function buildDocumentAnalysisInput(
       }))
     },
     null,
-    2
+    0
+  );
+}
+
+function normalizeHeadingRecoveryKey(
+  chunkId: string,
+  segmentId: string,
+  headingIndex: number,
+  sourceHeading: string
+): string {
+  return `${chunkId}::${segmentId}::${headingIndex}::${sourceHeading.trim().toLowerCase()}`;
+}
+
+function buildHeadingRecoveryInput(state: TranslationRunState, catalog: AnchorCatalog): string {
+  const existingHeadingKeys = new Set(
+    (catalog.headingPlans ?? []).map((plan) =>
+      normalizeHeadingRecoveryKey(plan.chunkId, plan.segmentId, plan.headingIndex ?? 0, plan.sourceHeading)
+    )
+  );
+
+  const headings = state.chunks.flatMap((chunk) =>
+    getChunkSegments(state, chunk.id).flatMap((segment) =>
+      segment.headingHints
+        .map((sourceHeading, index) => ({
+          chunkId: chunk.id,
+          chunkIndex: chunk.index + 1,
+          segmentId: segment.id,
+          segmentIndex: segment.index + 1,
+          headingPath: chunk.headingPath,
+          headingIndex: index + 1,
+          sourceHeading,
+          segmentContext: {
+            blockLikeBlocks: splitPromptBlocks(segment.source).map((block, blockIndex) => ({
+              index: blockIndex + 1,
+              kind: classifyPromptBlockKind(block.content),
+              sourceText: summarizePromptBlockSource(block.content)
+            })),
+            source: segment.source
+          }
+        }))
+        .filter(
+          (heading) =>
+            !existingHeadingKeys.has(
+              normalizeHeadingRecoveryKey(
+                heading.chunkId,
+                heading.segmentId,
+                heading.headingIndex,
+                heading.sourceHeading
+              )
+            )
+        )
+    )
+  );
+
+  return JSON.stringify(
+    {
+      document: state.document,
+      analysisScope: {
+        mode: "heading-recovery",
+        headingCount: headings.length
+      },
+      priorAccepted: {
+        headingPlans: (catalog.headingPlans ?? []).map((plan) => ({
+          chunkId: plan.chunkId,
+          segmentId: plan.segmentId,
+          headingIndex: plan.headingIndex ?? null,
+          sourceHeading: plan.sourceHeading,
+          strategy: plan.strategy,
+          ...(plan.targetHeading ? { targetHeading: plan.targetHeading } : {})
+        }))
+      },
+      headings
+    }
+  );
+}
+
+function normalizeEmphasisRecoveryKey(
+  chunkId: string,
+  segmentId: string,
+  emphasisIndex: number,
+  lineIndex: number,
+  sourceText: string
+): string {
+  return `${chunkId}::${segmentId}::${emphasisIndex}::${lineIndex}::${sourceText.trim().toLowerCase()}`;
+}
+
+function buildEmphasisRecoveryInput(state: TranslationRunState, catalog: AnchorCatalog): string {
+  const existingEmphasisKeys = new Set(
+    (catalog.emphasisPlans ?? []).map((plan) =>
+      normalizeEmphasisRecoveryKey(
+        plan.chunkId,
+        plan.segmentId,
+        plan.emphasisIndex ?? 0,
+        plan.lineIndex ?? 0,
+        plan.sourceText
+      )
+    )
+  );
+
+  const emphasisSpans = state.chunks.flatMap((chunk) =>
+    getChunkSegments(state, chunk.id).flatMap((segment) =>
+      extractTranslatableStrongEmphasisSpans(segment.source)
+        .map((span) => ({
+          chunkId: chunk.id,
+          chunkIndex: chunk.index + 1,
+          segmentId: segment.id,
+          segmentIndex: segment.index + 1,
+          headingPath: chunk.headingPath,
+          emphasisIndex: span.index,
+          lineIndex: span.lineIndex,
+          sourceText: span.sourceText
+        }))
+        .filter(
+          (span) =>
+            !existingEmphasisKeys.has(
+              normalizeEmphasisRecoveryKey(
+                span.chunkId,
+                span.segmentId,
+                span.emphasisIndex,
+                span.lineIndex,
+                span.sourceText
+              )
+            )
+        )
+    )
+  );
+
+  return JSON.stringify(
+    {
+      document: state.document,
+      analysisScope: {
+        mode: "emphasis-recovery",
+        emphasisCount: emphasisSpans.length
+      },
+      priorAccepted: {
+        emphasisPlans: (catalog.emphasisPlans ?? []).map((plan) => ({
+          chunkId: plan.chunkId,
+          segmentId: plan.segmentId,
+          emphasisIndex: plan.emphasisIndex ?? null,
+          lineIndex: plan.lineIndex ?? null,
+          sourceText: plan.sourceText,
+          strategy: plan.strategy,
+          ...(plan.targetText ? { targetText: plan.targetText } : {}),
+          ...(plan.governedTerms?.length ? { governedTerms: plan.governedTerms } : {})
+        }))
+      },
+      emphasisSpans
+    }
   );
 }
 
 function countHeadingLikeLines(state: TranslationRunState): number {
   return state.segments.reduce((count, segment) => count + segment.headingHints.length, 0);
+}
+
+function getAnalysisQualityFailure(
+  state: TranslationRunState,
+  discoveredCatalog: AnchorCatalog,
+  mergedCatalog: AnchorCatalog
+): string | null {
+  const headingLikeLineCount = countHeadingLikeLines(state);
+  const minHeadingLines = getAnalysisQualityMinHeadingLines();
+  if (headingLikeLineCount < minHeadingLines) {
+    return null;
+  }
+
+  const headingPlanCount = mergedCatalog.headingPlans?.length ?? 0;
+  const minCoverageRatio = getAnalysisMinHeadingPlanCoverageRatio();
+  const actualCoverageRatio = headingLikeLineCount === 0 ? 1 : headingPlanCount / headingLikeLineCount;
+
+  if (actualCoverageRatio >= minCoverageRatio) {
+    return null;
+  }
+
+  const coveragePercent = Math.round(actualCoverageRatio * 100);
+  const thresholdPercent = Math.round(minCoverageRatio * 100);
+  return `Analysis quality gate failed: heading plan coverage ${headingPlanCount}/${headingLikeLineCount} (${coveragePercent}%) is below the minimum ${thresholdPercent}% threshold; discovered anchors=${discoveredCatalog.anchors.length}.`;
 }
 
 function isAnalysisShardTimeoutError(error: unknown): boolean {
@@ -1120,7 +2088,7 @@ async function executeAnalysisShardAttempt(
     const result = await context.executor.execute(prompt, {
       cwd: context.cwd,
       model: context.postDraftModel,
-      reasoningEffort: context.postDraftReasoningEffort ?? AUDIT_REASONING_EFFORT,
+      reasoningEffort: context.postDraftReasoningEffort ?? ANALYSIS_REASONING_EFFORT,
       outputSchema: ANCHOR_CATALOG_SCHEMA,
       reuseSession: false,
       timeoutMs,
@@ -1141,6 +2109,104 @@ async function executeAnalysisShardAttempt(
   } finally {
     clearInterval(heartbeat);
   }
+}
+
+async function recoverHeadingPlansOnly(
+  state: TranslationRunState,
+  context: Pick<ChunkTranslationContext, "executor" | "postDraftModel" | "cwd" | "options" | "postDraftReasoningEffort">,
+  catalog: AnchorCatalog
+): Promise<AnchorCatalog> {
+  const prompt = buildHeadingRecoveryAnalysisPrompt(buildHeadingRecoveryInput(state, catalog));
+
+  report(
+    context.options,
+    "analyze",
+    "Recovering missing heading plans with a compact heading-only pass."
+  );
+
+  const result = await context.executor.execute(prompt, {
+    cwd: context.cwd,
+    model: context.postDraftModel,
+    reasoningEffort: context.postDraftReasoningEffort ?? ANALYSIS_REASONING_EFFORT,
+    outputSchema: {
+      type: "object",
+      additionalProperties: false,
+      required: ["headingPlans"],
+      properties: {
+        headingPlans: ANCHOR_CATALOG_SCHEMA.properties.headingPlans
+      }
+    },
+    reuseSession: false,
+    timeoutMs: Math.min(getAnalysisShardTimeoutMs(), 120000),
+    onStderr: (stderrChunk) => {
+      const trimmed = stderrChunk.trim();
+      if (trimmed) {
+        report(context.options, "analyze", trimmed);
+      }
+    }
+  });
+
+  const parsed = parseAnchorCatalog(
+    JSON.stringify({
+      anchors: [],
+      headingPlans: JSON.parse(result.text).headingPlans ?? [],
+      emphasisPlans: [],
+      blockPlans: [],
+      aliasPlans: [],
+      entityDisambiguationPlans: [],
+      ignoredTerms: []
+    })
+  );
+  return normalizeDiscoveredAnchorCatalog(state, parsed);
+}
+
+async function recoverEmphasisPlansOnly(
+  state: TranslationRunState,
+  context: Pick<ChunkTranslationContext, "executor" | "postDraftModel" | "cwd" | "options" | "postDraftReasoningEffort">,
+  catalog: AnchorCatalog
+): Promise<AnchorCatalog> {
+  const prompt = buildEmphasisRecoveryAnalysisPrompt(buildEmphasisRecoveryInput(state, catalog));
+
+  report(
+    context.options,
+    "analyze",
+    "Recovering missing emphasis plans with a compact emphasis-only pass."
+  );
+
+  const result = await context.executor.execute(prompt, {
+    cwd: context.cwd,
+    model: context.postDraftModel,
+    reasoningEffort: context.postDraftReasoningEffort ?? ANALYSIS_REASONING_EFFORT,
+    outputSchema: {
+      type: "object",
+      additionalProperties: false,
+      required: ["emphasisPlans"],
+      properties: {
+        emphasisPlans: ANCHOR_CATALOG_SCHEMA.properties.emphasisPlans
+      }
+    },
+    reuseSession: false,
+    timeoutMs: Math.min(getAnalysisShardTimeoutMs(), 120000),
+    onStderr: (stderrChunk) => {
+      const trimmed = stderrChunk.trim();
+      if (trimmed) {
+        report(context.options, "analyze", trimmed);
+      }
+    }
+  });
+
+  const parsed = parseAnchorCatalog(
+    JSON.stringify({
+      anchors: [],
+      headingPlans: [],
+      emphasisPlans: JSON.parse(result.text).emphasisPlans ?? [],
+      blockPlans: [],
+      aliasPlans: [],
+      entityDisambiguationPlans: [],
+      ignoredTerms: []
+    })
+  );
+  return normalizeDiscoveredAnchorCatalog(state, parsed);
 }
 
 async function analyzeShardWithFallback(
@@ -1317,8 +2383,51 @@ async function analyzeDocumentForAnchors(
       "analyze",
       `Heading plan coverage: ${mergedCatalog.headingPlans?.length ?? 0}/${countHeadingLikeLines(state)} heading-like line(s).`
     );
-    return mergedCatalog;
+    const totalHeadingLikeLines = countHeadingLikeLines(state);
+    const mergedHeadingPlanCount = mergedCatalog.headingPlans?.length ?? 0;
+    if (mergedHeadingPlanCount < totalHeadingLikeLines) {
+      const recovered = await recoverHeadingPlansOnly(
+        state,
+        context,
+        mergeAnchorCatalogs(formalCatalog, discoveredCatalog)
+      );
+      if ((recovered.headingPlans?.length ?? 0) > 0) {
+        discoveredCatalog = mergeAnchorCatalogs(discoveredCatalog, recovered);
+        const recoveredCatalog = mergeAnchorCatalogs(formalCatalog, discoveredCatalog);
+        report(
+          context.options,
+          "analyze",
+          `Heading-only recovery finished: ${recoveredCatalog.headingPlans?.length ?? 0}/${countHeadingLikeLines(state)} heading-like line(s).`
+        );
+      }
+    }
+    const qualityFailure = getAnalysisQualityFailure(
+      state,
+      discoveredCatalog,
+      mergeAnchorCatalogs(formalCatalog, discoveredCatalog)
+    );
+    const recoveredEmphasis = await recoverEmphasisPlansOnly(
+      state,
+      context,
+      mergeAnchorCatalogs(formalCatalog, discoveredCatalog)
+    );
+    if ((recoveredEmphasis.emphasisPlans?.length ?? 0) > 0) {
+      discoveredCatalog = mergeAnchorCatalogs(discoveredCatalog, recoveredEmphasis);
+      report(
+        context.options,
+        "analyze",
+        `Emphasis-only recovery finished: ${discoveredCatalog.emphasisPlans?.length ?? 0} emphasis plan(s).`
+      );
+    }
+    if (qualityFailure) {
+      report(context.options, "analyze", qualityFailure);
+      throw new HardGateError(qualityFailure);
+    }
+    return mergeAnchorCatalogs(formalCatalog, discoveredCatalog);
   } catch (error) {
+    if (error instanceof HardGateError && /^Analysis quality gate failed:/u.test(error.message)) {
+      throw error;
+    }
     report(
       context.options,
       "analyze",
@@ -1366,7 +2475,7 @@ export async function translateMarkdownArticle(source: string, options: Translat
   const { protectedBody, spans } = protectMarkdownSpans(body);
   const chunkPlan = planMarkdownChunks(protectedBody);
   const spanIndex = new Map(spans.map((span) => [span.id, span]));
-  const state = createTranslationRunState({
+  let state = createTranslationRunState({
     sourcePathHint,
     documentTitle: chunkPlan.documentTitle,
     frontmatterPresent: frontmatter !== null,
@@ -1378,20 +2487,85 @@ export async function translateMarkdownArticle(source: string, options: Translat
   let repairCyclesUsed = 0;
   let styleApplied = false;
   let nextLocalSpanIndex = spanIndex.size + 1;
+  const checkpointDir = resolveCheckpointDir(cwd, options);
+  const checkpointKey = checkpointDir
+    ? await buildCheckpointCacheKey(source, sourcePathHint, draftModel, postDraftModel, styleMode)
+    : null;
+  const completedCheckpointChunks: Array<{
+    chunkId: string;
+    body: string;
+    gateAudit: GateAudit;
+  }> = [];
 
   try {
     report(options, "analyze", "Analyzing document-wide anchors.");
-    const anchorCatalog = await analyzeDocumentForAnchors(state, {
+    const knownEntities = loadKnownEntities();
+    const analysisContext = {
       executor,
       postDraftModel,
       cwd,
       options,
       postDraftReasoningEffort
-    });
+    } as const;
+    const analysisCacheDir = resolveAnalysisCacheDir(cwd, options);
+    let anchorCatalog: AnchorCatalog | null = null;
+
+    if (analysisCacheDir) {
+      const analysisCacheKey = await buildAnalysisCacheKey(state, knownEntities, analysisContext);
+      const cachedCatalog = await readAnalysisCatalogFromCache(analysisCacheDir, analysisCacheKey);
+      if (cachedCatalog) {
+        anchorCatalog = cachedCatalog;
+        report(
+          options,
+          "analyze",
+          `Reused cached analysis catalog from ${path.join(analysisCacheDir, `${analysisCacheKey}.json`)}.`
+        );
+      } else {
+        anchorCatalog = await analyzeDocumentForAnchors(state, analysisContext);
+        const cachePath = await writeAnalysisCatalogToCache(analysisCacheDir, analysisCacheKey, anchorCatalog);
+        report(options, "analyze", `Stored analysis catalog cache at ${cachePath}.`);
+      }
+    } else {
+      anchorCatalog = await analyzeDocumentForAnchors(state, analysisContext);
+    }
     applyAnchorCatalog(state, anchorCatalog);
+
+    if (checkpointDir && checkpointKey) {
+      const checkpoint = await readTranslationCheckpoint(checkpointDir, checkpointKey);
+      if (checkpoint) {
+        const isPrefixCheckpoint = checkpoint.completedChunks.every((entry, index) => {
+          const chunk = chunkPlan.chunks[index];
+          return chunk ? entry.chunkId === `chunk-${chunk.index + 1}` : false;
+        });
+
+        if (isPrefixCheckpoint) {
+          state = checkpoint.state;
+          repairCyclesUsed = checkpoint.repairCyclesUsed;
+          nextLocalSpanIndex = checkpoint.nextLocalSpanIndex;
+          completedCheckpointChunks.push(...checkpoint.completedChunks);
+          for (const [index, completedChunk] of checkpoint.completedChunks.entries()) {
+            const chunk = chunkPlan.chunks[index];
+            if (!chunk) {
+              continue;
+            }
+            restoredChunks.push(completedChunk.body + chunk.separatorAfter);
+            gateAudits.push(completedChunk.gateAudit);
+          }
+          report(
+            options,
+            "draft",
+            `Resumed translation checkpoint with ${checkpoint.completedChunks.length} completed chunk(s) from ${path.join(checkpointDir, `${checkpointKey}.json`)}.`
+          );
+        }
+      }
+    }
 
     for (const chunk of chunkPlan.chunks) {
       const chunkId = `chunk-${chunk.index + 1}`;
+      if (completedCheckpointChunks.some((entry) => entry.chunkId === chunkId)) {
+        report(options, "draft", `Skipping ${chunkId}; restored from checkpoint.`);
+        continue;
+      }
       const chunkResult = await translateProtectedChunk(chunk, chunkPlan, {
         state,
         chunkId,
@@ -1412,6 +2586,20 @@ export async function translateMarkdownArticle(source: string, options: Translat
       repairCyclesUsed += chunkResult.repairCyclesUsed;
       nextLocalSpanIndex = chunkResult.nextLocalSpanIndex;
       setChunkFinalBody(state, chunkId, chunkResult.body);
+      completedCheckpointChunks.push({
+        chunkId,
+        body: chunkResult.body,
+        gateAudit: chunkResult.gateAudit
+      });
+      if (checkpointDir && checkpointKey) {
+        const checkpointPath = await writeTranslationCheckpoint(checkpointDir, checkpointKey, {
+          state,
+          completedChunks: completedCheckpointChunks,
+          repairCyclesUsed,
+          nextLocalSpanIndex
+        });
+        report(options, "draft", `Updated translation checkpoint at ${checkpointPath}.`);
+      }
     }
 
     let translatedBody = restoredChunks.join("");
@@ -1435,6 +2623,8 @@ export async function translateMarkdownArticle(source: string, options: Translat
     } catch (error) {
       throw new FormattingError(error instanceof Error ? error.message : String(error));
     }
+    formattedBody = restoreCodeLikeSourceShape(body, formattedBody);
+    formattedBody = restoreSourceShapeExampleTokens(body, formattedBody);
     const markdown = reconstructMarkdown(frontmatter, formattedBody);
     await writeDebugStateIfRequested(state);
     return {
@@ -1537,12 +2727,29 @@ function summarizeEmphasisPlan(plan: PromptSlice["emphasisPlans"][number]): stri
   return `${plan.sourceText} -> strategy=${plan.strategy}; target=${plan.targetText?.trim() || "无"}`;
 }
 
+function summarizeBlockPlan(plan: PromptSlice["blockPlans"][number]): string {
+  return `${plan.blockIndex}:${plan.blockKind}:${plan.sourceText}${plan.targetText ? ` -> ${plan.targetText}` : ""}`;
+}
+
 function summarizePendingRepair(task: PromptSlice["pendingRepairs"][number]): string {
   const planSummary =
     task.analysisTargets && task.analysisTargets.length > 0
       ? `；IR=${task.analysisTargets.join(" / ")}`
       : "";
-  return `${task.instruction}${planSummary}`;
+  const sentenceSummary = task.sentenceConstraint
+    ? `；句子约束=${[
+        task.sentenceConstraint.quotedText ? `句=${task.sentenceConstraint.quotedText}` : null,
+        task.sentenceConstraint.forbiddenTerms?.length
+          ? `禁增=${task.sentenceConstraint.forbiddenTerms.join("/")}`
+          : null,
+        task.sentenceConstraint.sourceReferenceTexts?.length
+          ? `原文=${task.sentenceConstraint.sourceReferenceTexts.join("/")}`
+          : null
+      ]
+        .filter(Boolean)
+        .join(" | ")}`
+    : "";
+  return `${task.instruction}${planSummary}${sentenceSummary}`;
 }
 
 function buildSegmentPromptContext(
@@ -1563,6 +2770,7 @@ function buildSegmentPromptContext(
     segmentHeadings: extractSegmentHeadingHints(source),
     headingPlanSummaries: slice.headingPlans.map(summarizeHeadingPlan),
     emphasisPlanSummaries: slice.emphasisPlans.map(summarizeEmphasisPlan),
+    blockPlanSummaries: slice.blockPlans.map(summarizeBlockPlan),
     analysisPlanDraft: slice.analysisPlanDraft,
     specialNotes: extractSegmentSpecialNotes(source),
     requiredAnchors: slice.requiredAnchors.map(summarizePromptAnchor),
@@ -1594,6 +2802,7 @@ function buildChunkStylePromptContext(
     segmentHeadings: extractSegmentHeadingHints(source),
     headingPlanSummaries: [],
     emphasisPlanSummaries: [],
+    blockPlanSummaries: [],
     analysisPlanDraft: "<SEGMENT id=\"chunk-style\">\n</SEGMENT>",
     specialNotes: extractSegmentSpecialNotes(source),
     requiredAnchors: [],
@@ -1681,6 +2890,43 @@ function hasSentenceLocalRepairTarget(instruction: string): boolean {
     /第\d+段(?:第\d+句|首句|末句)/.test(instruction) ||
     /位置：[^。\n]*“[^”]+”/.test(instruction)
   );
+}
+
+function extractSentenceRepairConstraint(
+  instruction: string
+): {
+  quotedText?: string;
+  forbiddenTerms?: string[];
+  sourceReferenceTexts?: string[];
+} | null {
+  if (!hasSentenceLocalRepairTarget(instruction)) {
+    return null;
+  }
+
+  const quotedText =
+    instruction.match(/第\s*\d+\s*句“([^”]+)”/u)?.[1]?.trim() ??
+    instruction.match(/位置：[^“\n]*“([^”]+)”/u)?.[1]?.trim() ??
+    instruction.match(/当前句“([^”]+)”/u)?.[1]?.trim() ??
+    undefined;
+  const forbiddenTerms = [
+    ...instruction.matchAll(/(?:去掉|删除)(?:新增的)?“([^”]+)”限定/gu),
+    ...instruction.matchAll(/不得新增“([^”]+)”/gu)
+  ]
+    .map((match) => match[1]?.trim())
+    .filter((value): value is string => Boolean(value));
+  const sourceReferenceTexts = [...instruction.matchAll(/原文(?:仅|中的)?“([^”]+)”/gu)]
+    .map((match) => match[1]?.trim())
+    .filter((value): value is string => Boolean(value));
+
+  if (!quotedText && forbiddenTerms.length === 0 && sourceReferenceTexts.length === 0) {
+    return null;
+  }
+
+  return {
+    ...(quotedText ? { quotedText } : {}),
+    ...(forbiddenTerms.length ? { forbiddenTerms: [...new Set(forbiddenTerms)] } : {}),
+    ...(sourceReferenceTexts.length ? { sourceReferenceTexts: [...new Set(sourceReferenceTexts)] } : {})
+  };
 }
 
 function inferRepairAnchorId(
@@ -2030,18 +3276,30 @@ function extractExplicitRepairLocationText(instruction: string): string | null {
 }
 
 function synthesizeLocalRepairInstruction(
-  draftedSegment: DraftedSegmentState,
+  draftedSegment: { segment: { source: string }; restoredBody: string },
   slice: PromptSlice,
   audit: GateAudit,
-  instruction: string
+  instruction: string,
+  structuredTarget?: StructuredRepairTarget | null
 ): string {
   if (inferRepairFailureType(audit, instruction) !== "missing_anchor") {
-    return instruction;
+    return structuredTarget ? renderStructuredRepairTargetInstruction(structuredTarget) : instruction;
   }
 
   const locationText = extractExplicitRepairLocationText(instruction);
   if (!locationText) {
-    return instruction;
+    return structuredTarget ? renderStructuredRepairTargetInstruction(structuredTarget) : instruction;
+  }
+
+  if (structuredTarget?.english?.trim()) {
+    const exactAnchor = [...slice.requiredAnchors, ...slice.repeatAnchors, ...slice.establishedAnchors].find(
+      (anchor) => anchor.english === structuredTarget.english
+    );
+    if (exactAnchor?.displayPolicy === "english-only") {
+      return `位置：\`${structuredTarget.location || locationText}\`。问题：该处命中了前文已建立的专名锚点，不应重复补中文说明。修复目标：保持为“${exactAnchor.english}”，不要追加括注。`;
+    }
+
+    return renderStructuredRepairTargetInstruction(structuredTarget);
   }
 
   const aliasCanonicalTarget = extractAliasCanonicalRepairTarget(instruction, locationText);
@@ -2051,6 +3309,12 @@ function synthesizeLocalRepairInstruction(
 
   const inferredAnchorId = inferRepairAnchorId(slice, draftedSegment.segment.source, instruction);
   if (inferredAnchorId && !inferredAnchorId.startsWith("local:")) {
+    const matchedAnchor = [...slice.requiredAnchors, ...slice.repeatAnchors, ...slice.establishedAnchors].find(
+      (anchor) => anchor.anchorId === inferredAnchorId
+    );
+    if (matchedAnchor?.displayPolicy === "english-only") {
+      return `位置：\`${locationText}\`。问题：该处命中了前文已建立的专名锚点，不应重复补中文说明。修复目标：保持为“${matchedAnchor.english}”，不要追加括注。`;
+    }
     return instruction;
   }
 
@@ -2289,22 +3553,10 @@ function buildStructuredSegmentAuditResult(
   const slice = buildSegmentTaskSlice(state, chunkId, draftedSegment.segmentId);
   const expandedAudit = expandMissingAnchorMustFixes(audit);
   const filteredAudit = suppressCoveredAnchorMustFix(state, draftedSegment, slice, expandedAudit);
-  const repairTasks: RepairTask[] = filteredAudit.must_fix.map((rawInstruction, index) => {
-    const instruction = synthesizeLocalRepairInstruction(draftedSegment, slice, filteredAudit, rawInstruction);
-    const analysisBindings = collectRepairTaskAnalysisBindings(slice, instruction);
-    return {
-      id: `${draftedSegment.segmentId}-repair-${state.repairs.length + index + 1}`,
-      segmentId: draftedSegment.segmentId,
-      anchorId: inferRepairAnchorId(slice, draftedSegment.segment.source, instruction),
-      failureType: inferRepairFailureType(filteredAudit, instruction),
-      locationLabel: inferRepairLocationLabelFromInstruction(draftedSegment.segment.source, instruction),
-      instruction,
-      ...(analysisBindings.analysisPlanIds.length ? { analysisPlanIds: analysisBindings.analysisPlanIds } : {}),
-      ...(analysisBindings.analysisPlanKinds.length ? { analysisPlanKinds: analysisBindings.analysisPlanKinds } : {}),
-      ...(analysisBindings.analysisTargets.length ? { analysisTargets: analysisBindings.analysisTargets } : {}),
-      status: "pending"
-    };
-  });
+  const repairTasks = buildRepairTasksForSegment(state, draftedSegment.segmentId, {
+    segment: { source: draftedSegment.segment.source },
+    restoredBody: draftedSegment.restoredBody
+  }, slice, filteredAudit);
 
   return {
     segmentId: draftedSegment.segmentId,
@@ -2314,15 +3566,345 @@ function buildStructuredSegmentAuditResult(
   };
 }
 
+function buildRepairTasksForSegment(
+  state: TranslationRunState,
+  segmentId: string,
+  repairContext: { segment: { source: string }; restoredBody: string },
+  slice: PromptSlice,
+  audit: GateAudit
+): RepairTask[] {
+  const structuredTargets = audit.repair_targets ?? [];
+  const repairTaskCount = Math.max(audit.must_fix.length, structuredTargets.length);
+
+  return Array.from({ length: repairTaskCount }, (_, index) => {
+    const rawInstruction = audit.must_fix[index] ?? null;
+    const failureType = inferRepairFailureType(audit, rawInstruction ?? "请修复当前硬性问题。");
+    const rawStructuredTarget =
+      structuredTargets[index] ??
+      (rawInstruction ? synthesizeStructuredRepairTargetFromMustFix(repairContext.segment.source, rawInstruction) : null);
+    const resolvedStructuredTarget = rawStructuredTarget
+      ? canonicalizeStructuredRepairTarget(slice, rawStructuredTarget)
+      : null;
+    const structuredTarget = normalizeStructuredRepairTargetForFailureType(
+      resolvedStructuredTarget?.target ?? null,
+      failureType
+    );
+    const instruction = rawInstruction
+      ? synthesizeLocalRepairInstruction(repairContext, slice, audit, rawInstruction, structuredTarget)
+      : structuredTarget
+        ? renderStructuredRepairTargetInstruction(structuredTarget)
+        : "请修复当前硬性问题。";
+    const analysisBindings = collectRepairTaskAnalysisBindings(slice, instruction, structuredTarget ?? undefined);
+    const sentenceConstraint =
+      structuredTarget && (structuredTarget.forbiddenTerms?.length || structuredTarget.sourceReferenceTexts?.length)
+        ? {
+            ...(structuredTarget.currentText ? { quotedText: structuredTarget.currentText } : {}),
+            ...(structuredTarget.forbiddenTerms?.length ? { forbiddenTerms: [...structuredTarget.forbiddenTerms] } : {}),
+            ...(structuredTarget.sourceReferenceTexts?.length
+              ? { sourceReferenceTexts: [...structuredTarget.sourceReferenceTexts] }
+              : {})
+          }
+        : extractSentenceRepairConstraint(instruction);
+
+    return {
+      id: `${segmentId}-repair-${state.repairs.length + index + 1}`,
+      segmentId,
+      anchorId:
+        (failureType === "missing_anchor"
+          ? (resolvedStructuredTarget?.anchorId ??
+            (structuredTarget?.english ? buildLocalFallbackAnchorId(segmentId, structuredTarget.english) : null))
+          : null) ??
+        inferRepairAnchorId(slice, repairContext.segment.source, instruction),
+      failureType,
+      locationLabel:
+        structuredTarget?.location?.trim() ||
+        inferRepairLocationLabelFromInstruction(repairContext.segment.source, instruction),
+      instruction,
+      ...(structuredTarget ? { structuredTarget } : {}),
+      ...(sentenceConstraint ? { sentenceConstraint } : {}),
+      ...(analysisBindings.analysisPlanIds.length ? { analysisPlanIds: analysisBindings.analysisPlanIds } : {}),
+      ...(analysisBindings.analysisPlanKinds.length ? { analysisPlanKinds: analysisBindings.analysisPlanKinds } : {}),
+      ...(analysisBindings.analysisTargets.length ? { analysisTargets: analysisBindings.analysisTargets } : {}),
+      status: "pending"
+    };
+  });
+}
+
+function normalizeStructuredRepairTargetForFailureType(
+  target: StructuredRepairTarget | null,
+  failureType: RepairFailureType
+): StructuredRepairTarget | null {
+  if (!target) {
+    return null;
+  }
+
+  if (failureType === "missing_anchor") {
+    return target;
+  }
+
+  if (
+    target.kind === "sentence" &&
+    target.chineseHint?.trim() &&
+    target.english?.trim()
+  ) {
+    return {
+      ...target,
+      targetText: target.chineseHint.trim()
+    };
+  }
+
+  return target;
+}
+
+function canonicalizeStructuredRepairTarget(
+  slice: PromptSlice,
+  target: StructuredRepairTarget
+): { target: StructuredRepairTarget; anchorId: string | null } {
+  const english = target.english?.trim();
+  if (!english) {
+    return { target, anchorId: null };
+  }
+
+  const anchors = [...slice.requiredAnchors, ...slice.repeatAnchors, ...slice.establishedAnchors];
+  const matchingAnchor =
+    anchors.find((anchor) => !anchor.anchorId.startsWith("local:") && anchor.english === english) ??
+    anchors.find((anchor) => anchor.english === english) ??
+    null;
+  if (!matchingAnchor) {
+    return { target, anchorId: null };
+  }
+
+  const canonicalTargetText =
+    matchingAnchor.canonicalDisplay ??
+    (matchingAnchor.displayPolicy === "english-only"
+      ? matchingAnchor.english
+      : `${matchingAnchor.chineseHint}（${matchingAnchor.english}）`);
+
+  if (matchingAnchor.displayPolicy === "english-only") {
+    const englishOnlyTargetText =
+      rewriteStructuredTargetTextToEnglishOnly(target.targetText, matchingAnchor.english) ??
+      rewriteStructuredTargetTextToEnglishOnly(target.currentText, matchingAnchor.english) ??
+      canonicalTargetText;
+
+    return {
+      anchorId: matchingAnchor.anchorId,
+      target: {
+        ...target,
+        english: matchingAnchor.english,
+        chineseHint: matchingAnchor.chineseHint,
+        targetText: englishOnlyTargetText
+      }
+    };
+  }
+
+  const shouldCanonicalizeTargetText =
+    !target.targetText ||
+    Boolean(parseBilingualStructuredTargetText(target.targetText)) ||
+    target.targetText.trim() === english ||
+    target.targetText.trim() === target.chineseHint?.trim();
+
+  return {
+    anchorId: matchingAnchor.anchorId,
+    target: {
+      ...target,
+      english: matchingAnchor.english,
+      chineseHint: matchingAnchor.chineseHint,
+      ...(shouldCanonicalizeTargetText ? { targetText: canonicalTargetText } : {})
+    }
+  };
+}
+
+function rewriteStructuredTargetTextToEnglishOnly(
+  text: string | null | undefined,
+  english: string
+): string | null {
+  const trimmed = text?.trim();
+  if (!trimmed) {
+    return null;
+  }
+
+  const escapedEnglish = escapeRegExp(english);
+  const collapsed = trimmed
+    .replace(new RegExp(`${escapedEnglish}（[^）]+）`, "g"), english)
+    .replace(new RegExp(`${escapedEnglish}\\(([^)]+)\\)`, "g"), english)
+    .replace(new RegExp(`[^（(\\s]+（${escapedEnglish}）`, "g"), english)
+    .replace(new RegExp(`[^)(\\s]+\\(${escapedEnglish}\\)`, "g"), english);
+
+  return collapsed.replace(/\s+/g, " ").replace(/）\s+(?=[\u4e00-\u9fff])/gu, "）").trim();
+}
+
+function synthesizeStructuredRepairTargetFromMustFix(
+  segmentSource: string,
+  instruction: string
+): StructuredRepairTarget | null {
+  const targetText = extractExplicitStructuredTargetText(instruction);
+  if (!targetText) {
+    return null;
+  }
+
+  const kind = inferStructuredRepairTargetKind(segmentSource, instruction);
+  const location = extractExplicitRepairLocationLabel(instruction) || inferRepairLocationLabelFromInstruction(segmentSource, instruction);
+  const currentText = extractExplicitRepairLocationText(instruction) ?? undefined;
+  const bilingualTarget = parseBilingualStructuredTargetText(targetText);
+  const sourceReferenceTexts = inferStructuredRepairTargetSourceReferenceTexts(segmentSource, instruction, location, kind);
+
+  return {
+    location,
+    kind,
+    ...(currentText ? { currentText } : {}),
+    targetText,
+    ...(bilingualTarget?.english ? { english: bilingualTarget.english } : {}),
+    ...(bilingualTarget?.chineseHint ? { chineseHint: bilingualTarget.chineseHint } : {}),
+    ...(sourceReferenceTexts.length ? { sourceReferenceTexts } : {})
+  };
+}
+
+function inferStructuredRepairTargetSourceReferenceTexts(
+  segmentSource: string,
+  instruction: string,
+  location: string,
+  kind: StructuredRepairTarget["kind"]
+): string[] {
+  const explicitSourceReferences = [...instruction.matchAll(/原文(?:仅|中的)?“([^”]+)”/gu)]
+    .map((match) => match[1]?.trim())
+    .filter((value): value is string => Boolean(value));
+  if (explicitSourceReferences.length > 0) {
+    return [...new Set(explicitSourceReferences)];
+  }
+
+  if (kind !== "blockquote" && kind !== "sentence" && kind !== "lead_in" && kind !== "block") {
+    return [];
+  }
+
+  const normalizedLocation = location.trim();
+  const numberedBlockIndex = normalizedLocation.match(/^第\s*(\d+)\s*个块/u)?.[1];
+  if (numberedBlockIndex) {
+    const blockIndex = Number.parseInt(numberedBlockIndex, 10);
+    const block = splitPromptBlocks(segmentSource)[blockIndex - 1];
+    const blockSource = block?.content?.trim();
+    if (blockSource) {
+      return [blockSource];
+    }
+  }
+
+  if (kind === "blockquote") {
+    const blockquoteBlocks = splitPromptBlocks(segmentSource)
+      .map((block) => block.content.trim())
+      .filter((content) => classifyPromptBlockKind(content) === "blockquote");
+    if (blockquoteBlocks.length === 1 && blockquoteBlocks[0]) {
+      return [blockquoteBlocks[0]];
+    }
+  }
+
+  return [];
+}
+
+function extractExplicitStructuredTargetText(instruction: string): string | null {
+  const quotedCandidates = [
+    ...instruction.matchAll(/“([^”\n]+)”/gu),
+    ...instruction.matchAll(/`([^`\n]+)`/g)
+  ]
+    .map((match) => normalizeAuditQuoteStyle(match[1]?.trim() ?? ""))
+    .filter(Boolean);
+
+  const bilingualCandidate = [...quotedCandidates]
+    .reverse()
+    .find((candidate) => /[\u4e00-\u9fff]/u.test(candidate) && /[（(][^）)]*[A-Za-z][^）)]*[）)]/.test(candidate));
+  if (bilingualCandidate) {
+    return bilingualCandidate;
+  }
+
+  return null;
+}
+
+function parseBilingualStructuredTargetText(
+  targetText: string
+): { english: string; chineseHint: string } | null {
+  const fullWidthMatch = targetText.match(/^(.+?)（([^）]+)）$/u);
+  if (fullWidthMatch?.[1] && fullWidthMatch[2]) {
+    const chineseHint = fullWidthMatch[1].trim();
+    const english = fullWidthMatch[2].trim();
+    if (chineseHint && english) {
+      return { english, chineseHint };
+    }
+  }
+
+  const asciiMatch = targetText.match(/^(.+?)\(([^)]+)\)$/u);
+  if (asciiMatch?.[1] && asciiMatch[2]) {
+    const chineseHint = asciiMatch[1].trim();
+    const english = asciiMatch[2].trim();
+    if (chineseHint && english) {
+      return { english, chineseHint };
+    }
+  }
+
+  return null;
+}
+
+function inferStructuredRepairTargetKind(
+  segmentSource: string,
+  instruction: string
+): StructuredRepairTarget["kind"] {
+  const locationLabel = inferRepairLocationLabelFromInstruction(segmentSource, instruction);
+  switch (locationLabel) {
+    case "标题":
+      return "heading";
+    case "列表项":
+      return "list_item";
+    case "引用段":
+      return "blockquote";
+    case "列表引导句":
+      return "lead_in";
+    case "正文句":
+      return "sentence";
+    default:
+      return "anchor";
+  }
+}
+
+function extractExplicitRepairLocationLabel(instruction: string): string | null {
+  const titleMatch = instruction.match(/^(第\s*\d+\s*个标题)/u)?.[1]?.trim();
+  if (titleMatch) {
+    return titleMatch;
+  }
+
+  const listItemMatch = instruction.match(/^(第\s*\d+\s*个(?:项目符号|列表项))/u)?.[1]?.trim();
+  if (listItemMatch) {
+    return listItemMatch;
+  }
+
+  const sentenceMatch = instruction.match(/^(第\s*\d+\s*段(?:第\s*\d+\s*句|首句|末句))/u)?.[1]?.trim();
+  if (sentenceMatch) {
+    return sentenceMatch;
+  }
+
+  return null;
+}
+
 function collectRepairTaskAnalysisBindings(
   slice: PromptSlice,
-  instruction: string
+  instruction: string,
+  structuredTarget?: StructuredRepairTarget
 ): {
   analysisPlanIds: string[];
   analysisPlanKinds: Array<PromptSlice["analysisPlans"][number]["kind"]>;
   analysisTargets: string[];
 } {
-  const matchedPlans = findMatchingAnalysisPlansForInstruction(slice, instruction);
+  const matchedPlans = findMatchingAnalysisPlansForInstruction(
+    slice,
+    [
+      instruction,
+      structuredTarget?.location,
+      structuredTarget?.currentText,
+      structuredTarget?.targetText,
+      structuredTarget?.english,
+      structuredTarget?.chineseHint,
+      ...(structuredTarget?.forbiddenTerms ?? []),
+      ...(structuredTarget?.sourceReferenceTexts ?? [])
+    ]
+      .filter((value): value is string => Boolean(value?.trim()))
+      .join(" | ")
+  );
   return {
     analysisPlanIds: matchedPlans.map((plan) => plan.id),
     analysisPlanKinds: [...new Set(matchedPlans.map((plan) => plan.kind))],
@@ -2336,6 +3918,29 @@ function collectRepairTaskAnalysisBindings(
       )
     ]
   };
+}
+
+function renderStructuredRepairTargetInstruction(target: StructuredRepairTarget): string {
+  const parts = [`位置：${target.location}`];
+  if (target.currentText) {
+    parts.push(`当前写法：${target.currentText}`);
+  }
+  if (target.targetText) {
+    parts.push(`目标写法：${target.targetText}`);
+  }
+  if (target.english) {
+    parts.push(`英文目标：${target.english}`);
+  }
+  if (target.chineseHint) {
+    parts.push(`中文目标：${target.chineseHint}`);
+  }
+  if (target.forbiddenTerms?.length) {
+    parts.push(`禁增限定：${target.forbiddenTerms.join(" / ")}`);
+  }
+  if (target.sourceReferenceTexts?.length) {
+    parts.push(`原文对齐：${target.sourceReferenceTexts.join(" / ")}`);
+  }
+  return `${parts.join("。")}。`;
 }
 
 function expandMissingAnchorMustFixes(audit: GateAudit): GateAudit {
@@ -2737,10 +4342,17 @@ async function translateProtectedChunk(
         const analysisBindings = slice
           ? collectChunkFailureAnalysisBindings(slice, audit.must_fix)
           : { analysisPlanIds: [] as string[], analysisTargets: [] as string[] };
+        const sentenceConstraint = audit.must_fix
+          .map((instruction) => extractSentenceRepairConstraint(instruction))
+          .find((constraint) => constraint !== null);
         return {
           segmentId: draftedSegment?.segmentId ?? null,
           segmentIndex: audit.segment_index,
           mustFix: audit.must_fix.length > 0 ? [...audit.must_fix] : ["hard gate failed"],
+          ...(audit.repair_targets?.length
+            ? { structuredTargets: audit.repair_targets.map((target) => ({ ...target })) }
+            : {}),
+          ...(sentenceConstraint ? { sentenceConstraint } : {}),
           ...(analysisBindings.analysisPlanIds.length
             ? { analysisPlanIds: analysisBindings.analysisPlanIds }
             : {}),
@@ -2754,6 +4366,7 @@ async function translateProtectedChunk(
       summary: remaining,
       segments: failedSegments
     });
+    reifyChunkFailureRepairs(context.state, context.chunkId, failedSegments);
     report(
       context.options,
       "audit",
@@ -2799,6 +4412,127 @@ function collectChunkFailureAnalysisBindings(
   };
 }
 
+function reifyChunkFailureRepairs(
+  state: TranslationRunState,
+  chunkId: string,
+  failedSegments: Array<{
+    segmentId: string | null;
+    segmentIndex: number;
+    mustFix: string[];
+    structuredTargets?: StructuredRepairTarget[];
+    sentenceConstraint?: {
+      quotedText?: string;
+      forbiddenTerms?: string[];
+      sourceReferenceTexts?: string[];
+    };
+    analysisPlanIds?: string[];
+    analysisTargets?: string[];
+  }>
+): void {
+  for (const failure of failedSegments) {
+    if (!failure.segmentId) {
+      continue;
+    }
+
+    const segment = getSegmentState(state, failure.segmentId);
+    const syntheticAudit: GateAudit = {
+      hard_checks: buildChunkFailureHardChecks(segment.lastAudit?.hardChecks, failure.mustFix),
+      must_fix: [...failure.mustFix],
+      ...(failure.structuredTargets?.length
+        ? { repair_targets: failure.structuredTargets.map((target) => ({ ...target })) }
+        : {})
+    };
+    const slice = buildSegmentTaskSlice(state, chunkId, failure.segmentId);
+    const repairTasks = buildRepairTasksForSegment(
+      state,
+      failure.segmentId,
+      {
+        segment: { source: segment.source },
+        restoredBody: segment.currentRestoredBody
+      },
+      slice,
+      syntheticAudit
+    );
+
+    for (const task of repairTasks) {
+      if (failure.sentenceConstraint && !task.sentenceConstraint) {
+        task.sentenceConstraint = {
+          ...(failure.sentenceConstraint.quotedText ? { quotedText: failure.sentenceConstraint.quotedText } : {}),
+          ...(failure.sentenceConstraint.forbiddenTerms?.length
+            ? { forbiddenTerms: [...failure.sentenceConstraint.forbiddenTerms] }
+            : {}),
+          ...(failure.sentenceConstraint.sourceReferenceTexts?.length
+            ? { sourceReferenceTexts: [...failure.sentenceConstraint.sourceReferenceTexts] }
+            : {})
+        };
+      }
+      if (failure.analysisPlanIds?.length && !task.analysisPlanIds?.length) {
+        task.analysisPlanIds = [...failure.analysisPlanIds];
+      }
+      if (failure.analysisTargets?.length && !task.analysisTargets?.length) {
+        task.analysisTargets = [...failure.analysisTargets];
+      }
+      state.repairs.push(task);
+    }
+
+    segment.repairTaskIds = repairTasks.map((task) => task.id);
+    segment.lastAudit = {
+      segmentId: failure.segmentId,
+      hardChecks: syntheticAudit.hard_checks,
+      repairTasks,
+      rawMustFix: syntheticAudit.must_fix
+    };
+    segment.phase = repairTasks.length > 0 ? "failed" : segment.phase;
+  }
+}
+
+function buildChunkFailureHardChecks(
+  previous: GateAudit["hard_checks"] | null | undefined,
+  mustFix: readonly string[]
+): GateAudit["hard_checks"] {
+  const checks: GateAudit["hard_checks"] = previous
+    ? {
+        paragraph_match: { ...previous.paragraph_match },
+        first_mention_bilingual: { ...previous.first_mention_bilingual },
+        numbers_units_logic: { ...previous.numbers_units_logic },
+        chinese_punctuation: { ...previous.chinese_punctuation },
+        unit_conversion_boundary: { ...previous.unit_conversion_boundary },
+        protected_span_integrity: { ...previous.protected_span_integrity }
+      }
+    : {
+        paragraph_match: { pass: true, problem: "" },
+        first_mention_bilingual: { pass: true, problem: "" },
+        numbers_units_logic: { pass: true, problem: "" },
+        chinese_punctuation: { pass: true, problem: "" },
+        unit_conversion_boundary: { pass: true, problem: "" },
+        protected_span_integrity: { pass: true, problem: "" }
+      };
+
+  for (const instruction of mustFix) {
+    if (/段落顺序|段落数|块顺序|提前到开头|重排/u.test(instruction)) {
+      checks.paragraph_match = { pass: false, problem: instruction };
+      continue;
+    }
+    if (/中英对照|双语|首现|锚定|术语/u.test(instruction)) {
+      checks.first_mention_bilingual = { pass: false, problem: instruction };
+      continue;
+    }
+    if (/数字|单位|换算|逻辑/u.test(instruction)) {
+      checks.numbers_units_logic = { pass: false, problem: instruction };
+      continue;
+    }
+    if (/半角|全角|冒号|引号|括号|标点/u.test(instruction)) {
+      checks.chinese_punctuation = { pass: false, problem: instruction };
+      continue;
+    }
+    if (/占位符|protected span|inline code|code block|链接目标|图片 URL/u.test(instruction)) {
+      checks.protected_span_integrity = { pass: false, problem: instruction };
+    }
+  }
+
+  return checks;
+}
+
 async function applyFinalStylePolish(
   sourceProtectedBody: string,
   translatedBody: string,
@@ -2818,15 +4552,36 @@ async function applyFinalStylePolish(
   const { protectedBody: protectedTranslatedBody, spans } = protectMarkdownSpans(canonicalTranslatedBody);
   const finalSpans = [...reprotectableSourceSpans, ...spans];
   report(context.options, "style", "Applying final style polish after all chunks passed.");
-  const styleResult = await context.executor.execute(
-    buildStylePolishPrompt(sourceProtectedBody, protectedTranslatedBody),
-    {
-      cwd: context.cwd,
-      model: context.model,
-      reasoningEffort: context.reasoningEffort ?? STYLE_REASONING_EFFORT,
-      onStderr: (stderrChunk) => report(context.options, "style", stderrChunk.trim())
+  let styleResult: CodexExecResult;
+  try {
+    styleResult = await executeStageWithTimeout(
+      context.executor,
+      buildStylePolishPrompt(sourceProtectedBody, protectedTranslatedBody),
+      {
+        cwd: context.cwd,
+        model: context.model,
+        reasoningEffort: context.reasoningEffort ?? STYLE_REASONING_EFFORT,
+        onStderr: (stderrChunk) => report(context.options, "style", stderrChunk.trim())
+      },
+      {
+        options: context.options,
+        stage: "style",
+        timeoutMs: getStyleTimeoutMs(),
+        heartbeatLabel: "Final style polish",
+        onHeartbeat: (message) => report(context.options, "style", message)
+      }
+    );
+  } catch (error) {
+    if (error instanceof CodexExecutionError && /timed out after \d+ms\./i.test(error.message)) {
+      report(
+        context.options,
+        "style",
+        "Final style polish timed out; falling back to the hard-pass translation."
+      );
+      return { body: translatedBody, styleApplied: false };
     }
-  );
+    throw error;
+  }
 
   try {
     const normalizedStyleText = stripAddedInlineCodeFromPlainPaths(sourceProtectedBody, styleResult.text);
@@ -2936,6 +4691,12 @@ function restoreInlineCodeFromSourceShape(source: string, translated: string): s
   for (let index = 0; index < Math.min(sourceLines.length, translatedLines.length); index += 1) {
     const sourceLine = sourceLines[index] ?? "";
     let translatedLine = translatedLines[index] ?? "";
+    const canonicalizedLine = canonicalizeInlineCodeFenceShape(sourceLine, translatedLine);
+    if (canonicalizedLine !== translatedLine) {
+      translatedLine = canonicalizedLine;
+      changed = true;
+    }
+
     const sourceInlineCodeCounts = collectInlineCodeCounts(sourceLine);
     if (sourceInlineCodeCounts.size === 0) {
       continue;
@@ -2961,13 +4722,227 @@ function restoreInlineCodeFromSourceShape(source: string, translated: string): s
   return changed ? translatedLines.join("\n") : translated;
 }
 
-function normalizePackageRegistryTerminology(source: string, translated: string): string {
-  if (!/\bregistr(?:y|ies)\b/i.test(source)) {
-    return translated;
+function restoreCodeLikeSourceShape(source: string, translated: string): string {
+  const sourceLines = source.split(/\r?\n/);
+  const translatedLines = translated.split(/\r?\n/);
+  let changed = false;
+
+  for (let index = 0; index < Math.min(sourceLines.length, translatedLines.length); index += 1) {
+    const sourceLine = sourceLines[index] ?? "";
+    let translatedLine = translatedLines[index] ?? "";
+
+    for (const token of extractCodeLikeSourceTokens(sourceLine)) {
+      if (translatedLine.includes(token)) {
+        continue;
+      }
+
+      const candidate = findMangledCodeLikeTokenCandidate(translatedLine, token);
+      if (!candidate || candidate === token) {
+        continue;
+      }
+
+      translatedLine = replaceFirst(translatedLine, candidate, token);
+      changed = true;
+    }
+
+    translatedLines[index] = translatedLine;
   }
 
-  const hasPackageRegistryContext = /\b(npm|pip|cargo|pypi|package(?:s)?|dependenc(?:y|ies))\b/i.test(source);
-  if (!hasPackageRegistryContext) {
+  return changed ? translatedLines.join("\n") : translated;
+}
+
+function restoreSourceShapeExampleTokens(source: string, translated: string): string {
+  const sourceLines = source.split(/\r?\n/);
+  const translatedLines = translated.split(/\r?\n/);
+  let changed = false;
+
+  for (let index = 0; index < Math.min(sourceLines.length, translatedLines.length); index += 1) {
+    const sourceLine = sourceLines[index] ?? "";
+    const translatedLine = translatedLines[index] ?? "";
+    const sourceToken = extractSourceShapeExampleToken(sourceLine);
+    if (!sourceToken) {
+      continue;
+    }
+
+    const restoredLine = restoreSourceShapeExampleTokenLine(translatedLine, sourceToken);
+    if (restoredLine !== translatedLine) {
+      translatedLines[index] = restoredLine;
+      changed = true;
+    }
+  }
+
+  return changed ? translatedLines.join("\n") : translated;
+}
+
+function extractSourceShapeExampleToken(line: string): string | null {
+  const match = line.match(/^\s*(?:[-*+]|\d+[.)])\s+(.+?)\s+-\s+/);
+  const candidate = match?.[1]?.trim();
+  if (!candidate) {
+    return null;
+  }
+
+  return looksLikeSourceShapeExampleToken(candidate) ? candidate : null;
+}
+
+function looksLikeSourceShapeExampleToken(token: string): boolean {
+  return (
+    containsGlobSyntax(token) ||
+    looksLikeCodeLikeSourceToken(token) ||
+    /^(?:\*|\*\*|\?|\[[^\]\n]+\])$/.test(token)
+  );
+}
+
+function restoreSourceShapeExampleTokenLine(translatedLine: string, sourceToken: string): string {
+  const spacedListMatch = translatedLine.match(/^(\s*(?:[-*+]|\d+[.)])\s+)(.+)$/);
+  const collapsedListMatch = translatedLine.match(/^(\s*(?:[-*+]|\d+[.)]))(.+)$/);
+  const listMatch = spacedListMatch ?? collapsedListMatch;
+  if (!listMatch?.[1] || !listMatch[2]) {
+    return translatedLine;
+  }
+
+  const listPrefix = listMatch[1].endsWith(" ") ? listMatch[1] : `${listMatch[1]} `;
+  const body = listMatch[2];
+  const tokenBodyMatch = body.match(/^(\S+)(\s*-\s*.*)$/);
+  if (!tokenBodyMatch?.[1] || !tokenBodyMatch[2]) {
+    return translatedLine;
+  }
+
+  return `${listPrefix}${sourceToken}${tokenBodyMatch[2]}`;
+}
+
+function canonicalizeInlineCodeFenceShape(sourceLine: string, translatedLine: string): string {
+  const sourceSegments = extractInlineCodeSegments(sourceLine);
+  if (sourceSegments.length === 0) {
+    return translatedLine;
+  }
+
+  let currentLine = translatedLine;
+  const desiredGroups = new Map<string, Map<string, number>>();
+  for (const segment of sourceSegments) {
+    const perContent = desiredGroups.get(segment.content) ?? new Map<string, number>();
+    perContent.set(segment.raw, (perContent.get(segment.raw) ?? 0) + 1);
+    desiredGroups.set(segment.content, perContent);
+  }
+
+  for (const [content, desiredRawCounts] of desiredGroups.entries()) {
+    for (const [desiredRaw, desiredCount] of desiredRawCounts.entries()) {
+      let actualCount = extractInlineCodeSegments(currentLine).filter((segment) => segment.raw === desiredRaw).length;
+      while (actualCount < desiredCount) {
+        const alternateSegment = extractInlineCodeSegments(currentLine).find(
+          (segment) => segment.content === content && segment.raw !== desiredRaw
+        );
+        if (!alternateSegment) {
+          break;
+        }
+
+        currentLine =
+          `${currentLine.slice(0, alternateSegment.start)}` +
+          desiredRaw +
+          `${currentLine.slice(alternateSegment.end)}`;
+        actualCount += 1;
+      }
+    }
+  }
+
+  return currentLine;
+}
+
+function extractCodeLikeSourceTokens(line: string): string[] {
+  const tokens = new Set<string>();
+  const tokenPattern =
+    /(?:\.\.?\/|~\/|\/)[A-Za-z0-9._+~@/\-*?\[\]{}]+|[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._+~@\-*?\[\]{}]+)+|--[A-Za-z0-9][A-Za-z0-9-]*|\.[A-Za-z0-9][A-Za-z0-9._-]*\b/g;
+
+  for (const match of line.matchAll(tokenPattern)) {
+    const token = match[0]?.trim() ?? "";
+    if (!token || token.startsWith("@@MDZH_")) {
+      continue;
+    }
+
+    if (!looksLikeCodeLikeSourceToken(token)) {
+      continue;
+    }
+
+    tokens.add(token);
+  }
+
+  return [...tokens].sort((left, right) => right.length - left.length);
+}
+
+function looksLikeCodeLikeSourceToken(token: string): boolean {
+  if (token.startsWith("http://") || token.startsWith("https://")) {
+    return false;
+  }
+
+  return /[/~]|--|\.[A-Za-z0-9]/.test(token);
+}
+
+function findMangledCodeLikeTokenCandidate(translatedLine: string, sourceToken: string): string | null {
+  const candidatePattern = /[A-Za-z0-9./~\\_*?\[\]{}+-]+/g;
+  const sourcePrefix = extractCodeLikeTokenPrefix(sourceToken);
+  const sourceSuffix = extractCodeLikeTokenSuffix(sourceToken);
+  const normalizedSourceToken = sourceToken.replace(/\\/g, "");
+
+  for (const match of translatedLine.matchAll(candidatePattern)) {
+    const candidate = match[0] ?? "";
+    if (!candidate || candidate === sourceToken || candidate.startsWith("@@MDZH_")) {
+      continue;
+    }
+
+    const normalizedCandidate = candidate.replace(/\\/g, "");
+    if (normalizedCandidate === normalizedSourceToken) {
+      return candidate;
+    }
+
+    if (!containsGlobSyntax(sourceToken)) {
+      continue;
+    }
+
+    if (!normalizedCandidate.startsWith(sourcePrefix) || !normalizedCandidate.endsWith(sourceSuffix)) {
+      continue;
+    }
+
+    const candidateMiddle = normalizedCandidate.slice(
+      sourcePrefix.length,
+      normalizedCandidate.length - sourceSuffix.length
+    );
+    if (candidateMiddle && /^[*?_[\]/.-]+$/u.test(candidateMiddle)) {
+      return candidate;
+    }
+  }
+
+  return null;
+}
+
+function extractCodeLikeTokenPrefix(token: string): string {
+  const wildcardIndex = token.search(/[*?[\]{}]/);
+  return wildcardIndex < 0 ? token : token.slice(0, wildcardIndex);
+}
+
+function extractCodeLikeTokenSuffix(token: string): string {
+  const indices = [...token.matchAll(/[*?[\]{}]/g)].map((match) => match.index ?? -1).filter((index) => index >= 0);
+  if (indices.length === 0) {
+    return token;
+  }
+
+  const lastIndex = indices[indices.length - 1]!;
+  return token.slice(lastIndex + 1);
+}
+
+function containsGlobSyntax(token: string): boolean {
+  return /[*?[\]{}]/.test(token);
+}
+
+function replaceFirst(text: string, needle: string, replacement: string): string {
+  const index = text.indexOf(needle);
+  if (index < 0) {
+    return text;
+  }
+
+  return text.slice(0, index) + replacement + text.slice(index + needle.length);
+}
+
+function normalizePackageRegistryTerminology(source: string, translated: string, slice: PromptSlice | null): string {
+  if (!/\bregistr(?:y|ies)\b/i.test(source)) {
     return translated;
   }
 
@@ -2978,7 +4953,18 @@ function normalizePackageRegistryTerminology(source: string, translated: string)
   for (let index = 0; index < Math.min(sourceLines.length, translatedLines.length); index += 1) {
     const sourceLine = sourceLines[index] ?? "";
     const translatedLine = translatedLines[index] ?? "";
+    if (!lineHasExplicitPackageRegistrySurface(sourceLine)) {
+      continue;
+    }
     if (!/\bregistr(?:y|ies)\b/i.test(sourceLine) || !/注册表/.test(translatedLine)) {
+      continue;
+    }
+
+    if (lineIsGovernedBySatisfiedAnchor(sourceLine, translatedLine, slice)) {
+      continue;
+    }
+
+    if (/（[^）]*\bregistr(?:y|ies)\b[^）]*）/i.test(translatedLine)) {
       continue;
     }
 
@@ -2999,16 +4985,95 @@ function normalizePackageRegistryTerminology(source: string, translated: string)
   return changed ? translatedLines.join("\n") : translated;
 }
 
+function lineHasExplicitPackageRegistrySurface(sourceLine: string): boolean {
+  return (
+    /\b(?:npm|pip|cargo|pypi)\s+registr(?:y|ies)\b/i.test(sourceLine) ||
+    /\bpackage\s+registr(?:y|ies)\b/i.test(sourceLine) ||
+    /\bregistr(?:y|ies)\s+for\s+(?:npm|pip|cargo|pypi|packages?)\b/i.test(sourceLine)
+  );
+}
+
+function lineIsGovernedBySatisfiedAnchor(
+  sourceLine: string,
+  translatedLine: string,
+  slice: PromptSlice | null
+): boolean {
+  if (!slice) {
+    return false;
+  }
+
+  const anchors = [
+    ...slice.requiredAnchors,
+    ...slice.repeatAnchors,
+    ...slice.establishedAnchors
+  ];
+
+  return anchors.some((anchor) => {
+    if (!anchor.english || !sourceLine.includes(anchor.english)) {
+      return false;
+    }
+
+    return lineSatisfiesAnchorDisplay(translatedLine, anchor);
+  });
+}
+
 function collectInlineCodeCounts(text: string): Map<string, number> {
   const counts = new Map<string, number>();
-  for (const match of text.matchAll(/`([^`\n]+)`/g)) {
-    const token = match[1]?.trim();
+  for (const segment of extractInlineCodeSegments(text)) {
+    const token = segment.content.trim();
     if (!token) {
       continue;
     }
     counts.set(token, (counts.get(token) ?? 0) + 1);
   }
   return counts;
+}
+
+function extractInlineCodeSegments(
+  text: string
+): Array<{ raw: string; content: string; start: number; end: number }> {
+  const segments: Array<{ raw: string; content: string; start: number; end: number }> = [];
+  let index = 0;
+
+  while (index < text.length) {
+    if (text[index] !== "`") {
+      index += 1;
+      continue;
+    }
+
+    let tickCount = 1;
+    while (text[index + tickCount] === "`") {
+      tickCount += 1;
+    }
+
+    const fence = "`".repeat(tickCount);
+    const start = index;
+    index += tickCount;
+
+    let closingIndex = -1;
+    while (index < text.length) {
+      if (text.slice(index, index + tickCount) === fence) {
+        closingIndex = index;
+        break;
+      }
+      index += 1;
+    }
+
+    if (closingIndex < 0) {
+      continue;
+    }
+
+    const end = closingIndex + tickCount;
+    segments.push({
+      raw: text.slice(start, end),
+      content: text.slice(start + tickCount, closingIndex),
+      start,
+      end
+    });
+    index = end;
+  }
+
+  return segments;
 }
 
 function wrapPlainOccurrenceOutsideInlineCode(text: string, token: string): string {
@@ -3159,6 +5224,12 @@ type ProtectedChunkSegment = {
   spans: ProtectedSpan[];
 };
 
+type StructuralSegmentDraftStrategy = {
+  mode: "literal" | "prompt" | "json-blocks";
+  value: string;
+  blockCount?: number;
+};
+
 async function translateProtectedSegment(
   segment: ProtectedChunkSegment,
   segmentId: string,
@@ -3172,23 +5243,149 @@ async function translateProtectedSegment(
   const localFormatting = protectSegmentFormattingSpans(segment.source, localSpanStartIndex);
   const protectedSource = localFormatting.protectedBody;
   const combinedSpans = [...localFormatting.spans, ...segment.spans];
+  const structuralSegmentDraft = classifyStructuralSegmentDraftStrategy(protectedSource);
 
   report(
     context.options,
     "draft",
     `Chunk ${chunkPromptContext.chunkIndex}/${plan.chunks.length}${chunkLabel}: starting translation with model ${context.draftModel}.`
   );
-  const draftResult = await context.executor.execute(
-    withChunkContext(buildInitialPrompt(protectedSource), chunkPromptContext),
-    {
-      cwd: context.cwd,
-      model: context.draftModel,
-      reasoningEffort: context.draftReasoningEffort,
-      reuseSession: true,
-      onStderr: (stderrChunk) =>
-        reportChunkProgress(context.options, "draft", chunkPromptContext.chunkIndex - 1, plan, chunkLabel, stderrChunk)
+  const executeDraft = async (prompt: string, reuseSession: boolean) =>
+    executeStageWithTimeout(
+      context.executor,
+      prompt,
+      {
+        cwd: context.cwd,
+        model: context.draftModel,
+        reasoningEffort: context.draftReasoningEffort,
+        reuseSession,
+        onStderr: (stderrChunk) =>
+          reportChunkProgress(context.options, "draft", chunkPromptContext.chunkIndex - 1, plan, chunkLabel, stderrChunk)
+      },
+      {
+        options: context.options,
+        stage: "draft",
+        timeoutMs: getDraftTimeoutMs(),
+        heartbeatLabel: `Chunk ${chunkPromptContext.chunkIndex}/${plan.chunks.length}${chunkLabel}: draft`,
+        onHeartbeat: (message) =>
+          report(context.options, "draft", message)
+      }
+    );
+  const executeJsonBlockDraft = async (prompt: string, blockCount: number) =>
+    executeStageWithTimeout(
+      context.executor,
+      prompt,
+      {
+        cwd: context.cwd,
+        model: context.draftModel,
+        reasoningEffort: context.draftReasoningEffort,
+        reuseSession: false,
+        outputSchema: buildJsonBlockDraftSchema(blockCount),
+        onStderr: (stderrChunk) =>
+          reportChunkProgress(context.options, "draft", chunkPromptContext.chunkIndex - 1, plan, chunkLabel, stderrChunk)
+      },
+      {
+        options: context.options,
+        stage: "draft",
+        timeoutMs: getDraftTimeoutMs(),
+        heartbeatLabel: `Chunk ${chunkPromptContext.chunkIndex}/${plan.chunks.length}${chunkLabel}: draft`,
+        onHeartbeat: (message) =>
+          report(context.options, "draft", message)
+      }
+    );
+
+  const initialDraftPrompt = withDraftChunkContext(buildInitialPrompt(protectedSource), chunkPromptContext);
+  const contractSafeDraftPrompt = buildContractSafeDraftPrompt(protectedSource);
+  const strictDraftRescuePrompt = buildStrictDraftRescuePrompt(protectedSource);
+  const draftPrompts =
+    structuralSegmentDraft?.mode === "literal"
+      ? []
+      : structuralSegmentDraft?.mode === "json-blocks"
+        ? [
+            `${contractSafeDraftPrompt}\n\n【额外约束】\n前一轮结构化 blocks 输出未形成有效正文。现在直接输出当前分段的中文译文正文本身；不要写审校说明、不要引用源文件路径、不要说“已核对/无需修正/当前块”。`,
+            `${strictDraftRescuePrompt}\n\n【额外约束】\n前一轮结构化 blocks 输出失败。你只能翻译当前【英文原文】这一段本身。禁止引入任何未出现在该分段 source 中的标题、代码块、后续章节、列表或额外说明。若 source 分段中没有 heading 或 code block，译文中也不得凭空产生 heading 或 code block。`
+          ]
+        : structuralSegmentDraft?.mode === "prompt"
+        ? [structuralSegmentDraft.value]
+        : [
+            initialDraftPrompt,
+            `${contractSafeDraftPrompt}\n\n【额外约束】\n输出必须是该分段的中文译文正文本身；不要写审校说明、不要引用源文件路径、不要说“已核对/无需修正/当前块”。`,
+            `${strictDraftRescuePrompt}\n\n【额外约束】\n你只能翻译当前【英文原文】这一段本身。禁止引入任何未出现在该分段 source 中的标题、代码块、后续章节、列表或额外说明。若 source 分段中没有 heading 或 code block，译文中也不得凭空产生 heading 或 code block。`
+          ];
+  let draftResult: CodexExecResult | null =
+    structuralSegmentDraft?.mode === "literal"
+      ? { text: structuralSegmentDraft.value, stderr: "", jsonl: "", usage: { inputTokens: 0, cachedInputTokens: 0, outputTokens: 0, totalTokens: 0 } }
+      : null;
+  let lastDraftViolation: string | null = null;
+  if (structuralSegmentDraft?.mode === "json-blocks" && structuralSegmentDraft.blockCount) {
+    const jsonDraftResult = await executeJsonBlockDraft(structuralSegmentDraft.value, structuralSegmentDraft.blockCount);
+    draftResult = {
+      ...jsonDraftResult,
+      text: stripControlPlaneContamination(reconstructJsonBlockDraft(protectedSource, jsonDraftResult.text))
+    };
+    const initialJsonViolation = getDraftContractViolation(protectedSource, draftResult.text);
+    if (initialJsonViolation) {
+      lastDraftViolation = initialJsonViolation;
+      report(
+        context.options,
+        "draft",
+        `Chunk ${chunkPromptContext.chunkIndex}/${plan.chunks.length}${chunkLabel}: ${initialJsonViolation}; retrying with a stricter JSON-block draft before text rescue.`
+      );
+      const strictJsonDraftResult = await executeJsonBlockDraft(
+        buildStrictJsonBlockDraftPrompt(protectedSource),
+        structuralSegmentDraft.blockCount
+      );
+      draftResult = {
+        ...strictJsonDraftResult,
+        text: stripControlPlaneContamination(
+          reconstructJsonBlockDraft(protectedSource, strictJsonDraftResult.text)
+        )
+      };
+      const strictJsonViolation = getDraftContractViolation(protectedSource, draftResult.text);
+      if (!strictJsonViolation) {
+        lastDraftViolation = null;
+      } else {
+        lastDraftViolation = strictJsonViolation;
+        report(
+          context.options,
+          "draft",
+          `Chunk ${chunkPromptContext.chunkIndex}/${plan.chunks.length}${chunkLabel}: ${strictJsonViolation}; falling back to strict text rescue after JSON-block retries.`
+        );
+      }
     }
-  );
+  }
+  if (!draftResult || lastDraftViolation) {
+    for (const [attemptIndex, draftPrompt] of draftPrompts.entries()) {
+      const rawDraftResult = await executeDraft(draftPrompt, false);
+      draftResult = {
+        ...rawDraftResult,
+        text: stripControlPlaneContamination(rawDraftResult.text)
+      };
+      const violation = getDraftContractViolation(protectedSource, draftResult.text);
+      if (!violation) {
+        lastDraftViolation = null;
+        break;
+      }
+      lastDraftViolation = violation;
+      if (attemptIndex < draftPrompts.length - 1) {
+        report(
+          context.options,
+          "draft",
+          `Chunk ${chunkPromptContext.chunkIndex}/${plan.chunks.length}${chunkLabel}: ${violation}; retrying with a stricter clean draft session.`
+        );
+      }
+    }
+  }
+
+  if (!draftResult) {
+    throw new CodexExecutionError("Draft did not return a usable result.");
+  }
+
+  if (lastDraftViolation) {
+    throw new CodexExecutionError(
+      `Draft contract failed for ${chunkLabel} after clean retries: ${lastDraftViolation}.`
+    );
+  }
   threadId = draftResult.threadId;
   const normalizedDraftText = normalizeSegmentAnchorText(
     stripAddedInlineCodeFromPlainPaths(protectedSource, draftResult.text),
@@ -3214,18 +5411,37 @@ async function translateProtectedSegment(
   );
   const normalizedRegistryDraftText = normalizePackageRegistryTerminology(
     protectedSource,
-    normalizedSurfaceDraftText
+    normalizedSurfaceDraftText,
+    headingPlanningSlice
   );
   const emphasisPlannedDraftText = applyEmphasisPlanTargets(
     protectedSource,
     normalizedRegistryDraftText,
     headingPlanningSlice
   );
+  const semanticPlannedDraftText = applySemanticMentionPlans(
+    protectedSource,
+    emphasisPlannedDraftText,
+    headingPlanningSlice
+  );
+  const blockPlannedDraftText = applyBlockPlanTargets(
+    protectedSource,
+    semanticPlannedDraftText,
+    headingPlanningSlice
+  );
   const restoredInlineDraftText = restoreInlineCodeFromSourceShape(
     protectedSource,
-    emphasisPlannedDraftText
+    blockPlannedDraftText
   );
-  const canonicalProtectedBody = reprotectMarkdownSpans(restoredInlineDraftText, combinedSpans);
+  const restoredCodeLikeDraftText = restoreCodeLikeSourceShape(
+    protectedSource,
+    restoredInlineDraftText
+  );
+  const restoredExampleTokenDraftText = restoreSourceShapeExampleTokens(
+    protectedSource,
+    restoredCodeLikeDraftText
+  );
+  const canonicalProtectedBody = reprotectMarkdownSpans(restoredExampleTokenDraftText, combinedSpans);
   const restoredBody = restoreMarkdownSpans(canonicalProtectedBody, combinedSpans);
   applySegmentDraft(context.state, segmentId, {
     protectedSource,
@@ -3244,6 +5460,343 @@ async function translateProtectedSegment(
     spans: combinedSpans,
     ...(threadId ? { threadId } : {})
   };
+}
+
+function buildContractSafeDraftPrompt(source: string): string {
+  return [
+    "你是一名 Markdown 翻译器。",
+    "只翻译下面这一小段英文 Markdown，本轮第一优先级是保持结构和内容边界严格不越界。",
+    "规则：",
+    "1. 只输出该分段的中文译文，不要解释。",
+    "2. 不要引入 source 中不存在的标题、代码块、列表、引用、额外段落或后续章节。",
+    "3. 如果 source 中没有 heading 或 code block，译文中也不得凭空产生 heading 或 code block。",
+    "4. 保留 inline code、命令 flag、URL、链接目标和 Markdown 强调结构。",
+    "",
+    "【英文原文】",
+    source
+  ].join("\n");
+}
+
+function buildJsonBlockDraftPrompt(source: string): string {
+  const blocks = splitPromptBlocks(source)
+    .map((block, index) => `### BLOCK ${index + 1} (${classifyPromptBlockKind(block.content)})\n${block.content}`)
+    .join("\n\n");
+
+  return [
+    "你是一名 Markdown 译者。",
+    "当前输入是一个多块 Markdown 分段。请逐块翻译，并只返回 JSON。",
+    "要求：",
+    "1. 必须返回与 source 完全相同数量的 blocks。",
+    "2. 每个 block 只写该块对应的中文 Markdown 内容。",
+    "3. 不要解释，不要添加额外 block，不要合并或重排。",
+    "4. 引用仍是引用，source 中没有 heading 或 code block 的地方，译文中不得凭空新增。",
+    "5. 禁止输出任何任务状态、验证证据、分支信息、工作区状态、git status、路径说明，或“已完成/已核对/已复核/继续执行”之类的元话语。",
+    "6. 禁止输出任何控制面标签或指令文本，例如 <hook_prompt ...>、OMX、Ralph、stop:...、::git-*、::archive 等。",
+    "",
+    "【按块展开的英文原文】",
+    blocks
+  ].join("\n");
+}
+
+function buildStrictJsonBlockDraftPrompt(source: string): string {
+  const blocks = splitPromptBlocks(source)
+    .map((block, index) => `### BLOCK ${index + 1} (${classifyPromptBlockKind(block.content)})\n${block.content}`)
+    .join("\n\n");
+
+  return [
+    "你是一名 Markdown 译者。",
+    "上一轮 JSON blocks 输出不合格。请再次逐块翻译，并且只返回 JSON。",
+    "强约束：",
+    "1. 只返回 blocks 数组，长度必须与 source block 数完全一致。",
+    "2. 每个 block 只能翻译当前 block，不得合并、拆分、重排或遗漏。",
+    "3. 必须保留 inline code、命令 flag、URL、链接目标、数字和 Markdown 强调结构。",
+    "4. 禁止输出解释、审校说明、验证证据、控制面文本、文件路径、git status、hook_prompt、OMX、Ralph、::git-*、::archive 等。",
+    "5. 如果不确定，优先保留原 block 结构与受保护字面，不要自由发挥。",
+    "",
+    "【按块展开的英文原文】",
+    blocks
+  ].join("\n");
+}
+
+function buildJsonBlockRepairPrompt(source: string, translation: string, mustFix: readonly string[]): string {
+  const sourceBlocks = splitPromptBlocks(source)
+    .map((block, index) => `### SOURCE BLOCK ${index + 1} (${classifyPromptBlockKind(block.content)})\n${block.content}`)
+    .join("\n\n");
+  const translatedBlocks = splitPromptBlocks(translation)
+    .map((block, index) => `### CURRENT BLOCK ${index + 1} (${classifyPromptBlockKind(block.content)})\n${block.content}`)
+    .join("\n\n");
+
+  return [
+    "你是一名 Markdown 修复器。请只返回 JSON。",
+    "当前分段需要修复，但必须严格保持与 source 相同的块数和块顺序。",
+    "要求：",
+    "1. 只返回 blocks 数组，长度必须与 source block 数一致。",
+    "2. 每个 block 只写该块修复后的中文 Markdown 内容。",
+    "3. 不要合并、拆分、重排，也不要输出解释。",
+    "4. 修复以下 must_fix：",
+    "5. 禁止输出任何任务状态、验证证据、分支信息、工作区状态、git status、路径说明，或“已完成/已核对/已复核/继续执行”之类的元话语。",
+    "6. 禁止输出任何控制面标签或指令文本，例如 <hook_prompt ...>、OMX、Ralph、stop:...、::git-*、::archive 等。",
+    ...mustFix.map((item, index) => `${index + 1}. ${item}`),
+    "",
+    "【按块展开的英文原文】",
+    sourceBlocks,
+    "",
+    "【当前译文按块展开】",
+    translatedBlocks
+  ].join("\n");
+}
+
+function buildJsonBlockDraftSchema(blockCount: number): Record<string, unknown> {
+  return {
+    type: "object",
+    additionalProperties: false,
+    required: ["blocks"],
+    properties: {
+      blocks: {
+        type: "array",
+        minItems: blockCount,
+        maxItems: blockCount,
+        items: {
+          type: "string"
+        }
+      }
+    }
+  };
+}
+
+function reconstructJsonBlockDraft(source: string, jsonText: string): string {
+  const parsed = JSON.parse(jsonText) as { blocks?: unknown };
+  if (!Array.isArray(parsed.blocks)) {
+    throw new CodexExecutionError("JSON block draft is missing blocks.");
+  }
+  const translatedBlocks = parsed.blocks as unknown[];
+
+  const sourceBlocks = splitPromptBlocks(source);
+  if (translatedBlocks.length !== sourceBlocks.length) {
+    throw new CodexExecutionError("JSON block draft returned an unexpected block count.");
+  }
+
+  return sourceBlocks
+    .map((block, index) => {
+      const translated = typeof translatedBlocks[index] === "string" ? translatedBlocks[index] : "";
+      return index === sourceBlocks.length - 1 ? translated : `${translated}${block.separator}`;
+    })
+    .join("");
+}
+
+function buildSentenceDraftPrompt(source: string): string {
+  return [
+    "你是一名 Markdown 译者。",
+    "当前输入只有一个正文句或单段。只输出这一句/这一段对应的中文译文，不要新增标题、列表、代码块、解释、核对说明或文件路径。",
+    "禁止输出任何任务状态、验证证据、分支信息、工作区状态、git status、路径说明，或“已完成/已核对/已复核/继续执行”之类的元话语。",
+    "禁止输出任何控制面标签或指令文本，例如 <hook_prompt ...>、OMX、Ralph、stop:...、::git-*、::archive 等。",
+    "如果原文里有 Markdown 强调、inline code、命令 flag、链接或 URL，必须保持等价结构。",
+    "",
+    "【英文原文】",
+    source
+  ].join("\n");
+}
+
+function buildStrictDraftRescuePrompt(source: string): string {
+  const blocks = splitPromptBlocks(source);
+  return blocks.length >= 2 ? buildBlockStructuredDraftPrompt(source) : buildSentenceDraftPrompt(source);
+}
+
+function buildBlockStructuredDraftPrompt(source: string): string {
+  const blocks = splitPromptBlocks(source)
+    .map((block, index) => `### BLOCK ${index + 1} (${classifyPromptBlockKind(block.content)})\n${block.content}`)
+    .join("\n\n");
+
+  return [
+    "你是一名 Markdown 译者。",
+    "当前输入是一个多块 Markdown 分段。必须逐块翻译，不能合并、拆分、增删或重排。",
+    "要求：",
+    "1. 只输出最终中文 Markdown，不要解释。",
+    "2. 保持与 source 完全相同的块数和相对顺序。",
+    "3. 引用仍是引用；source 中没有 heading 或 code block 的地方，译文中不得凭空新增。",
+    "4. 保留 inline code、命令 flag、URL、链接目标和 Markdown 强调结构。",
+    "5. 禁止输出任何任务状态、验证证据、分支信息、工作区状态、git status、路径说明，或“已完成/已核对/已复核/继续执行”之类的元话语。",
+    "6. 禁止输出任何控制面标签或指令文本，例如 <hook_prompt ...>、OMX、Ralph、stop:...、::git-*、::archive 等。",
+    "",
+    "【按块展开的英文原文】",
+    blocks
+  ].join("\n");
+}
+
+function classifyStructuralSegmentDraftStrategy(source: string): StructuralSegmentDraftStrategy | null {
+  const trimmed = source.trim();
+  if (!trimmed || trimmed.includes("\n\n")) {
+    const blocks = splitPromptBlocks(source);
+    if (blocks.length >= 2 && source.length <= 2400) {
+      return { mode: "json-blocks", value: buildJsonBlockDraftPrompt(source), blockCount: blocks.length };
+    }
+    const hasBlockquote = blocks.some((block) => classifyPromptBlockKind(block.content) === "blockquote");
+    if (blocks.length >= 4 && hasBlockquote && source.length <= 2200) {
+      return { mode: "json-blocks", value: buildJsonBlockDraftPrompt(source), blockCount: blocks.length };
+    }
+    if (
+      blocks.length === 2 &&
+      isHeadingLikeBlock(blocks[0]?.content?.trim() ?? "") &&
+      classifyPromptBlockKind(blocks[1]?.content?.trim() ?? "") === "paragraph" &&
+      source.length <= 260
+    ) {
+      return { mode: "json-blocks", value: buildJsonBlockDraftPrompt(source), blockCount: blocks.length };
+    }
+    return null;
+  }
+
+  if (isHeadingLikeBlock(trimmed)) {
+    return { mode: "literal", value: source };
+  }
+
+  if (isAttributionLikeBlock(trimmed)) {
+    return { mode: "literal", value: source };
+  }
+
+  if (isNumericKickerLikeBlock(trimmed)) {
+    return { mode: "literal", value: source };
+  }
+
+  if (
+    !trimmed.includes("\n") &&
+    classifyPromptBlockKind(trimmed) === "blockquote" &&
+    trimmed.length <= 420
+  ) {
+    return { mode: "json-blocks", value: buildJsonBlockDraftPrompt(source), blockCount: 1 };
+  }
+
+  if (
+    classifyPromptBlockKind(trimmed) === "list" &&
+    source.length <= 900
+  ) {
+    return { mode: "json-blocks", value: buildJsonBlockDraftPrompt(source), blockCount: 1 };
+  }
+
+  if (
+    !trimmed.includes("\n") &&
+    classifyPromptBlockKind(trimmed) === "paragraph" &&
+    trimmed.length <= 220
+  ) {
+    return { mode: "json-blocks", value: buildJsonBlockDraftPrompt(source), blockCount: 1 };
+  }
+
+  return null;
+}
+
+function buildStructuralSegmentDraftPrompt(
+  source: string,
+  kind: "heading" | "attribution" | "kicker"
+): string {
+  const kindInstruction =
+    kind === "heading"
+      ? "当前 source 是单独一行标题。只输出这一行对应的中文 Markdown 标题，不要新增别的段落、代码块或说明。"
+      : kind === "attribution"
+        ? "当前 source 是单独一行图注/署名/归属说明。只输出这一行对应的中文 Markdown，不要新增别的段落、标题、列表或说明。"
+        : "当前 source 是单独一行数字 kicker 或编号。若不需要翻译，可原样保留；无论如何只输出这一行，不要新增别的段落或说明。";
+
+  return [
+    "你是一名 Markdown 翻译器。",
+    kindInstruction,
+    "只输出该单行分段本身对应的结果。",
+    "",
+    "【英文原文】",
+    source
+  ].join("\n");
+}
+
+function stripControlPlaneContamination(text: string): string {
+  let sanitized = text;
+  sanitized = sanitized.replace(/<hook_prompt\b[^>]*>[\s\S]*?<\/hook_prompt>/giu, "");
+  sanitized = sanitized.replace(/<turn_aborted>[\s\S]*?<\/turn_aborted>/giu, "");
+
+  const filteredLines = sanitized.split("\n").filter((line) => {
+    const trimmed = line.trim();
+    if (!trimmed) {
+      return true;
+    }
+
+    if (/^::git-[\w-]+\{.*\}$/u.test(trimmed) || /^::archive\{.*\}$/u.test(trimmed)) {
+      return false;
+    }
+
+    if (
+      /^OMX\b/u.test(trimmed) ||
+      /^Ralph\b/u.test(trimmed) ||
+      /^hook_prompt\b/u.test(trimmed) ||
+      /^hook_run_id\b/u.test(trimmed) ||
+      /^stop:\d+:/u.test(trimmed)
+    ) {
+      return false;
+    }
+
+    return true;
+  });
+
+  return filteredLines.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+}
+
+function getDraftContractViolation(source: string, text: string): string | null {
+  const trimmed = text.trim();
+  if (!trimmed) {
+    return source.trim() ? "draft returned empty content" : null;
+  }
+
+  if (
+    /file:\/\//i.test(trimmed) ||
+    /\[[^\]]+\.md\]\(file:\/\//i.test(trimmed) ||
+    /(源文件|对应段落|当前块|硬性项|无需修正|没有发现需要|已核对|已复核|任务已完成|验证证据|当前分支|工作区|未提交改动|git status|后续：|继续执行|继续补充|OMX|Ralph|hook_prompt|hook_run_id|stop:\d+:|::git-|::archive|thread\/resume)/u.test(trimmed)
+  ) {
+    return "draft returned meta/audit text";
+  }
+
+  if (looksLikeStructuredOutputDebris(source, trimmed)) {
+    return "draft returned structured-output debris instead of translated content";
+  }
+
+  const sourceBlocks = splitPromptBlocks(source);
+  const translatedBlocks = splitPromptBlocks(trimmed);
+  const sourceKinds = new Set(sourceBlocks.map((block) => classifyPromptBlockKind(block.content)));
+  const translatedKinds = new Set(translatedBlocks.map((block) => classifyPromptBlockKind(block.content)));
+
+  if (!sourceKinds.has("heading") && translatedKinds.has("heading")) {
+    return "draft introduced heading blocks that are not present in the source segment";
+  }
+
+  if (!sourceKinds.has("code") && translatedKinds.has("code")) {
+    return "draft introduced code blocks that are not present in the source segment";
+  }
+
+  if (translatedBlocks.length > sourceBlocks.length + 2) {
+    return "draft expanded the block structure beyond the source segment";
+  }
+
+  if (source.length > 0 && trimmed.length > source.length * 2.8) {
+    return "draft expanded far beyond the source segment length";
+  }
+
+  return null;
+}
+
+function looksLikeStructuredOutputDebris(source: string, text: string): boolean {
+  if (/```json/i.test(text)) {
+    return true;
+  }
+
+  const sourceAllowsCodeFence = /```/.test(source);
+  if (sourceAllowsCodeFence) {
+    return false;
+  }
+
+  if (/\bblocks\b/i.test(text) && !/\bblocks\b/i.test(source)) {
+    return true;
+  }
+
+  const punctuationOnlyDensity = text.replace(/[A-Za-z\u4e00-\u9fff0-9]/g, "");
+  const punctuationHeavy = punctuationOnlyDensity.length > text.length * 0.45;
+  const hasBraceRuns = /[\[\]{}":,`]{6,}/.test(text);
+  const startsLikeJsonGarbage = /^[\]\[}{":,\s]{4,}(?:json)?/i.test(text);
+
+  return (punctuationHeavy && hasBraceRuns) || startsLikeJsonGarbage;
 }
 
 async function repairDraftedSegment(
@@ -3282,27 +5835,146 @@ async function repairDraftedSegment(
       "repair",
       `Chunk ${draftedSegment.promptContext.chunkIndex}/${plan.chunks.length}${chunkLabel}, segment ${draftedSegment.segment.index + 1}: repairing failed segment${batchSuffix}.`
     );
-    const repairResult = await context.executor.execute(
-      withChunkContext(
-        buildRepairPrompt(draftedSegment.protectedSource, draftedSegment.protectedBody, mustFixBatch),
-        repairPromptContext
-      ),
-      {
-        cwd: context.cwd,
-        model: context.postDraftModel,
-        reasoningEffort: context.postDraftReasoningEffort ?? REPAIR_REASONING_EFFORT,
-        ...(draftedSegment.threadId ? { threadId: draftedSegment.threadId } : { reuseSession: true }),
-        onStderr: (stderrChunk) =>
-          reportChunkProgress(
-            context.options,
-            "repair",
-            draftedSegment.promptContext.chunkIndex - 1,
-            plan,
-            `${chunkLabel}, segment ${draftedSegment.segment.index + 1}${batchSuffix}`,
-            stderrChunk
-          )
-      }
+    const executeRepair = async (prompt: string, useThread: boolean) =>
+      executeStageWithTimeout(
+        context.executor,
+        prompt,
+        {
+          cwd: context.cwd,
+          model: context.postDraftModel,
+          reasoningEffort: context.postDraftReasoningEffort ?? REPAIR_REASONING_EFFORT,
+          reuseSession: false,
+          onStderr: (stderrChunk) =>
+            reportChunkProgress(
+              context.options,
+              "repair",
+              draftedSegment.promptContext.chunkIndex - 1,
+              plan,
+              `${chunkLabel}, segment ${draftedSegment.segment.index + 1}${batchSuffix}`,
+              stderrChunk
+            )
+        },
+        {
+          options: context.options,
+          stage: "repair",
+          timeoutMs: getRepairTimeoutMs(),
+          heartbeatLabel: `Chunk ${draftedSegment.promptContext.chunkIndex}/${plan.chunks.length}${chunkLabel}, segment ${draftedSegment.segment.index + 1}${batchSuffix}: repair`,
+          onHeartbeat: (message) => report(context.options, "repair", message)
+        }
+      );
+    const executeJsonBlockRepair = async (prompt: string, blockCount: number) =>
+      executeStageWithTimeout(
+        context.executor,
+        prompt,
+        {
+          cwd: context.cwd,
+          model: context.postDraftModel,
+          reasoningEffort: context.postDraftReasoningEffort ?? REPAIR_REASONING_EFFORT,
+          reuseSession: false,
+          outputSchema: buildJsonBlockDraftSchema(blockCount),
+          onStderr: (stderrChunk) =>
+            reportChunkProgress(
+              context.options,
+              "repair",
+              draftedSegment.promptContext.chunkIndex - 1,
+              plan,
+              `${chunkLabel}, segment ${draftedSegment.segment.index + 1}${batchSuffix}`,
+              stderrChunk
+            )
+        },
+        {
+          options: context.options,
+          stage: "repair",
+          timeoutMs: getRepairTimeoutMs(),
+          heartbeatLabel: `Chunk ${draftedSegment.promptContext.chunkIndex}/${plan.chunks.length}${chunkLabel}, segment ${draftedSegment.segment.index + 1}${batchSuffix}: repair`,
+          onHeartbeat: (message) => report(context.options, "repair", message)
+        }
+      );
+
+    const baseRepairPrompt = withChunkContext(
+      buildRepairPrompt(draftedSegment.protectedSource, draftedSegment.protectedBody, mustFixBatch),
+      repairPromptContext
     );
+    const sourceBlockCount = splitPromptBlocks(draftedSegment.protectedSource).length;
+    const repairPrompts =
+      sourceBlockCount >= 1
+        ? [
+            {
+              prompt: buildJsonBlockRepairPrompt(
+                draftedSegment.protectedSource,
+                draftedSegment.protectedBody,
+                mustFixBatch
+              ),
+              useThread: false,
+              mode: "json-blocks" as const
+            },
+            {
+              prompt: `${baseRepairPrompt}\n\n【额外约束】\n输出必须是修复后的当前分段中文译文正文本身；不要写核对说明、不要引用源文件路径、不要报告“已检查/已核验/无需修正”。`,
+              useThread: false,
+              mode: "text" as const
+            },
+            {
+              prompt: `${buildStrictDraftRescuePrompt(draftedSegment.protectedSource)}\n\n【修复要求】\n${mustFixBatch.join("\n")}`,
+              useThread: false,
+              mode: "text" as const
+            }
+          ]
+        : [
+            { prompt: baseRepairPrompt, useThread: false, mode: "text" as const },
+            {
+              prompt: `${baseRepairPrompt}\n\n【额外约束】\n输出必须是修复后的当前分段中文译文正文本身；不要写核对说明、不要引用源文件路径、不要报告“已检查/已核验/无需修正”。`,
+              useThread: false,
+              mode: "text" as const
+            },
+            {
+              prompt: `${buildStrictDraftRescuePrompt(draftedSegment.protectedSource)}\n\n【修复要求】\n${mustFixBatch.join("\n")}`,
+              useThread: false,
+              mode: "text" as const
+            }
+          ];
+
+    let repairResult: CodexExecResult | null = null;
+    let lastRepairViolation: string | null = null;
+    for (const [attemptIndex, item] of repairPrompts.entries()) {
+      if (item.mode === "json-blocks") {
+        const result = await executeJsonBlockRepair(item.prompt, sourceBlockCount);
+        repairResult = {
+          ...result,
+          text: stripControlPlaneContamination(
+            reconstructJsonBlockDraft(draftedSegment.protectedSource, result.text)
+          )
+        };
+      } else {
+        const rawRepairResult = await executeRepair(item.prompt, item.useThread);
+        repairResult = {
+          ...rawRepairResult,
+          text: stripControlPlaneContamination(rawRepairResult.text)
+        };
+      }
+      const violation = getDraftContractViolation(draftedSegment.protectedSource, repairResult.text);
+      if (!violation) {
+        lastRepairViolation = null;
+        break;
+      }
+      lastRepairViolation = violation;
+      if (attemptIndex < repairPrompts.length - 1) {
+        report(
+          context.options,
+          "repair",
+          `Chunk ${draftedSegment.promptContext.chunkIndex}/${plan.chunks.length}${chunkLabel}, segment ${draftedSegment.segment.index + 1}${batchSuffix}: repair returned invalid content (${violation}); retrying with a stricter clean repair session.`
+        );
+      }
+    }
+
+    if (!repairResult) {
+      throw new CodexExecutionError("Repair did not return a usable result.");
+    }
+
+    if (lastRepairViolation) {
+      throw new CodexExecutionError(
+        `Repair contract failed after clean retries: ${lastRepairViolation}.`
+      );
+    }
 
     if (repairResult.threadId) {
       draftedSegment.threadId = repairResult.threadId;
@@ -3336,18 +6008,40 @@ async function repairDraftedSegment(
     );
     const normalizedRegistryRepairText = normalizePackageRegistryTerminology(
       draftedSegment.protectedSource,
-      normalizedSurfaceRepairText
+      normalizedSurfaceRepairText,
+      headingPlanningSlice
     );
     const emphasisPlannedRepairText = applyEmphasisPlanTargets(
       draftedSegment.protectedSource,
       normalizedRegistryRepairText,
       headingPlanningSlice
     );
+    const semanticPlannedRepairText = applySemanticMentionPlans(
+      draftedSegment.protectedSource,
+      emphasisPlannedRepairText,
+      headingPlanningSlice
+    );
+    const blockPlannedRepairText = applyBlockPlanTargets(
+      draftedSegment.protectedSource,
+      semanticPlannedRepairText,
+      headingPlanningSlice
+    );
     const restoredInlineRepairText = restoreInlineCodeFromSourceShape(
       draftedSegment.protectedSource,
-      emphasisPlannedRepairText
+      blockPlannedRepairText
     );
-    draftedSegment.protectedBody = reprotectMarkdownSpans(restoredInlineRepairText, draftedSegment.spans);
+    const restoredCodeLikeRepairText = restoreCodeLikeSourceShape(
+      draftedSegment.protectedSource,
+      restoredInlineRepairText
+    );
+    const restoredExampleTokenRepairText = restoreSourceShapeExampleTokens(
+      draftedSegment.protectedSource,
+      restoredCodeLikeRepairText
+    );
+    draftedSegment.protectedBody = reprotectMarkdownSpans(
+      restoredExampleTokenRepairText,
+      draftedSegment.spans
+    );
     draftedSegment.restoredBody = restoreMarkdownSpans(draftedSegment.protectedBody, draftedSegment.spans);
     applyRepairResult(context.state, draftedSegment.segmentId, taskBatch.map((task) => task.id), {
       protectedBody: draftedSegment.protectedBody,
@@ -3525,9 +6219,40 @@ function buildRepairPromptContext(
   const extraNotes = [...promptContext.specialNotes];
   const matchedPendingRepairs =
     promptContext.stateSlice?.pendingRepairs.filter((repair) => mustFix.includes(repair.instruction)) ?? [];
+  const matchedSentenceConstraints = matchedPendingRepairs
+    .map((repair) => repair.sentenceConstraint)
+    .filter(
+      (
+        constraint
+      ): constraint is {
+        quotedText?: string;
+        forbiddenTerms?: string[];
+        sourceReferenceTexts?: string[];
+      } => Boolean(constraint)
+    );
+  const matchedStructuredTargets = matchedPendingRepairs
+    .map((repair) => repair.structuredTarget)
+    .filter((target): target is StructuredRepairTarget => Boolean(target));
   const matchedAnalysisTargets = [
     ...new Set(matchedPendingRepairs.flatMap((repair) => repair.analysisTargets ?? []))
   ];
+  if (matchedStructuredTargets.length > 0) {
+    extraNotes.push(
+      `本次 must_fix 已绑定这些结构化修复目标：${matchedStructuredTargets
+        .map((target) =>
+          [
+            `位置=${target.location}`,
+            `类型=${target.kind}`,
+            target.currentText ? `当前=${target.currentText}` : null,
+            target.targetText ? `目标=${target.targetText}` : null
+          ]
+            .filter(Boolean)
+            .join("；")
+        )
+        .join(" | ")}。`,
+      "修复时优先按这些结构化目标直接落地，不要再根据 must_fix 里的动词措辞猜测真正目标。"
+    );
+  }
   if (matchedAnalysisTargets.length > 0) {
     extraNotes.push(
       `本次 must_fix 已关联到这些 IR 目标：${matchedAnalysisTargets.join(" | ")}。`,
@@ -3550,6 +6275,31 @@ function buildRepairPromptContext(
       "修复时优先服从这些结构化 IR 计划，不要再自由改写同一标题、术语或强调结构的语义目标。"
     );
     }
+  }
+  if (matchedSentenceConstraints.length > 0) {
+    extraNotes.push(
+      `本次 must_fix 已绑定这些句子级约束：${matchedSentenceConstraints
+        .map((constraint) =>
+          [
+            constraint.quotedText ? `句子=${constraint.quotedText}` : null,
+            constraint.forbiddenTerms?.length ? `禁止新增=${constraint.forbiddenTerms.join("/")}` : null,
+            constraint.sourceReferenceTexts?.length ? `原文对齐=${constraint.sourceReferenceTexts.join("/")}` : null
+          ]
+            .filter(Boolean)
+            .join("；")
+        )
+        .join(" | ")}。`,
+      "修复时只修改被点名的这一句，并删除这些被明确禁止新增的限定词；不要把后文平台名、系统名或工具名提前挪到当前句里。",
+      "如果约束同时给了“原文对齐”英文片段，应让当前句仅表达这些 source 里存在的限定，不要补出额外平台或系统名。"
+    );
+  }
+  if ((promptContext.stateSlice?.blockPlans.length ?? 0) > 1) {
+    extraNotes.push(
+      `当前分段块顺序必须遵循 IR：${promptContext.stateSlice!.blockPlans
+        .map((plan) => `${plan.blockIndex}:${plan.blockKind}:${plan.sourceText}`)
+        .join(" | ")}。`,
+      "修复时不要把后面的标题、说明句、引用、列表或代码块提前到前面；若当前错误涉及段落顺序，必须恢复为这份块顺序。"
+    );
   }
   const explicitEnglishTargets = extractExplicitEnglishTargetsFromMustFix(mustFix);
   const conceptFamilyTargets = extractConceptFamilyTargets(explicitEnglishTargets);
@@ -3796,27 +6546,100 @@ async function runBundledGateAudit(
     return { segments: [] };
   }
 
+  if (draftedSegments.length > BUNDLED_AUDIT_MAX_SEGMENTS) {
+    report(
+      context.options,
+      "audit",
+      `Chunk ${chunkPromptContext.chunkIndex}/${plan.chunks.length}${chunkLabel}: skipping bundled audit for ${draftedSegments.length} segment(s); using per-segment audit directly.`
+    );
+    const bundledAudit = await runFallbackSegmentAudits(
+      draftedSegments,
+      plan,
+      context,
+      chunkPromptContext,
+      chunkLabel
+    );
+    for (const segmentAudit of bundledAudit.segments) {
+      validateStructuralGateChecks(segmentAudit);
+      const draftedSegment = draftedSegments.find((segment) => segment.segment.index + 1 === segmentAudit.segment_index);
+      if (!draftedSegment) {
+        throw new HardGateError(
+          `Chunk ${chunkPromptContext.chunkIndex}/${plan.chunks.length}${chunkLabel}: unknown segment ${segmentAudit.segment_index} in per-segment audit.`
+        );
+      }
+      applySegmentAudit(
+        context.state,
+        buildStructuredSegmentAuditResult(context.state, draftedSegment, segmentAudit)
+      );
+    }
+    return bundledAudit;
+  }
+
   report(
     context.options,
     "audit",
     `Chunk ${chunkPromptContext.chunkIndex}/${plan.chunks.length}${chunkLabel}: running hard gate audit for ${segmentIndices.length} segment(s).`
   );
 
-  const prompt = withChunkContextAt(
+  const prompt = withAuditChunkContextAt(
     buildBundledGateAuditPrompt(formatBundledAuditSegments(draftedSegments)),
     chunkPromptContext,
     "【分段审校输入】"
   );
 
-  const auditResult = await context.executor.execute(prompt, {
-    cwd: context.cwd,
-    model: context.postDraftModel,
-    reasoningEffort: context.postDraftReasoningEffort ?? AUDIT_REASONING_EFFORT,
-    outputSchema: BUNDLED_GATE_AUDIT_SCHEMA,
-    reuseSession: true,
-    onStderr: (stderrChunk) =>
-      reportChunkProgress(context.options, "audit", chunkPromptContext.chunkIndex - 1, plan, chunkLabel, stderrChunk)
-  });
+  let auditResult: CodexExecResult;
+  try {
+    auditResult = await executeStageWithTimeout(
+      context.executor,
+      prompt,
+      {
+        cwd: context.cwd,
+        model: context.postDraftModel,
+        reasoningEffort: context.postDraftReasoningEffort ?? AUDIT_REASONING_EFFORT,
+        outputSchema: BUNDLED_GATE_AUDIT_SCHEMA,
+        reuseSession: true,
+        onStderr: (stderrChunk) =>
+          reportChunkProgress(context.options, "audit", chunkPromptContext.chunkIndex - 1, plan, chunkLabel, stderrChunk)
+      },
+      {
+        options: context.options,
+        stage: "audit",
+        timeoutMs: getAuditTimeoutMs(),
+        heartbeatLabel: `Chunk ${chunkPromptContext.chunkIndex}/${plan.chunks.length}${chunkLabel}: bundled audit`,
+        onHeartbeat: (message) => report(context.options, "audit", message)
+      }
+    );
+  } catch (error) {
+    if (error instanceof CodexExecutionError && /bundled audit timed out after \d+ms\./i.test(error.message)) {
+      report(
+        context.options,
+        "audit",
+        `Chunk ${chunkPromptContext.chunkIndex}/${plan.chunks.length}${chunkLabel}: bundled audit timed out; falling back to per-segment audit.`
+      );
+      const bundledAudit = await runFallbackSegmentAudits(
+        draftedSegments,
+        plan,
+        context,
+        chunkPromptContext,
+        chunkLabel
+      );
+      for (const segmentAudit of bundledAudit.segments) {
+        validateStructuralGateChecks(segmentAudit);
+        const draftedSegment = draftedSegments.find((segment) => segment.segment.index + 1 === segmentAudit.segment_index);
+        if (!draftedSegment) {
+          throw new HardGateError(
+            `Chunk ${chunkPromptContext.chunkIndex}/${plan.chunks.length}${chunkLabel}: unknown segment ${segmentAudit.segment_index} in bundled audit.`
+          );
+        }
+        applySegmentAudit(
+          context.state,
+          buildStructuredSegmentAuditResult(context.state, draftedSegment, segmentAudit)
+        );
+      }
+      return bundledAudit;
+    }
+    throw error;
+  }
 
   let bundledAudit: BundledGateAudit;
   try {
@@ -3915,10 +6738,13 @@ async function runFallbackSegmentAudits(
       draftedSegments.length > 1
         ? `${chunkLabel}, segment ${draftedSegment.segment.index + 1}/${draftedSegments.length}`
         : chunkLabel;
-    const auditResult = await context.executor.execute(
-      withChunkContext(
+    const auditResult = await executeStageWithTimeout(
+      context.executor,
+      withAuditChunkContextAt(
         buildGateAuditPrompt(draftedSegment.protectedSource, draftedSegment.protectedBody),
         draftedSegment.promptContext
+        ,
+        "【英文原文】"
       ),
       {
         cwd: context.cwd,
@@ -3935,6 +6761,13 @@ async function runFallbackSegmentAudits(
             segmentLabel,
             stderrChunk
           )
+      },
+      {
+        options: context.options,
+        stage: "audit",
+        timeoutMs: getAuditTimeoutMs(),
+        heartbeatLabel: `Chunk ${chunkPromptContext.chunkIndex}/${plan.chunks.length}${segmentLabel}: per-segment audit`,
+        onHeartbeat: (message) => report(context.options, "audit", message)
       }
     );
 
@@ -4015,6 +6848,8 @@ function formatBundledAuditSegments(draftedSegments: readonly DraftedSegmentStat
 }
 
 const MIN_SEGMENT_HEADING_SPLIT_CHARACTERS = 2600;
+const MIN_COMPLEX_SEGMENT_CHARACTERS = 160;
+const COMPLEX_SEGMENT_SCORE_THRESHOLD = 4;
 
 function splitProtectedChunkSegments(
   source: string,
@@ -4063,12 +6898,214 @@ function splitProtectedChunkSegments(
     ) {
       flushPending();
     }
+
+    if (shouldSplitPendingAtIntroBoundary(pending, block.content)) {
+      flushPending();
+    }
+
+    if (shouldSplitPendingByComplexity(pending, block.content)) {
+      flushPending();
+    }
+
     pending.push(block);
   }
 
   flushPending();
 
   return segments;
+}
+
+function shouldSplitPendingAtIntroBoundary(
+  pending: ReadonlyArray<{ content: string; separator: string }>,
+  incomingContent: string
+): boolean {
+  if (pending.length === 0) {
+    return false;
+  }
+
+  const previousContent = pending.at(-1)?.content ?? "";
+  if (!previousContent) {
+    return false;
+  }
+
+  const previousKind = classifyIntroBoundaryKind(previousContent);
+  const previousPromptBlockKind = classifyPromptBlockKind(previousContent);
+  const incomingPromptBlockKind = classifyPromptBlockKind(incomingContent);
+  const incomingKind = classifyIntroBoundaryKind(incomingContent);
+
+  if (
+    previousPromptBlockKind === "blockquote" &&
+    incomingPromptBlockKind === "paragraph" &&
+    pending.length === 1
+  ) {
+    return true;
+  }
+
+  if (
+    incomingPromptBlockKind === "blockquote" &&
+    pending.length > 0 &&
+    pending.every((block) => classifyPromptBlockKind(block.content) === "paragraph")
+  ) {
+    return true;
+  }
+
+  if (
+    incomingPromptBlockKind === "blockquote" &&
+    pending.some((block) => classifyPromptBlockKind(block.content) === "list")
+  ) {
+    return true;
+  }
+
+  if (
+    isHeadingLikeBlock(previousContent) &&
+    incomingPromptBlockKind === "paragraph" &&
+    pending.length === 1 &&
+    incomingContent.trim().length <= 220 &&
+    !containsBlockquoteBlock(incomingContent) &&
+    !isListLikeBlock(incomingContent)
+  ) {
+    return true;
+  }
+
+  if (
+    previousPromptBlockKind === "paragraph" &&
+    isHeadingLikeBlock(incomingContent) &&
+    pending.length === 1 &&
+    previousContent.trim().length <= 220 &&
+    /[:：,，]?\s*$/.test(previousContent.trim())
+  ) {
+    return true;
+  }
+
+  if (
+    isHeadingLikeBlock(incomingContent) &&
+    pending.some((block) => {
+      const kind = classifyPromptBlockKind(block.content);
+      return kind === "list" || kind === "blockquote";
+    })
+  ) {
+    return true;
+  }
+
+  if (
+    isHeadingLikeBlock(incomingContent) &&
+    pending.length <= 2 &&
+    pending.some((block) => isHeadingLikeBlock(block.content)) &&
+    pending.some(
+      (block) =>
+        classifyPromptBlockKind(block.content) === "paragraph" &&
+        block.content.trim().length <= 220 &&
+        !containsBlockquoteBlock(block.content) &&
+        !isListLikeBlock(block.content)
+    )
+  ) {
+    return true;
+  }
+
+  if (
+    previousKind === "emphasis" &&
+    ["blockquote", "paragraph"].includes(incomingPromptBlockKind) &&
+    !incomingKind
+  ) {
+    return true;
+  }
+
+  if (!incomingKind) {
+    return false;
+  }
+
+  if (previousKind) {
+    return previousKind !== incomingKind || incomingKind !== "emphasis";
+  }
+
+  return isHeadingLikeBlock(previousContent);
+}
+
+function classifyIntroBoundaryKind(content: string): "kicker" | "attribution" | "emphasis" | null {
+  const trimmed = content.trim();
+  if (trimmed.length === 0 || trimmed.includes("\n")) {
+    return null;
+  }
+
+  if (isNumericKickerLikeBlock(trimmed)) {
+    return "kicker";
+  }
+
+  if (isAttributionLikeBlock(trimmed)) {
+    return "attribution";
+  }
+
+  if (isStandaloneEmphasizedIntroBlock(trimmed)) {
+    return "emphasis";
+  }
+
+  return null;
+}
+
+function isNumericKickerLikeBlock(content: string): boolean {
+  return /^\d{1,6}$/.test(content.trim());
+}
+
+function isStandaloneEmphasizedIntroBlock(content: string): boolean {
+  const trimmed = content.trim();
+  if (trimmed.length === 0 || trimmed.length > 160) {
+    return false;
+  }
+
+  return (
+    !isHeadingLikeBlock(trimmed) &&
+    !containsBlockquoteBlock(trimmed) &&
+    !isListLikeBlock(trimmed) &&
+    !/^```/.test(trimmed) &&
+    /\*\*[^*\n].+?\*\*/.test(trimmed)
+  );
+}
+
+function shouldSplitPendingByComplexity(
+  pending: ReadonlyArray<{ content: string; separator: string }>,
+  incomingContent: string
+): boolean {
+  if (pending.length === 0) {
+    return false;
+  }
+
+  const incomingKind = classifyPromptBlockKind(incomingContent);
+  if (!["heading", "blockquote", "list", "code"].includes(incomingKind)) {
+    return false;
+  }
+
+  const pendingChars = measureRawBlocks(pending);
+  if (pendingChars < MIN_COMPLEX_SEGMENT_CHARACTERS) {
+    return false;
+  }
+
+  const complexityScore = pending.reduce((total, block) => total + scoreSegmentComplexityBlock(block.content), 0);
+  return complexityScore >= COMPLEX_SEGMENT_SCORE_THRESHOLD;
+}
+
+function scoreSegmentComplexityBlock(content: string): number {
+  let score = 0;
+
+  if (isHeadingLikeBlock(content)) {
+    score += 2;
+  }
+  if (containsBlockquoteBlock(content)) {
+    score += 1;
+  }
+  if (/^```/m.test(content.trim())) {
+    score += 2;
+  }
+  if (isListLikeBlock(content)) {
+    score += 1;
+  }
+  if (isAttributionLikeBlock(content)) {
+    score += 1;
+  }
+  if (isTranslatableMarkdownStructureBlock(content)) {
+    score += 1;
+  }
+
+  return score;
 }
 
 function splitRawBlockOnProtectedBoundaries(
@@ -4354,6 +7391,63 @@ function containsListLeadInBlock(source: string): boolean {
   return false;
 }
 
+function applyBlockPlanTargets(source: string, translated: string, slice: PromptSlice | null): string {
+  if (!slice) {
+    return translated;
+  }
+
+  const plans = slice.blockPlans.filter((plan) => plan.targetText?.trim());
+  if (plans.length === 0) {
+    return translated;
+  }
+
+  const sourceBlocks = splitPromptBlocks(source);
+  const translatedBlocks = splitPromptBlocks(translated);
+  if (translatedBlocks.length === 0) {
+    return translated;
+  }
+
+  let changed = false;
+
+  for (const plan of plans) {
+    const blockIndex = plan.blockIndex - 1;
+    const targetText = plan.targetText?.trim();
+    if (blockIndex < 0 || blockIndex >= translatedBlocks.length || !targetText) {
+      continue;
+    }
+
+    const sourceBlock = sourceBlocks[blockIndex];
+    const translatedBlock = translatedBlocks[blockIndex];
+    if (!translatedBlock) {
+      continue;
+    }
+
+    if (translatedBlock.content === targetText) {
+      continue;
+    }
+
+    if (sourceBlock && classifyPromptBlockKind(sourceBlock.content) !== plan.blockKind) {
+      continue;
+    }
+
+    translatedBlocks[blockIndex] = {
+      ...translatedBlock,
+      content: targetText
+    };
+    changed = true;
+  }
+
+  if (!changed) {
+    return translated;
+  }
+
+  return translatedBlocks
+    .map((block, index) =>
+      index === translatedBlocks.length - 1 ? block.content : `${block.content}${block.separator}`
+    )
+    .join("");
+}
+
 function containsBlockquoteBlock(source: string): boolean {
   return splitRawBlocks(source).some((block) =>
     block.content
@@ -4407,6 +7501,7 @@ export type ChunkPromptContext = {
   segmentHeadings: string[];
   headingPlanSummaries: string[];
   emphasisPlanSummaries: string[];
+  blockPlanSummaries: string[];
   analysisPlanDraft: string;
   requiredAnchors: string[];
   repeatAnchors: string[];
@@ -4420,7 +7515,31 @@ function withChunkContext(prompt: string, context: ChunkPromptContext): string {
   return withChunkContextAt(prompt, context, "【英文原文】");
 }
 
-function withChunkContextAt(prompt: string, context: ChunkPromptContext, marker: string): string {
+function withDraftChunkContext(prompt: string, context: ChunkPromptContext): string {
+  return withChunkContextAt(prompt, context, "【英文原文】", {
+    includeStateSliceJson: false,
+    includePendingRepairs: false
+  });
+}
+
+function withAuditChunkContextAt(prompt: string, context: ChunkPromptContext, marker: string): string {
+  return withChunkContextAt(prompt, context, marker, {
+    includeStateSliceJson: false,
+    includePendingRepairs: false
+  });
+}
+
+function withChunkContextAt(
+  prompt: string,
+  context: ChunkPromptContext,
+  marker: string,
+  options?: {
+    includeStateSliceJson?: boolean;
+    includePendingRepairs?: boolean;
+  }
+): string {
+  const includeStateSliceJson = options?.includeStateSliceJson ?? true;
+  const includePendingRepairs = options?.includePendingRepairs ?? true;
   const headingPath =
     context.headingPath.length > 0 ? context.headingPath.join(" > ") : "无明确标题路径";
   const documentTitle = context.documentTitle ?? "无标题";
@@ -4430,6 +7549,8 @@ function withChunkContextAt(prompt: string, context: ChunkPromptContext, marker:
     context.headingPlanSummaries.length > 0 ? context.headingPlanSummaries.join(" | ") : "无标题计划";
   const emphasisPlanSummaries =
     context.emphasisPlanSummaries.length > 0 ? context.emphasisPlanSummaries.join(" | ") : "无强调计划";
+  const blockPlanSummaries =
+    context.blockPlanSummaries.length > 0 ? context.blockPlanSummaries.join(" | ") : "无块顺序计划";
   const requiredAnchors = context.requiredAnchors.length > 0 ? context.requiredAnchors.join(" | ") : "无";
   const repeatAnchors = context.repeatAnchors.length > 0 ? context.repeatAnchors.join(" | ") : "无";
   const establishedAnchors =
@@ -4445,31 +7566,33 @@ function withChunkContextAt(prompt: string, context: ChunkPromptContext, marker:
     `当前分段标题：${segmentHeadings}`,
     `当前分段标题计划：${headingPlanSummaries}`,
     `当前分段强调计划：${emphasisPlanSummaries}`,
+    `当前分段块顺序计划：${blockPlanSummaries}`,
     "【当前分段 IR】",
     context.analysisPlanDraft,
     `当前分段必须建立的首现锚点：${requiredAnchors}`,
     `当前分段里已在前文建立过、禁止重复补锚的项目：${repeatAnchors}`,
     `全文已建立的锚点摘要：${establishedAnchors}`,
-    `当前分段待处理的结构化修复任务：${pendingRepairs}`,
-    "【状态切片(JSON)】",
-    stateSliceJson,
     "说明：当前输入只覆盖全文的一部分。请保持术语、专名、语气和上下文的一致性，不要补写未出现在当前分块中的段落。",
     "requiredAnchors 表示：这些专名、产品名、项目名或关键术语必须在当前分段本身建立或保持合法的首现显示形式。",
-    "如果 stateSlice.headingPlans 为某个标题给出了 targetHeading，则该标题的语义与最终目标文本由 headingPlan 决定；不要再让全局 anchor 对同一标题追加冲突的中英锚定要求。",
+    "如果当前分段标题计划为某个标题给出了 targetHeading，则该标题的语义与最终目标文本由 headingPlan 决定；不要再让全局 anchor 对同一标题追加冲突的中英锚定要求。",
     "如果 headingPlan 同时给出了 governedTerms，则这些术语在对应标题里的处理方式已经由该计划决定；审校时不要再按全局 anchor 对该标题单独追加强制格式。",
     "标题场景下，headingPlan 的 targetHeading 优先于全局 anchor catalog；全局 anchor 只能为没有 targetHeading 的标题补充约束。",
     "analysisPlanDraft 是当前分段的结构化 sidecar plan。若其中某条 PLAN 已给出 source、target、display 或 strategy，请优先按这份计划执行，不要再自由改写同一结构的语义目标。",
-    "如果 stateSlice.requiredAnchors 给出了 canonicalDisplay 或 allowedDisplayForms，则这些形式就是当前分段可接受的合法锚定结果；像“Claude（Anthropic 的 AI 助手）”这类英文原名（中文说明）形式，或像“Claude”这类允许裸英文首现的形式，都视为已经完成首现锚定，不得再按“缺少英文对照”判错。",
+    "如果 IR 中包含 kind=block 的 PLAN，它们定义了当前分段按 source 保持的块级顺序。不要把后面的标题、说明句、列表或代码块提前到前面，也不要交换这些块的相对顺序。",
+    "如果 requiredAnchors 给出了 canonicalDisplay 或 allowedDisplayForms，则这些形式就是当前分段可接受的合法锚定结果；像“Claude（Anthropic 的 AI 助手）”这类英文原名（中文说明）形式，或像“Claude”这类允许裸英文首现的形式，都视为已经完成首现锚定，不得再按“缺少英文对照”判错。",
     "repeatAnchors 表示：这些项目已经在全文前文完成首现锚定，即使它们在当前分块标题、加粗标题、列表项标题或正文里是本块第一次出现，也不得再补首现中英文对照。",
-    "pendingRepairs 表示：这些修复任务已经绑定到当前分段，修复时必须就地完成，不要把锚点挪到别处。",
     "如果当前分段标题、加粗标题、列表项标题里包含冒号、括号限定语、枚举标签或英文补充说明，翻译时必须完整保留这些信息，不要只保留其中一部分。"
   ].join("\n");
+  const pendingRepairsBlock = includePendingRepairs
+    ? `\n当前分段待处理的结构化修复任务：${pendingRepairs}`
+    : "";
+  const stateSliceBlock = includeStateSliceJson ? `\n【状态切片(JSON)】\n${stateSliceJson}` : "";
   const specialNotesBlock =
     context.specialNotes.length > 0
       ? `\n\n【当前分段附加规则】\n${context.specialNotes.join("\n")}`
       : "";
 
-  return prompt.replace(marker, `${contextLines}${specialNotesBlock}\n\n${marker}`);
+  return prompt.replace(marker, `${contextLines}${pendingRepairsBlock}${stateSliceBlock}${specialNotesBlock}\n\n${marker}`);
 }
 
 function formatChunkLabel(chunk: MarkdownChunk, plan: MarkdownChunkPlan): string {

@@ -79,6 +79,17 @@ export type RepairFailureType =
   | "protected_span_integrity"
   | "other";
 
+export type StructuredRepairTarget = {
+  location: string;
+  kind: "anchor" | "heading" | "sentence" | "blockquote" | "list_item" | "lead_in" | "block" | "other";
+  currentText?: string;
+  targetText?: string;
+  english?: string;
+  chineseHint?: string;
+  forbiddenTerms?: string[];
+  sourceReferenceTexts?: string[];
+};
+
 export type RepairTask = {
   id: string;
   segmentId: string;
@@ -86,6 +97,12 @@ export type RepairTask = {
   failureType: RepairFailureType;
   locationLabel: string;
   instruction: string;
+  structuredTarget?: StructuredRepairTarget;
+  sentenceConstraint?: {
+    quotedText?: string;
+    forbiddenTerms?: string[];
+    sourceReferenceTexts?: string[];
+  };
   analysisPlanIds?: string[];
   analysisPlanKinds?: Array<PromptAnalysisPlan["kind"]>;
   analysisTargets?: string[];
@@ -119,6 +136,9 @@ export type SegmentState = {
   headingHints: string[];
   headingPlans: HeadingPlanState[];
   emphasisPlans: EmphasisPlanState[];
+  blockPlans: BlockPlanState[];
+  aliasPlans: AliasPlanState[];
+  entityDisambiguationPlans: EntityDisambiguationPlanState[];
   specialNotes: string[];
   protectedSource: string;
   currentProtectedBody: string;
@@ -144,6 +164,12 @@ export type ChunkState = {
       segmentId: string | null;
       segmentIndex: number;
       mustFix: string[];
+      structuredTargets?: StructuredRepairTarget[];
+      sentenceConstraint?: {
+        quotedText?: string;
+        forbiddenTerms?: string[];
+        sourceReferenceTexts?: string[];
+      };
       analysisPlanIds?: string[];
       analysisTargets?: string[];
     }>;
@@ -222,6 +248,37 @@ export type AnalysisEmphasisPlan = {
   governedTerms?: string[];
 };
 
+export type AnalysisBlockPlan = {
+  chunkId: string;
+  segmentId: string;
+  blockIndex: number;
+  blockKind: PromptBlockPlan["blockKind"];
+  sourceText: string;
+  targetText?: string;
+};
+
+export type AnalysisAliasPlan = {
+  chunkId: string;
+  segmentId: string;
+  lineIndex?: number;
+  sourceText: string;
+  currentText?: string;
+  targetText: string;
+  english?: string;
+  chineseHint?: string;
+};
+
+export type AnalysisEntityDisambiguationPlan = {
+  chunkId: string;
+  segmentId: string;
+  lineIndex?: number;
+  sourceText: string;
+  currentText?: string;
+  targetText: string;
+  english?: string;
+  forbiddenDisplays?: string[];
+};
+
 export type AnchorCatalog = {
   anchors: AnalysisAnchor[];
   ignoredTerms: Array<{
@@ -230,24 +287,42 @@ export type AnchorCatalog = {
   }>;
   headingPlans?: AnalysisHeadingPlan[];
   emphasisPlans?: AnalysisEmphasisPlan[];
+  blockPlans?: AnalysisBlockPlan[];
+  aliasPlans?: AnalysisAliasPlan[];
+  entityDisambiguationPlans?: AnalysisEntityDisambiguationPlan[];
 };
 
 export type HeadingPlanState = AnalysisHeadingPlan;
 export type EmphasisPlanState = AnalysisEmphasisPlan;
+export type BlockPlanState = AnalysisBlockPlan;
+export type AliasPlanState = AnalysisAliasPlan;
+export type EntityDisambiguationPlanState = AnalysisEntityDisambiguationPlan;
 
 export type PromptAnalysisPlan = {
   id: string;
-  kind: "anchor" | "heading" | "emphasis";
+  kind: "anchor" | "heading" | "emphasis" | "block" | "alias" | "disambiguation";
   scope: "required" | "repeat" | "established" | "local";
   sourceText: string;
+  currentText?: string;
   targetText?: string;
   anchorId?: string;
+  blockIndex?: number;
+  blockKind?: "heading" | "blockquote" | "list" | "code" | "paragraph";
   english?: string;
   chineseHint?: string;
   category?: string;
   displayPolicy?: AnchorDisplayPolicy;
   strategy?: HeadingPlanStrategy | EmphasisPlanStrategy;
   governedTerms?: string[];
+  lineIndex?: number;
+  forbiddenDisplays?: string[];
+};
+
+export type PromptBlockPlan = {
+  blockIndex: number;
+  blockKind: "heading" | "blockquote" | "list" | "code" | "paragraph";
+  sourceText: string;
+  targetText?: string;
 };
 
 export type PromptSlice = {
@@ -277,6 +352,23 @@ export type PromptSlice = {
     targetText?: string;
     governedTerms?: string[];
   }>;
+  aliasPlans: Array<{
+    lineIndex?: number;
+    sourceText: string;
+    currentText?: string;
+    targetText: string;
+    english?: string;
+    chineseHint?: string;
+  }>;
+  entityDisambiguationPlans: Array<{
+    lineIndex?: number;
+    sourceText: string;
+    currentText?: string;
+    targetText: string;
+    english?: string;
+    forbiddenDisplays?: string[];
+  }>;
+  blockPlans: PromptBlockPlan[];
   requiredAnchors: Array<{
     anchorId: string;
     english: string;
@@ -323,6 +415,12 @@ export type PromptSlice = {
     failureType: RepairFailureType;
     locationLabel: string;
     instruction: string;
+    structuredTarget?: StructuredRepairTarget;
+    sentenceConstraint?: {
+      quotedText?: string;
+      forbiddenTerms?: string[];
+      sourceReferenceTexts?: string[];
+    };
     analysisPlanIds?: string[];
     analysisPlanKinds?: Array<PromptAnalysisPlan["kind"]>;
     analysisTargets?: string[];
@@ -361,6 +459,9 @@ export function createTranslationRunState(input: CreateTranslationRunStateInput)
         headingHints: [...segmentSeed.headingHints],
         headingPlans: [],
         emphasisPlans: [],
+        blockPlans: [],
+        aliasPlans: [],
+        entityDisambiguationPlans: [],
         specialNotes: [...segmentSeed.specialNotes],
         protectedSource: segmentSeed.source,
         currentProtectedBody: segmentSeed.source,
@@ -429,6 +530,9 @@ export function applyAnchorCatalog(state: TranslationRunState, catalog: AnchorCa
   for (const segment of state.segments) {
     segment.headingPlans = [];
     segment.emphasisPlans = [];
+    segment.blockPlans = [];
+    segment.aliasPlans = [];
+    segment.entityDisambiguationPlans = [];
   }
 
   for (const plan of catalog.headingPlans ?? []) {
@@ -477,6 +581,62 @@ export function applyAnchorCatalog(state: TranslationRunState, catalog: AnchorCa
         : {})
     });
   }
+
+  for (const plan of catalog.blockPlans ?? []) {
+    const segment = state.segments.find((item) => item.id === plan.segmentId);
+    if (!segment) {
+      continue;
+    }
+
+    segment.blockPlans.push({
+      chunkId: plan.chunkId,
+      segmentId: plan.segmentId,
+      blockIndex: plan.blockIndex,
+      blockKind: plan.blockKind,
+      sourceText: plan.sourceText.trim(),
+      ...(plan.targetText?.trim() ? { targetText: plan.targetText.trim() } : {})
+    });
+  }
+
+  for (const plan of catalog.aliasPlans ?? []) {
+    const segment = state.segments.find((item) => item.id === plan.segmentId);
+    if (!segment) {
+      continue;
+    }
+
+    segment.aliasPlans.push({
+      chunkId: plan.chunkId,
+      segmentId: plan.segmentId,
+      ...(typeof plan.lineIndex === "number" ? { lineIndex: plan.lineIndex } : {}),
+      sourceText: plan.sourceText.trim(),
+      ...(plan.currentText?.trim() ? { currentText: plan.currentText.trim() } : {}),
+      targetText: plan.targetText.trim(),
+      ...(plan.english?.trim() ? { english: plan.english.trim() } : {}),
+      ...(plan.chineseHint?.trim() ? { chineseHint: plan.chineseHint.trim() } : {})
+    });
+  }
+
+  for (const plan of catalog.entityDisambiguationPlans ?? []) {
+    const segment = state.segments.find((item) => item.id === plan.segmentId);
+    if (!segment) {
+      continue;
+    }
+
+    segment.entityDisambiguationPlans.push({
+      chunkId: plan.chunkId,
+      segmentId: plan.segmentId,
+      ...(typeof plan.lineIndex === "number" ? { lineIndex: plan.lineIndex } : {}),
+      sourceText: plan.sourceText.trim(),
+      ...(plan.currentText?.trim() ? { currentText: plan.currentText.trim() } : {}),
+      targetText: plan.targetText.trim(),
+      ...(plan.english?.trim() ? { english: plan.english.trim() } : {}),
+      ...(Array.isArray(plan.forbiddenDisplays)
+        ? {
+            forbiddenDisplays: plan.forbiddenDisplays.map((item) => item.trim()).filter(Boolean)
+          }
+        : {})
+    });
+  }
 }
 
 export function buildSegmentTaskSlice(
@@ -489,8 +649,21 @@ export function buildSegmentTaskSlice(
 ): PromptSlice {
   const chunk = getChunkState(state, chunkId);
   const segment = getSegmentState(state, segmentId);
-  const mentionedAnchors = state.anchors.filter((anchor) => anchor.mentionSegmentIds.includes(segmentId));
-  const headingPlanGovernedAnchorIds = collectHeadingPlanGovernedAnchorIds(segment, mentionedAnchors);
+  const reconciledPlans = reconcileSegmentSemanticPlans(state, segment);
+  const headingPlans = reconciledPlans.headingPlans;
+  const blockPlanStates = reconciledPlans.blockPlans;
+  const emphasisPlans = reconciledPlans.emphasisPlans;
+  const rawMentionedAnchors = state.anchors.filter((anchor) => anchor.mentionSegmentIds.includes(segmentId));
+  const disambiguationGovernedAnchorIds = collectEntityDisambiguationGovernedAnchorIds(
+    segment.entityDisambiguationPlans,
+    rawMentionedAnchors
+  );
+  const mentionedAnchors = rawMentionedAnchors.filter((anchor) => !disambiguationGovernedAnchorIds.has(anchor.id));
+  const headingPlanGovernedAnchorIds = collectHeadingPlanGovernedAnchorIds(
+    headingPlans,
+    segment.headingHints,
+    mentionedAnchors
+  );
   const headingFilteredAnchors = mentionedAnchors.filter((anchor) => !headingPlanGovernedAnchorIds.has(anchor.id));
   const requiredAnchors = coalesceRequiredAnchors(
     headingFilteredAnchors
@@ -517,19 +690,34 @@ export function buildSegmentTaskSlice(
       failureType: task.failureType,
       locationLabel: task.locationLabel,
       instruction: task.instruction,
+      ...(task.structuredTarget ? { structuredTarget: { ...task.structuredTarget } } : {}),
+      ...(task.sentenceConstraint
+        ? {
+            sentenceConstraint: {
+              ...(task.sentenceConstraint.quotedText ? { quotedText: task.sentenceConstraint.quotedText } : {}),
+              ...(task.sentenceConstraint.forbiddenTerms?.length
+                ? { forbiddenTerms: [...task.sentenceConstraint.forbiddenTerms] }
+                : {}),
+              ...(task.sentenceConstraint.sourceReferenceTexts?.length
+                ? { sourceReferenceTexts: [...task.sentenceConstraint.sourceReferenceTexts] }
+                : {})
+            }
+          }
+        : {}),
       ...(task.analysisPlanIds?.length ? { analysisPlanIds: [...task.analysisPlanIds] } : {}),
       ...(task.analysisPlanKinds?.length ? { analysisPlanKinds: [...task.analysisPlanKinds] } : {}),
       ...(task.analysisTargets?.length ? { analysisTargets: [...task.analysisTargets] } : {})
     }));
+  const blockPlans = blockPlanStates.length > 0 ? buildPromptBlockPlansFromState(blockPlanStates) : buildPromptBlockPlans(segment.source);
   const headingPlanAnchors = synthesizeHeadingPlanPromptAnchors(
     segmentId,
-    segment.headingPlans,
+    headingPlans,
     [...requiredAnchors, ...repeatAnchors, ...establishedAnchors]
   );
   const headingHintAnchors = synthesizeHeadingHintPromptAnchors(
     segmentId,
     segment.headingHints,
-    segment.headingPlans,
+    headingPlans,
     options?.currentRestoredBody ?? segment.currentRestoredBody,
     [...requiredAnchors, ...repeatAnchors, ...establishedAnchors, ...headingPlanAnchors]
   );
@@ -540,8 +728,11 @@ export function buildSegmentTaskSlice(
     [...requiredAnchors, ...repeatAnchors, ...establishedAnchors, ...headingPlanAnchors, ...headingHintAnchors]
   );
   const analysisPlans = buildPromptAnalysisPlans(
-    segment.headingPlans,
-    segment.emphasisPlans,
+    headingPlans,
+    emphasisPlans,
+    segment.aliasPlans,
+    segment.entityDisambiguationPlans,
+    blockPlans,
     coalesceRequiredAnchors([
       ...requiredAnchors,
       ...headingPlanAnchors,
@@ -561,7 +752,7 @@ export function buildSegmentTaskSlice(
     segmentIndex: segment.index + 1,
     headingPath: [...chunk.headingPath],
     headingHints: [...segment.headingHints],
-    headingPlans: segment.headingPlans.map((plan) => ({
+    headingPlans: headingPlans.map((plan) => ({
       ...(typeof plan.headingIndex === "number" ? { headingIndex: plan.headingIndex } : {}),
       sourceHeading: plan.sourceHeading,
       strategy: plan.strategy,
@@ -572,7 +763,7 @@ export function buildSegmentTaskSlice(
       ...(plan.category ? { category: plan.category } : {}),
       ...(plan.displayPolicy ? { displayPolicy: plan.displayPolicy } : {})
     })),
-    emphasisPlans: segment.emphasisPlans.map((plan) => ({
+    emphasisPlans: emphasisPlans.map((plan) => ({
       ...(typeof plan.emphasisIndex === "number" ? { emphasisIndex: plan.emphasisIndex } : {}),
       ...(typeof plan.lineIndex === "number" ? { lineIndex: plan.lineIndex } : {}),
       sourceText: plan.sourceText,
@@ -580,6 +771,23 @@ export function buildSegmentTaskSlice(
       ...(plan.targetText ? { targetText: plan.targetText } : {}),
       ...(plan.governedTerms?.length ? { governedTerms: [...plan.governedTerms] } : {})
     })),
+    aliasPlans: segment.aliasPlans.map((plan) => ({
+      ...(typeof plan.lineIndex === "number" ? { lineIndex: plan.lineIndex } : {}),
+      sourceText: plan.sourceText,
+      ...(plan.currentText ? { currentText: plan.currentText } : {}),
+      targetText: plan.targetText,
+      ...(plan.english ? { english: plan.english } : {}),
+      ...(plan.chineseHint ? { chineseHint: plan.chineseHint } : {})
+    })),
+    entityDisambiguationPlans: segment.entityDisambiguationPlans.map((plan) => ({
+      ...(typeof plan.lineIndex === "number" ? { lineIndex: plan.lineIndex } : {}),
+      sourceText: plan.sourceText,
+      ...(plan.currentText ? { currentText: plan.currentText } : {}),
+      targetText: plan.targetText,
+      ...(plan.english ? { english: plan.english } : {}),
+      ...(plan.forbiddenDisplays?.length ? { forbiddenDisplays: [...plan.forbiddenDisplays] } : {})
+    })),
+    blockPlans,
     requiredAnchors: coalesceRequiredAnchors([
       ...requiredAnchors,
       ...headingPlanAnchors,
@@ -594,6 +802,44 @@ export function buildSegmentTaskSlice(
     analysisPlans,
     analysisPlanDraft: renderPromptAnalysisPlanDraft(segmentId, analysisPlans)
   };
+}
+
+function collectEntityDisambiguationGovernedAnchorIds(
+  entityDisambiguationPlans: readonly EntityDisambiguationPlanState[],
+  mentionedAnchors: readonly AnchorState[]
+): Set<string> {
+  if (entityDisambiguationPlans.length === 0 || mentionedAnchors.length === 0) {
+    return new Set();
+  }
+
+  const governedIds = new Set<string>();
+
+  for (const plan of entityDisambiguationPlans) {
+    const normalizedPlanEnglish = plan.english?.trim().toLowerCase() ?? "";
+    const forbiddenDisplays = (plan.forbiddenDisplays ?? []).map((item) => item.trim()).filter(Boolean);
+
+    for (const anchor of mentionedAnchors) {
+      const normalizedAnchorEnglish = anchor.english.trim().toLowerCase();
+      const anchorDisplay = describeAnchorDisplay(anchor);
+      const anchorDisplays = [anchor.english, anchorDisplay.canonical, ...(anchorDisplay.repeatText ? [anchorDisplay.repeatText] : [])]
+        .map((item) => item.trim())
+        .filter(Boolean);
+
+      const matchesForbiddenDisplay = forbiddenDisplays.some((display) =>
+        anchorDisplays.some(
+          (anchorText) =>
+            normalizeAnalysisRepairMatchText(display) === normalizeAnalysisRepairMatchText(anchorText)
+        )
+      );
+      const matchesPlanEnglish = Boolean(normalizedPlanEnglish) && normalizedPlanEnglish === normalizedAnchorEnglish;
+
+      if (matchesForbiddenDisplay || matchesPlanEnglish) {
+        governedIds.add(anchor.id);
+      }
+    }
+  }
+
+  return governedIds;
 }
 
 export function renderTranslationIRSidecar(state: TranslationRunState): string {
@@ -617,9 +863,32 @@ export function renderTranslationIRSidecar(state: TranslationRunState): string {
   return `${lines.join("\n")}\n`;
 }
 
+function buildPromptBlockPlans(source: string): PromptBlockPlan[] {
+  return splitPromptBlocks(source).map((block, index) => ({
+    blockIndex: index + 1,
+    blockKind: classifyPromptBlockKind(block.content),
+    sourceText: summarizePromptBlockSource(block.content)
+  }));
+}
+
+function buildPromptBlockPlansFromState(blockPlans: readonly BlockPlanState[]): PromptBlockPlan[] {
+  return blockPlans
+    .slice()
+    .sort((left, right) => left.blockIndex - right.blockIndex)
+    .map((plan) => ({
+      blockIndex: plan.blockIndex,
+      blockKind: plan.blockKind,
+      sourceText: plan.sourceText,
+      ...(plan.targetText?.trim() ? { targetText: plan.targetText.trim() } : {})
+    }));
+}
+
 function buildPromptAnalysisPlans(
   headingPlans: readonly HeadingPlanState[],
   emphasisPlans: readonly EmphasisPlanState[],
+  aliasPlans: readonly AliasPlanState[],
+  entityDisambiguationPlans: readonly EntityDisambiguationPlanState[],
+  blockPlans: readonly PromptBlockPlan[],
   requiredAnchors: PromptSlice["requiredAnchors"],
   repeatAnchors: PromptSlice["repeatAnchors"],
   establishedAnchors: PromptSlice["establishedAnchors"]
@@ -666,6 +935,46 @@ function buildPromptAnalysisPlans(
     });
   }
 
+  for (const plan of aliasPlans) {
+    plans.push({
+      id: `alias:${plan.segmentId}:${plan.lineIndex ?? normalizeHeadingPlanningKey(plan.sourceText)}`,
+      kind: "alias",
+      scope: "local",
+      sourceText: plan.sourceText,
+      ...(plan.currentText ? { currentText: plan.currentText } : {}),
+      targetText: plan.targetText,
+      ...(plan.english ? { english: plan.english } : {}),
+      ...(plan.chineseHint ? { chineseHint: plan.chineseHint } : {}),
+      ...(typeof plan.lineIndex === "number" ? { lineIndex: plan.lineIndex } : {})
+    });
+  }
+
+  for (const plan of entityDisambiguationPlans) {
+    plans.push({
+      id: `disambiguation:${plan.segmentId}:${plan.lineIndex ?? normalizeHeadingPlanningKey(plan.sourceText)}`,
+      kind: "disambiguation",
+      scope: "local",
+      sourceText: plan.sourceText,
+      ...(plan.currentText ? { currentText: plan.currentText } : {}),
+      targetText: plan.targetText,
+      ...(plan.english ? { english: plan.english } : {}),
+      ...(typeof plan.lineIndex === "number" ? { lineIndex: plan.lineIndex } : {}),
+      ...(plan.forbiddenDisplays?.length ? { forbiddenDisplays: [...plan.forbiddenDisplays] } : {})
+    });
+  }
+
+  for (const plan of blockPlans) {
+    plans.push({
+      id: `block:${plan.blockIndex}`,
+      kind: "block",
+      scope: "local",
+      sourceText: plan.sourceText,
+      ...(plan.targetText ? { targetText: plan.targetText } : {}),
+      blockIndex: plan.blockIndex,
+      blockKind: plan.blockKind
+    });
+  }
+
   return plans;
 }
 
@@ -709,13 +1018,26 @@ function renderPromptAnalysisPlanDraft(segmentId: string, plans: readonly Prompt
     if (plan.anchorId) {
       attrs.push(`anchorId="${escapePlanDraftAttribute(plan.anchorId)}"`);
     }
+    if (typeof plan.blockIndex === "number") {
+      attrs.push(`blockIndex="${plan.blockIndex}"`);
+    }
+    if (typeof plan.lineIndex === "number") {
+      attrs.push(`lineIndex="${plan.lineIndex}"`);
+    }
+    if (plan.blockKind) {
+      attrs.push(`blockKind="${plan.blockKind}"`);
+    }
 
     const body = [
       `source="${escapePlanDraftAttribute(plan.sourceText)}"`,
+      ...(plan.currentText ? [`current="${escapePlanDraftAttribute(plan.currentText)}"`] : []),
       ...(plan.targetText ? [`target="${escapePlanDraftAttribute(plan.targetText)}"`] : []),
       ...(plan.english ? [`english="${escapePlanDraftAttribute(plan.english)}"`] : []),
       ...(plan.chineseHint ? [`chinese="${escapePlanDraftAttribute(plan.chineseHint)}"`] : []),
       ...(plan.category ? [`category="${escapePlanDraftAttribute(plan.category)}"`] : []),
+      ...(plan.forbiddenDisplays?.length
+        ? [`forbidden="${escapePlanDraftAttribute(plan.forbiddenDisplays.join(" | "))}"`]
+        : []),
       ...(plan.governedTerms?.length
         ? [`governed="${escapePlanDraftAttribute(plan.governedTerms.join(" | "))}"`]
         : [])
@@ -758,6 +1080,10 @@ function findMatchingAnalysisPlansForRepair(
   const instructionText = normalizeAnalysisRepairMatchText(repair.instruction);
   const locationText = normalizeAnalysisRepairMatchText(repair.locationLabel);
   return analysisPlans.filter((plan) => {
+    if (plan.kind === "block" && repair.failureType !== "paragraph_match") {
+      return false;
+    }
+
     const candidates = collectAnalysisPlanTargetTexts(plan).map(normalizeAnalysisRepairMatchText);
     return candidates.some((candidate) => {
       if (!candidate) {
@@ -777,11 +1103,69 @@ function findMatchingAnalysisPlansForRepair(
 function collectAnalysisPlanTargetTexts(plan: PromptAnalysisPlan): string[] {
   return [
     plan.sourceText,
+    plan.currentText,
     plan.targetText,
     plan.english,
     plan.chineseHint,
+    ...(plan.forbiddenDisplays ?? []),
     ...(plan.governedTerms ?? [])
   ].filter((value): value is string => Boolean(value?.trim()));
+}
+
+export function splitPromptBlocks(source: string): Array<{ content: string; separator: string }> {
+  if (source.length === 0) {
+    return [];
+  }
+
+  const blocks: Array<{ content: string; separator: string }> = [];
+  const pattern = /\n{2,}/g;
+  let lastIndex = 0;
+
+  for (const match of source.matchAll(pattern)) {
+    const separatorStart = match.index ?? 0;
+    const content = source.slice(lastIndex, separatorStart);
+    const separator = match[0];
+
+    if (content.length === 0) {
+      if (blocks.length > 0) {
+        blocks[blocks.length - 1]!.separator += separator;
+      }
+      lastIndex = separatorStart + separator.length;
+      continue;
+    }
+
+    blocks.push({ content, separator });
+    lastIndex = separatorStart + separator.length;
+  }
+
+  const tail = source.slice(lastIndex);
+  if (tail.length > 0 || blocks.length === 0) {
+    blocks.push({ content: tail, separator: "" });
+  }
+
+  return blocks;
+}
+
+export function classifyPromptBlockKind(content: string): PromptBlockPlan["blockKind"] {
+  const trimmed = content.trim();
+  if (/^#{1,6}[ \t]+.+$/m.test(trimmed) || /^\*\*[^*\n].+\*\*(?:\s*(?:—|-|:).+)?$/m.test(trimmed)) {
+    return "heading";
+  }
+  if (/^>\s?/m.test(trimmed)) {
+    return "blockquote";
+  }
+  if (/^```/.test(trimmed)) {
+    return "code";
+  }
+  if (/^(?:[-*+]|\d+[.)])\s+/m.test(trimmed)) {
+    return "list";
+  }
+  return "paragraph";
+}
+
+export function summarizePromptBlockSource(content: string): string {
+  const singleLine = content.replace(/\s+/g, " ").trim();
+  return singleLine.length > 80 ? `${singleLine.slice(0, 77)}...` : singleLine;
 }
 
 function normalizeAnalysisRepairMatchText(text: string): string {
@@ -797,16 +1181,17 @@ function escapePlanDraftAttribute(value: string): string {
 }
 
 function collectHeadingPlanGovernedAnchorIds(
-  segment: SegmentState,
+  headingPlans: readonly HeadingPlanState[],
+  headingHints: readonly string[],
   mentionedAnchors: readonly AnchorState[]
 ): Set<string> {
-  if (segment.headingPlans.length === 0 || segment.headingHints.length === 0) {
+  if (headingPlans.length === 0 || headingHints.length === 0) {
     return new Set();
   }
 
   const governedIds = new Set<string>();
 
-  for (const plan of segment.headingPlans) {
+  for (const plan of headingPlans) {
     if (!plan.targetHeading?.trim()) {
       continue;
     }
@@ -814,8 +1199,8 @@ function collectHeadingPlanGovernedAnchorIds(
     const governedTerms = (plan.governedTerms ?? []).map((term) => term.trim()).filter(Boolean);
     const sourceHeading =
       typeof plan.headingIndex === "number"
-        ? segment.headingHints[(plan.headingIndex - 1)] ?? plan.sourceHeading
-        : segment.headingHints.find(
+        ? headingHints[(plan.headingIndex - 1)] ?? plan.sourceHeading
+        : headingHints.find(
             (heading) => normalizeHeadingPlanningKey(heading) === normalizeHeadingPlanningKey(plan.sourceHeading)
           ) ?? plan.sourceHeading;
 
@@ -834,18 +1219,367 @@ function collectHeadingPlanGovernedAnchorIds(
   return governedIds;
 }
 
+function reconcileSegmentSemanticPlans(
+  state: TranslationRunState,
+  segment: SegmentState
+): { headingPlans: HeadingPlanState[]; blockPlans: BlockPlanState[]; emphasisPlans: EmphasisPlanState[] } {
+  if (segment.headingPlans.length === 0) {
+    return {
+      headingPlans: segment.headingPlans.map((plan) => ({ ...plan })),
+      blockPlans: segment.blockPlans.map((plan) => ({ ...plan })),
+      emphasisPlans: segment.emphasisPlans.map((plan) => ({ ...plan }))
+    };
+  }
+
+  const headingPlans = segment.headingPlans.map((plan) => ({ ...plan }));
+  const blockPlans = segment.blockPlans.map((plan) => ({ ...plan }));
+  const emphasisPlans = segment.emphasisPlans.map((plan) => ({ ...plan }));
+  const mentionedAnchors = state.anchors.filter((anchor) => anchor.mentionSegmentIds.includes(segment.id));
+
+  for (const plan of headingPlans) {
+    const sourceHeading = resolveSourceHeadingForPlan(segment.headingHints, plan);
+    if (!sourceHeading) {
+      continue;
+    }
+
+    const reconciledConceptTarget = reconcileConceptHeadingTarget(plan, sourceHeading);
+    if (reconciledConceptTarget) {
+      plan.targetHeading = reconciledConceptTarget;
+      const matchingBlockPlan = findMatchingHeadingBlockPlan(blockPlans, sourceHeading, plan.headingIndex);
+      if (matchingBlockPlan) {
+        matchingBlockPlan.targetText = replaceHeadingBlockContent(matchingBlockPlan.sourceText, reconciledConceptTarget);
+      }
+    }
+
+    const anchor = findExactHeadingAnchorForReconciliation(state.anchors, sourceHeading);
+    if (!anchor || !anchor.requiresBilingual || anchor.displayPolicy === "english-only") {
+      continue;
+    }
+
+    const exactEnglish = resolveExactHeadingAnchorSurface(sourceHeading, anchor);
+    if (!exactEnglish) {
+      continue;
+    }
+
+    if (!shouldReconcileHeadingTarget(plan, anchor, exactEnglish)) {
+      continue;
+    }
+
+    const reconciledTarget = buildReconciledHeadingTarget(sourceHeading, anchor.chineseHint, exactEnglish);
+    plan.targetHeading = reconciledTarget;
+    plan.english = exactEnglish;
+    plan.chineseHint = anchor.chineseHint;
+    plan.displayPolicy = anchor.displayPolicy;
+    if (!plan.category && anchor.category) {
+      plan.category = anchor.category;
+    }
+
+    const matchingBlockPlan = findMatchingHeadingBlockPlan(blockPlans, sourceHeading, plan.headingIndex);
+    if (matchingBlockPlan) {
+      matchingBlockPlan.targetText = replaceHeadingBlockContent(matchingBlockPlan.sourceText, reconciledTarget);
+    }
+  }
+
+  for (const plan of emphasisPlans) {
+    if (!plan.targetText?.trim()) {
+      continue;
+    }
+    const sourceLine = resolveSourceLineForSemanticPlan(segment.source, plan.sourceText, plan.lineIndex);
+    if (!sourceLine) {
+      continue;
+    }
+    const reconciledTarget = reconcilePlanTargetTextWithAnchors(plan.targetText, sourceLine, mentionedAnchors);
+    if (reconciledTarget) {
+      plan.targetText = reconciledTarget;
+    }
+  }
+
+  for (const plan of blockPlans) {
+    if (!plan.targetText?.trim()) {
+      continue;
+    }
+    const reconciledTarget = reconcilePlanTargetTextWithAnchors(plan.targetText, plan.sourceText, mentionedAnchors);
+    if (reconciledTarget) {
+      plan.targetText = reconciledTarget;
+    }
+  }
+
+  return { headingPlans, blockPlans, emphasisPlans };
+}
+
+function resolveSourceLineForSemanticPlan(
+  source: string,
+  sourceText: string,
+  lineIndex?: number
+): string | null {
+  const lines = source.split(/\r?\n/);
+  if (typeof lineIndex === "number" && lineIndex >= 1) {
+    return lines[lineIndex - 1] ?? null;
+  }
+
+  return lines.find((line) => line.includes(sourceText)) ?? null;
+}
+
+function reconcilePlanTargetTextWithAnchors(
+  targetText: string,
+  sourceText: string,
+  anchors: readonly AnchorState[]
+): string | null {
+  let next = targetText;
+  let changed = false;
+
+  for (const anchor of anchors) {
+    if (!anchor.requiresBilingual || anchor.displayPolicy === "english-only") {
+      continue;
+    }
+    if (!containsWholePhrase(sourceText, anchor.english)) {
+      continue;
+    }
+
+    const canonical = describeAnchorDisplay(anchor).canonical;
+    if (!canonical || next.includes(canonical)) {
+      continue;
+    }
+
+    if (next.includes(anchor.chineseHint)) {
+      next = replaceFirstLiteral(next, anchor.chineseHint, canonical);
+      changed = true;
+    }
+  }
+
+  return changed ? next : null;
+}
+
+function replaceFirstLiteral(text: string, needle: string, replacement: string): string {
+  const index = text.indexOf(needle);
+  if (index < 0) {
+    return text;
+  }
+  return `${text.slice(0, index)}${replacement}${text.slice(index + needle.length)}`;
+}
+
+function reconcileConceptHeadingTarget(plan: HeadingPlanState, sourceHeading: string): string | null {
+  if (plan.strategy !== "concept") {
+    return null;
+  }
+
+  const english = plan.english?.trim() ?? "";
+  const chineseHint = plan.chineseHint?.trim() ?? "";
+  if (!english || !chineseHint) {
+    return null;
+  }
+
+  const targetHeading = plan.targetHeading?.trim() ?? "";
+  if (targetHeading && containsWholePhrase(targetHeading, english)) {
+    return null;
+  }
+
+  if (targetHeading && normalizeHeadingPlanningKey(targetHeading) !== normalizeHeadingPlanningKey(chineseHint)) {
+    return null;
+  }
+
+  return buildReconciledHeadingTarget(sourceHeading, chineseHint, english);
+}
+
+function resolveSourceHeadingForPlan(headingHints: readonly string[], plan: HeadingPlanState): string | null {
+  const explicitMatch =
+    headingHints.find((heading) => normalizeHeadingPlanningKey(heading) === normalizeHeadingPlanningKey(plan.sourceHeading)) ??
+    null;
+  if (explicitMatch) {
+    return explicitMatch;
+  }
+
+  if (typeof plan.headingIndex === "number") {
+    return headingHints[plan.headingIndex - 1] ?? plan.sourceHeading ?? null;
+  }
+
+  return plan.sourceHeading ?? null;
+}
+
+function findExactHeadingAnchorForReconciliation(
+  anchors: readonly AnchorState[],
+  sourceHeading: string
+): AnchorState | null {
+  const headingCore = normalizeHeadingPlanningKey(stripHeadingTrailingColon(stripInlineMarkdownMarkers(sourceHeading)));
+  if (!headingCore) {
+    return null;
+  }
+
+  const matches = anchors.filter((anchor) => {
+    const sourceForms = anchor.sourceForms?.length ? anchor.sourceForms : [anchor.english];
+    return sourceForms.some((form) => normalizeHeadingPlanningKey(stripHeadingTrailingColon(form)) === headingCore);
+  });
+
+  return matches.length === 1 ? matches[0]! : null;
+}
+
+function resolveExactHeadingAnchorSurface(sourceHeading: string, anchor: AnchorState): string | null {
+  const strippedHeading = stripHeadingTrailingColon(stripInlineMarkdownMarkers(sourceHeading)).trim();
+  if (!strippedHeading) {
+    return null;
+  }
+
+  const headingKey = normalizeHeadingPlanningKey(strippedHeading);
+  const sourceForms = anchor.sourceForms?.length ? anchor.sourceForms : [anchor.english];
+  const matchedForm =
+    sourceForms.find((form) => normalizeHeadingPlanningKey(stripHeadingTrailingColon(form)) === headingKey) ?? null;
+
+  if (matchedForm) {
+    return strippedHeading;
+  }
+
+  return normalizeHeadingPlanningKey(stripHeadingTrailingColon(anchor.english)) === headingKey ? strippedHeading : null;
+}
+
+function shouldReconcileHeadingTarget(
+  plan: HeadingPlanState,
+  anchor: AnchorState,
+  exactEnglish: string
+): boolean {
+  if (plan.strategy === "none" || plan.strategy === "natural-heading" || plan.strategy === "source-template") {
+    return false;
+  }
+
+  const targetHeading = plan.targetHeading?.trim() ?? "";
+  if (!targetHeading) {
+    return true;
+  }
+
+  if (containsWholePhrase(targetHeading, exactEnglish)) {
+    return false;
+  }
+
+  return normalizeHeadingPlanningKey(targetHeading) === normalizeHeadingPlanningKey(anchor.chineseHint);
+}
+
+function buildReconciledHeadingTarget(sourceHeading: string, chineseHint: string, exactEnglish: string): string {
+  const trailingColon = /[：:]\s*$/.test(stripInlineMarkdownMarkers(sourceHeading));
+  return trailingColon ? `${chineseHint}（${exactEnglish}）：` : `${chineseHint}（${exactEnglish}）`;
+}
+
+function findMatchingHeadingBlockPlan(
+  blockPlans: BlockPlanState[],
+  sourceHeading: string,
+  headingIndex?: number
+): BlockPlanState | null {
+  const headingKey = normalizeHeadingPlanningKey(stripHeadingTrailingColon(stripInlineMarkdownMarkers(sourceHeading)));
+  if (!headingKey) {
+    return null;
+  }
+
+  const headingBlocks = blockPlans.filter((plan) => plan.blockKind === "heading");
+  if (typeof headingIndex === "number") {
+    const byIndex = headingBlocks[headingIndex - 1];
+    if (
+      byIndex &&
+      normalizeHeadingPlanningKey(stripHeadingTrailingColon(extractHeadingContentFromBlockText(byIndex.sourceText) ?? "")) ===
+        headingKey
+    ) {
+      return byIndex;
+    }
+  }
+
+  return (
+    headingBlocks.find(
+      (plan) =>
+        normalizeHeadingPlanningKey(stripHeadingTrailingColon(extractHeadingContentFromBlockText(plan.sourceText) ?? "")) ===
+        headingKey
+    ) ?? null
+  );
+}
+
+function extractHeadingContentFromBlockText(text: string): string | null {
+  const trimmed = text.trim();
+  if (!trimmed || trimmed.includes("\n")) {
+    return null;
+  }
+
+  const atxMatch = trimmed.match(/^(#{1,6}[ \t]+)(.+)$/);
+  if (atxMatch) {
+    return atxMatch[2]!.trim();
+  }
+
+  const boldMatch = trimmed.match(/^\*\*(.+?)\*\*$/);
+  if (boldMatch) {
+    return boldMatch[1]!.trim();
+  }
+
+  return null;
+}
+
+function replaceHeadingBlockContent(sourceText: string, targetHeading: string): string {
+  const trimmed = sourceText.trim();
+  const atxMatch = trimmed.match(/^(#{1,6}[ \t]+)(.+)$/);
+  if (atxMatch) {
+    return trimmed.replace(atxMatch[2]!, targetHeading);
+  }
+
+  const boldMatch = trimmed.match(/^\*\*(.+?)\*\*$/);
+  if (boldMatch) {
+    return trimmed.replace(boldMatch[1]!, targetHeading);
+  }
+
+  return targetHeading;
+}
+
+function stripHeadingTrailingColon(text: string): string {
+  return text.replace(/[：:]\s*$/, "").trim();
+}
+
 function synthesizeHeadingHintPromptAnchors(
-  _segmentId: string,
-  _headingHints: readonly string[],
-  _headingPlans: readonly HeadingPlanState[],
+  segmentId: string,
+  headingHints: readonly string[],
+  headingPlans: readonly HeadingPlanState[],
   _currentRestoredBody: string,
-  _existingAnchors: PromptSlice["requiredAnchors"]
+  existingAnchors: PromptSlice["requiredAnchors"]
 ): PromptSlice["requiredAnchors"] {
-  // Title semantics should come from LLM headingPlans or explicit repair targets.
-  // Heuristic title synthesis is too aggressive when analysis shards time out, and it
-  // over-bilingualizes generic structural headings such as "System Requirements".
-  // Keep the function for backward-compatible call sites, but disable semantic inference here.
-  return [];
+  if (headingHints.length === 0 || existingAnchors.length === 0) {
+    return [];
+  }
+
+  const plannedHeadingKeys = new Set(
+    headingPlans.map((plan) => normalizeHeadingPlanningKey(plan.sourceHeading)).filter(Boolean)
+  );
+  const synthesized: PromptSlice["requiredAnchors"] = [];
+  const seenEnglish = new Set(existingAnchors.map((anchor) => anchor.english.trim().toLowerCase()));
+
+  for (const headingHint of headingHints) {
+    const headingKey = normalizeHeadingPlanningKey(headingHint);
+    if (!headingKey || plannedHeadingKeys.has(headingKey)) {
+      continue;
+    }
+
+    const headingCore = extractHeadingPlanningEnglish(headingHint);
+    if (!headingCore) {
+      continue;
+    }
+
+    const matches = existingAnchors.filter((anchor) => {
+      if (anchor.anchorId.startsWith("local:")) {
+        return false;
+      }
+      return normalizeHeadingPlanningKey(anchor.english) === normalizeHeadingPlanningKey(headingCore);
+    });
+
+    if (matches.length !== 1) {
+      continue;
+    }
+
+    const match = matches[0]!;
+    const normalizedKey = match.english.trim().toLowerCase();
+    if (seenEnglish.has(normalizedKey)) {
+      continue;
+    }
+
+    synthesized.push({
+      ...match,
+      anchorId: buildLocalFallbackAnchorId(segmentId, `${match.english}:heading`),
+      allowRepeatText: false
+    });
+    seenEnglish.add(normalizedKey);
+  }
+
+  return synthesized;
 }
 
 function synthesizeHeadingPlanPromptAnchors(
@@ -1075,6 +1809,12 @@ export function markChunkFailure(
       segmentId: string | null;
       segmentIndex: number;
       mustFix: string[];
+      structuredTargets?: StructuredRepairTarget[];
+      sentenceConstraint?: {
+        quotedText?: string;
+        forbiddenTerms?: string[];
+        sourceReferenceTexts?: string[];
+      };
       analysisPlanIds?: string[];
       analysisTargets?: string[];
     }>;
@@ -1088,6 +1828,22 @@ export function markChunkFailure(
       segmentId: segment.segmentId,
       segmentIndex: segment.segmentIndex,
       mustFix: [...segment.mustFix],
+      ...(segment.structuredTargets?.length
+        ? { structuredTargets: segment.structuredTargets.map((target) => ({ ...target })) }
+        : {}),
+      ...(segment.sentenceConstraint
+        ? {
+            sentenceConstraint: {
+              ...(segment.sentenceConstraint.quotedText ? { quotedText: segment.sentenceConstraint.quotedText } : {}),
+              ...(segment.sentenceConstraint.forbiddenTerms?.length
+                ? { forbiddenTerms: [...segment.sentenceConstraint.forbiddenTerms] }
+                : {}),
+              ...(segment.sentenceConstraint.sourceReferenceTexts?.length
+                ? { sourceReferenceTexts: [...segment.sentenceConstraint.sourceReferenceTexts] }
+                : {})
+            }
+          }
+        : {}),
       ...(segment.analysisPlanIds?.length ? { analysisPlanIds: [...segment.analysisPlanIds] } : {}),
       ...(segment.analysisTargets?.length ? { analysisTargets: [...segment.analysisTargets] } : {})
     }))
@@ -1278,9 +2034,13 @@ function synthesizeLocalFallbackPromptAnchors(
   const seenEnglish = new Set(existingAnchors.map((anchor) => anchor.english.trim().toLowerCase()));
 
   for (const repair of pendingRepairs) {
-    const target =
+    const rawTarget =
+      extractLocalFallbackAnchorTargetFromStructuredTarget(repair) ??
       extractLocalFallbackAnchorTargetFromBoundIR(repair) ??
       extractLocalFallbackAnchorTarget(repair.locationLabel, repair.instruction);
+    const target = rawTarget
+      ? reconcileLocalFallbackTargetWithExistingAnchors(rawTarget, existingAnchors)
+      : null;
     if (!target) {
       continue;
     }
@@ -1317,6 +2077,72 @@ function synthesizeLocalFallbackPromptAnchors(
   }
 
   return synthesized;
+}
+
+function reconcileLocalFallbackTargetWithExistingAnchors(
+  target: { english: string; chineseHint: string; displayPolicy: "english-only" | "chinese-primary" },
+  existingAnchors: PromptSlice["requiredAnchors"]
+): { english: string; chineseHint: string; displayPolicy: "english-only" | "chinese-primary" } {
+  const normalizedChineseHint = target.chineseHint.trim();
+  const normalizedEnglish = target.english.trim();
+  if (!normalizedChineseHint || !normalizedEnglish) {
+    return target;
+  }
+
+  const canonicalMatch = existingAnchors
+    .filter(
+      (anchor) =>
+        anchor.displayPolicy !== "english-only" &&
+        anchor.chineseHint.trim() === normalizedChineseHint &&
+        anchor.english.length > normalizedEnglish.length &&
+        containsWholePhrase(anchor.english, normalizedEnglish)
+    )
+    .sort((left, right) => right.english.length - left.english.length)[0];
+
+  if (!canonicalMatch) {
+    return target;
+  }
+
+  return {
+    english: canonicalMatch.english,
+    chineseHint: canonicalMatch.chineseHint,
+    displayPolicy:
+      canonicalMatch.displayPolicy === "english-only" ? "english-only" : "chinese-primary"
+  };
+}
+
+function extractLocalFallbackAnchorTargetFromStructuredTarget(
+  repair: PromptSlice["pendingRepairs"][number]
+): { english: string; chineseHint: string; displayPolicy: "english-only" | "chinese-primary" } | null {
+  const target = repair.structuredTarget;
+  if (!target) {
+    return null;
+  }
+
+  const bilingualTarget = target.targetText?.match(/^(.+?)（([^）]+)）$/u);
+  if (bilingualTarget) {
+    const chineseHint = bilingualTarget[1]?.trim() ?? "";
+    const english = bilingualTarget[2]?.trim() ?? "";
+    if (chineseHint && english && /[\u4e00-\u9fff]/u.test(chineseHint) && !looksCodeLikeAnchorTarget(english)) {
+      return {
+        english,
+        chineseHint,
+        displayPolicy: "chinese-primary"
+      };
+    }
+  }
+
+  const english = target.english?.trim() ?? "";
+  const chineseHint = target.chineseHint?.trim() ?? "";
+  if (english && chineseHint && /[\u4e00-\u9fff]/u.test(chineseHint) && !looksCodeLikeAnchorTarget(english)) {
+    return {
+      english,
+      chineseHint,
+      displayPolicy: "chinese-primary"
+    };
+  }
+
+  return null;
 }
 
 function extractLocalFallbackAnchorTargetFromBoundIR(

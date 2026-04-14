@@ -43,6 +43,9 @@ function createSlice(overrides: Partial<PromptSlice>): PromptSlice {
     headingHints: [],
     headingPlans: [],
     emphasisPlans: [],
+    blockPlans: [],
+    aliasPlans: [],
+    entityDisambiguationPlans: [],
     requiredAnchors: [],
     repeatAnchors: [],
     establishedAnchors: [],
@@ -150,6 +153,29 @@ test("applyEmphasisPlanTargets restores translatable strong emphasis from LLM pl
   const normalized = applyEmphasisPlanTargets(
     "Claude Code **now has a sandbox mode** that makes the YOLO mode look amateurish.",
     "Claude Code 现在有了沙盒模式（sandbox mode），让 YOLO 模式看起来像业余方案。",
+    slice
+  );
+
+  assert.equal(normalized, "Claude Code **现在有了沙盒模式（sandbox mode）**，让 YOLO 模式看起来像业余方案。");
+});
+
+test("applyEmphasisPlanTargets canonicalizes the chinese skeleton before restoring emphasis", () => {
+  const slice = createSlice({
+    emphasisPlans: [
+      {
+        emphasisIndex: 1,
+        lineIndex: 1,
+        sourceText: "now has a sandbox mode",
+        strategy: "preserve-strong",
+        targetText: "现在有了沙盒模式（sandbox mode）",
+        governedTerms: ["sandbox mode"]
+      }
+    ]
+  });
+
+  const normalized = applyEmphasisPlanTargets(
+    "Claude Code **now has a sandbox mode** that makes the YOLO mode look amateurish.",
+    "Claude Code 现在有了沙盒模式，让 YOLO 模式看起来像业余方案。",
     slice
   );
 
@@ -525,6 +551,47 @@ test("normalizeExplicitRepairAnchorText restores a quoted-line anchor from an ex
   assert.equal(normalized, "> 现在让我们看看沙箱模式（Sandbox mode）会保护你免受什么影响。");
 });
 
+test("normalizeExplicitRepairAnchorText removes a forbidden added qualifier from the cited source sentence", () => {
+  const slice = createSlice({
+    pendingRepairs: [
+      {
+        repairId: "repair-1",
+        anchorId: null,
+        failureType: "other",
+        locationLabel: "正文句",
+        instruction:
+          "第 1 句“关键区别在于，强制是在 Linux 的内核层执行的...”应去掉新增的“Linux”限定，保持与原文仅“kernel level”一致。",
+        sentenceConstraint: {
+          quotedText: "关键区别在于，强制是在 Linux 的内核层执行的...",
+          forbiddenTerms: ["Linux"],
+          sourceReferenceTexts: ["kernel level"]
+        }
+      }
+    ]
+  });
+  const source = [
+    "> The key difference is that enforcement occurs at the kernel level, not the application level.",
+    "",
+    "This is not Claude code by default, but it’s isolation enforced by Linux bubblewrap."
+  ].join("\n");
+  const translated = [
+    "> 关键区别在于，强制是在 Linux 的内核层执行的，而不是在应用层。",
+    "",
+    "这并非 Claude 的默认行为，而是由 Linux bubblewrap 强制执行的隔离。"
+  ].join("\n");
+
+  const normalized = normalizeExplicitRepairAnchorText(source, translated, slice);
+
+  assert.equal(
+    normalized,
+    [
+      "> 关键区别在于，强制是在内核层执行的，而不是在应用层。",
+      "",
+      "这并非 Claude 的默认行为，而是由 Linux bubblewrap 强制执行的隔离。"
+    ].join("\n")
+  );
+});
+
 test("normalizeExplicitRepairAnchorText restores a longer english-only list qualifier from an explicit repair target", () => {
   const slice = createSlice({
     requiredAnchors: [
@@ -553,6 +620,59 @@ test("normalizeExplicitRepairAnchorText restores a longer english-only list qual
   const normalized = normalizeExplicitRepairAnchorText(source, translated, slice);
 
   assert.equal(normalized, "- 预先批准的目标位置（npm registry、GitHub、你的 API）");
+});
+
+test("normalizeSourceSurfaceAnchorText restores a longer required anchor when only a shorter covered english-only anchor remains", () => {
+  const slice = createSlice({
+    requiredAnchors: [
+      {
+        ...createAnchor("anchor-npm-registry", "npm registry", "npm 注册表", "npm-registry"),
+        displayPolicy: "chinese-primary",
+        canonicalDisplay: "npm 注册表（npm registry）",
+        allowedDisplayForms: ["npm 注册表（npm registry）"]
+      },
+      {
+        ...createAnchor("anchor-npm", "npm", "npm", "npm"),
+        displayPolicy: "english-only",
+        canonicalDisplay: "npm",
+        allowedDisplayForms: ["npm"]
+      }
+    ]
+  });
+  const source = "- Pre-approved destinations (npm registry, GitHub, your APIs)";
+  const translated = "- 预先批准的目标位置（npm、GitHub、你的 API）";
+
+  const normalized = normalizeSourceSurfaceAnchorText(source, translated, slice);
+
+  assert.equal(normalized, "- 预先批准的目标位置（npm 注册表（npm registry）、GitHub、你的 API）");
+});
+
+test("normalizeExplicitRepairAnchorText does not duplicate an already satisfied bilingual API target", () => {
+  const slice = createSlice({
+    pendingRepairs: [
+      {
+        repairId: "repair-1",
+        anchorId: null,
+        failureType: "other",
+        locationLabel: "列表项",
+        instruction: "第 15 个项目符号中的“你的 API（应用程序编程接口）”重复了括注，只保留一组括注。",
+        structuredTarget: {
+          location: "第 15 个项目符号",
+          kind: "list_item",
+          currentText: "API",
+          targetText: "API（应用程序编程接口）",
+          english: "API",
+          chineseHint: "应用程序编程接口"
+        }
+      }
+    ]
+  });
+  const source = "- Pre-approved destinations (npm registry, GitHub, your APIs)";
+  const translated = "- 预先批准的目标位置（npm registry、GitHub、你的 API（应用程序编程接口））";
+
+  const normalized = normalizeExplicitRepairAnchorText(source, translated, slice);
+
+  assert.equal(normalized, translated);
 });
 
 test("normalizeExplicitRepairAnchorText restores a heading-like anchor from a structured title repair target", () => {
@@ -694,6 +814,34 @@ test("normalizeExplicitRepairAnchorText falls back to the source ATX heading whe
   const normalized = normalizeExplicitRepairAnchorText(source, translated, slice);
 
   assert.equal(normalized, "### 凭证窃取（Credential Theft）");
+});
+
+test("normalizeExplicitRepairAnchorText parses title-prefixed repair locations and restores exact heading surfaces", () => {
+  const slice = createSlice({
+    requiredAnchors: [createAnchor("anchor-1", "supply chain attacks", "供应链攻击")],
+    pendingRepairs: [
+      {
+        repairId: "repair-1",
+        anchorId: null,
+        failureType: "missing_anchor",
+        locationLabel: "标题",
+        instruction: "位置：标题“### 供应链攻击”；问题：首现术语未补英文对照；修复目标：改为符合首现锚定的双语标题形式。"
+      },
+      {
+        repairId: "repair-2",
+        anchorId: null,
+        failureType: "missing_anchor",
+        locationLabel: "标题",
+        instruction: "位置：标题“### 凭据窃取”；问题：首现术语未补英文对照；修复目标：改为符合首现锚定的双语标题形式。"
+      }
+    ]
+  });
+  const source = "### Supply Chain Attacks\n\n### Credential Theft";
+  const translated = "### 供应链攻击\n\n### 凭据窃取";
+
+  const normalized = normalizeExplicitRepairAnchorText(source, translated, slice);
+
+  assert.equal(normalized, "### 供应链攻击（Supply Chain Attacks）\n\n### 凭据窃取（Credential Theft）");
 });
 
 test("normalizeExplicitRepairAnchorText preserves missing source heading qualifiers inside an existing heading parenthesis", () => {

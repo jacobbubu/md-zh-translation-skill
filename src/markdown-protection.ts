@@ -75,7 +75,7 @@ export function protectMarkdownSpans(body: string): ProtectedMarkdown {
     return id;
   };
 
-  let protectedBody = body;
+  let protectedBody = normalizeMarkdownProtectionShadow(body);
   protectedBody = protectFencedCodeBlocks(protectedBody, register);
   protectedBody = protectHtmlBlocks(protectedBody, register);
   protectedBody = mapOutsideInlineCode(protectedBody, (text) => {
@@ -91,7 +91,7 @@ export function protectMarkdownSpans(body: string): ProtectedMarkdown {
 
 export function protectSegmentFormattingSpans(body: string, startIndex = 1): ProtectedMarkdown {
   void startIndex;
-  return { protectedBody: body, spans: [] };
+  return { protectedBody: normalizeMarkdownProtectionShadow(body), spans: [] };
 }
 
 export function extractTranslatableStrongEmphasisSpans(body: string): TranslatableStrongEmphasisSpan[] {
@@ -163,6 +163,60 @@ function protectFencedCodeBlocks(
   }
 
   return output;
+}
+
+function normalizeMarkdownProtectionShadow(input: string): string {
+  const lines = input.split(/(?<=\n)/);
+  let output = "";
+  let plainText = "";
+  let index = 0;
+
+  const flushPlainText = () => {
+    if (!plainText) {
+      return;
+    }
+    output += mapOutsideInlineCode(plainText, normalizeMalformedInlineBoundaries);
+    plainText = "";
+  };
+
+  while (index < lines.length) {
+    const line = lines[index] ?? "";
+    const normalizedLine = line.replace(/\r?\n$/, "");
+    const opening = normalizedLine.match(/^([ \t]{0,3})(`{3,}|~{3,})(.*)$/);
+    if (!opening) {
+      plainText += line;
+      index += 1;
+      continue;
+    }
+
+    flushPlainText();
+
+    const fence = opening[2]!;
+    const fenceChar = fence[0];
+    output += line;
+    index += 1;
+
+    while (index < lines.length) {
+      const current = lines[index] ?? "";
+      output += current;
+      const normalizedCurrent = current.replace(/\r?\n$/, "");
+      const closing = normalizedCurrent.match(/^([ \t]{0,3})(`{3,}|~{3,})[ \t]*$/);
+      index += 1;
+      if (closing && closing[2]![0] === fenceChar && closing[2]!.length >= fence.length) {
+        break;
+      }
+    }
+  }
+
+  flushPlainText();
+  return output;
+}
+
+function normalizeMalformedInlineBoundaries(input: string): string {
+  return input.replace(
+    /(\]\([^)\n]+\)|<(?:(?:https?:\/\/|mailto:)[^>\s]+)>)(?=(?:[A-Za-z0-9]|[*_]))/g,
+    "$1 "
+  );
 }
 
 function mapOutsideInlineCode(input: string, transform: (text: string) => string): string {

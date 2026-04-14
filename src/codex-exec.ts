@@ -102,6 +102,22 @@ function isRetryableCodexFailure(stderr: string): boolean {
   );
 }
 
+function isRetryableExecutionError(error: unknown, stderr: string): boolean {
+  if (isRetryableCodexFailure(stderr)) {
+    return true;
+  }
+
+  const message =
+    error instanceof Error ? error.message : typeof error === "string" ? error : "";
+  return /Codex returned an empty final message\./i.test(message);
+}
+
+function isResumeThreadFailure(error: unknown): boolean {
+  const message =
+    error instanceof Error ? error.message : typeof error === "string" ? error : "";
+  return /thread\/resume failed|no rollout found for thread id/i.test(message);
+}
+
 function sleep(milliseconds: number): Promise<void> {
   return new Promise((resolve) => {
     setTimeout(resolve, milliseconds);
@@ -233,7 +249,14 @@ export class DefaultCodexExecutor implements CodexExecutor {
           ...(threadId ? { threadId } : {})
         };
       } catch (error) {
-        if (isRetryableCodexFailure(stderr) && attempt < MAX_RETRYABLE_EXEC_FAILURES) {
+        if (options.threadId && isResumeThreadFailure(error)) {
+          const { threadId: _threadId, ...fallbackOptions } = options;
+          return this.execute(prompt, {
+            ...fallbackOptions,
+            reuseSession: false
+          });
+        }
+        if (isRetryableExecutionError(error, stderr) && attempt < MAX_RETRYABLE_EXEC_FAILURES) {
           const retryableError =
             error instanceof CodexExecutionError
               ? error

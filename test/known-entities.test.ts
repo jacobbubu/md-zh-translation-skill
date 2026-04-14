@@ -83,9 +83,11 @@ test("buildKnownEntityCatalog applies formal display policies for promoted entit
           "",
           "A supply chain attacks example can appear in RAG docs and PyPI docs.",
           "",
-          "pip and cargo can also access AWS credentials when allowed.",
+          "pip and cargo can also access AWS credentials when allowed, and the npm registry can be queried.",
           "",
-          "Git operations run alongside Linux and macOS and differ from Windows, while Anthropic ships tooling for Node.js and Python."
+          "Git operations run alongside Linux and macOS and differ from Windows, while Anthropic ships tooling for Node.js and Python.",
+          "",
+          "Linux bubblewrap works with Seatbelt in related sandbox setups."
         ].join("\n"),
         separatorAfter: "",
         headingPath: ["Sample"],
@@ -99,9 +101,11 @@ test("buildKnownEntityCatalog applies formal display policies for promoted entit
               "",
               "A supply chain attacks example can appear in RAG docs and PyPI docs.",
               "",
-              "pip and cargo can also access AWS credentials when allowed.",
+              "pip and cargo can also access AWS credentials when allowed, and the npm registry can be queried.",
               "",
-              "Git operations run alongside Linux and macOS and differ from Windows, while Anthropic ships tooling for Node.js and Python."
+              "Git operations run alongside Linux and macOS and differ from Windows, while Anthropic ships tooling for Node.js and Python.",
+              "",
+              "Linux bubblewrap works with Seatbelt in related sandbox setups."
             ].join("\n"),
             separatorAfter: "",
             spanIds: [],
@@ -144,6 +148,18 @@ test("buildKnownEntityCatalog applies formal display policies for promoted entit
   const cargo = slice.requiredAnchors.find((anchor) => anchor.english === "cargo");
   assert.ok(cargo);
   assert.equal(cargo.displayPolicy, "english-only");
+
+  const npmRegistry = slice.requiredAnchors.find((anchor) => anchor.english === "npm registry");
+  assert.ok(npmRegistry);
+  assert.equal(npmRegistry.displayPolicy, "chinese-primary");
+
+  const bubblewrap = slice.requiredAnchors.find((anchor) => anchor.english === "bubblewrap");
+  assert.ok(bubblewrap);
+  assert.equal(bubblewrap.displayPolicy, "english-primary");
+
+  const seatbelt = slice.requiredAnchors.find((anchor) => anchor.english === "Seatbelt");
+  assert.ok(seatbelt);
+  assert.equal(seatbelt.displayPolicy, "english-primary");
 
   const awsCredentials = slice.requiredAnchors.find((anchor) => anchor.english === "AWS credentials");
   assert.ok(awsCredentials);
