@@ -3546,6 +3546,46 @@ function extractHeadingEnglishCoreTerm(
   return null;
 }
 
+// Detect the "draft echoed the source verbatim" failure mode. The bundled /
+// per-segment audit LLMs have no hard_check that actually compares the body
+// against the source, so a segment that came back untranslated can pass every
+// structural check. Inject a synthetic must_fix (with a matching structured
+// target) so the repair lane is forced to retranslate it.
+function injectUntranslatedSegmentMustFix(
+  draftedSegment: DraftedSegmentState,
+  audit: GateAudit
+): GateAudit {
+  const source = draftedSegment.segment.source ?? "";
+  const body = draftedSegment.restoredBody ?? "";
+  if (!source.trim() || source.trim() !== body.trim()) {
+    return audit;
+  }
+  // Strip fenced/inline code + link destinations so we don't trip on segments
+  // that are legitimately code-only or URL-only.
+  const strippedSource = source
+    .replace(/```[\s\S]*?```/g, "")
+    .replace(/`[^`]*`/g, "")
+    .replace(/\bhttps?:\/\/\S+/gi, "")
+    .replace(/[\p{P}\p{S}\s]/gu, "");
+  const englishLetters = strippedSource.match(/[A-Za-z]/g);
+  if (!englishLetters || englishLetters.length < 15) {
+    return audit;
+  }
+  // If the body contains any CJK ideograph, assume the translator at least
+  // partially rendered Chinese and skip the guard (the existing anchor checks
+  // will catch finer issues).
+  if (/[\u4e00-\u9fff]/u.test(body)) {
+    return audit;
+  }
+
+  const instruction =
+    "当前分段译文与原文完全一致，未完成翻译。请将其翻译为中文正文，保留 Markdown 结构与受保护片段。";
+  return {
+    ...audit,
+    must_fix: [instruction, ...(audit.must_fix ?? [])]
+  };
+}
+
 function buildStructuredSegmentAuditResult(
   state: TranslationRunState,
   draftedSegment: DraftedSegmentState,
@@ -3553,7 +3593,8 @@ function buildStructuredSegmentAuditResult(
 ): StateSegmentAuditResult {
   const chunkId = draftedSegment.segmentId.split("-segment-")[0] ?? `chunk-${draftedSegment.segment.index + 1}`;
   const slice = buildSegmentTaskSlice(state, chunkId, draftedSegment.segmentId);
-  const expandedAudit = expandMissingAnchorMustFixes(audit);
+  const guardedAudit = injectUntranslatedSegmentMustFix(draftedSegment, audit);
+  const expandedAudit = expandMissingAnchorMustFixes(guardedAudit);
   const filteredAudit = suppressCoveredAnchorMustFix(state, draftedSegment, slice, expandedAudit);
   const repairTasks = buildRepairTasksForSegment(state, draftedSegment.segmentId, {
     segment: { source: draftedSegment.segment.source },
