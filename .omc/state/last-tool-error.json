@@ -1,7 +1,0 @@
-{
-  "tool_name": "Bash",
-  "tool_input_preview": "{\"command\":\"gh issue create --repo jacobbubu/md-zh-translation-skill --title \\\"[feature] owner-map 执行层落地（P1）\\\" --label feature --body \\\"$(cat <<'BODYEOF'\\n## 背景\\n\\nanalysis 阶段已经产出 anchor / heading / e...",
-  "error": "Exit code 1\ncould not add label: 'feature' not found\n[rerun: b163]",
-  "timestamp": "2026-04-15T05:55:53.889Z",
-  "retry_count": 1
-}
