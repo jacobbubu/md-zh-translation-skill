@@ -3631,6 +3631,33 @@ function collapseRunawayEnglishAnchorChain(text: string): string {
         return kept.map((paren) => `（${paren}）`).join("");
       }
     );
+  // Separately collapse two adjacent parens that are case-only duplicates or
+  // case-insensitive whole-word family variants (e.g. `（Sandbox）`, `（sandbox
+  // mode）`). Runs at the post-normalizer stage so lines where anchor injection
+  // short-circuited earlier still get the cleanup.
+  const collapsePairs = (input: string): string =>
+    input.replace(
+      /（([A-Za-z][A-Za-z0-9 .+/_\-]*)）\s*（([A-Za-z][A-Za-z0-9 .+/_\-]*)）/gu,
+      (match, first, second) => {
+        const a = String(first).trim();
+        const b = String(second).trim();
+        if (!a || !b) return match;
+        const aLower = a.toLowerCase();
+        const bLower = b.toLowerCase();
+        if (aLower === bLower) {
+          return `（${b}）`;
+        }
+        if (
+          bLower.startsWith(`${aLower} `) ||
+          bLower.endsWith(` ${aLower}`) ||
+          aLower.startsWith(`${bLower} `) ||
+          aLower.endsWith(` ${bLower}`)
+        ) {
+          return aLower.length >= bLower.length ? `（${a}）` : `（${b}）`;
+        }
+        return match;
+      }
+    );
   // Normalize accidental 4-star bold delimiters `****` to `**`; keep paired so
   // we do not corrupt balanced bold sequences elsewhere in the line.
   const collapseDoubleBold = (input: string): string => input.replace(/\*{4,}/g, "**");
@@ -3649,7 +3676,7 @@ function collapseRunawayEnglishAnchorChain(text: string): string {
         return line.replace(/\*\*([\p{P}\p{S}\s]*)$/u, "$1");
       })
       .join("\n");
-  return stripDanglingBoldTail(collapseDoubleBold(collapseChain(text)));
+  return stripDanglingBoldTail(collapseDoubleBold(collapsePairs(collapseChain(text))));
 }
 
 function dedupDraftDuplicateTailBlocks(source: string, draft: string): string {
