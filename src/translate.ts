@@ -5884,8 +5884,9 @@ function buildJsonBlockDraftPrompt(source: string): string {
     "3. 不要解释，不要添加额外 block，不要合并或重排。",
     "4. 引用仍是引用，source 中没有 heading 或 code block 的地方，译文中不得凭空新增。",
     "5. 对标注为 code 的 block：保持原样返回，不要翻译代码、注释或命令输出；如果无法原样返回，可以返回空字符串，程序会把源代码贴回来。",
-    "6. 禁止输出任何任务状态、验证证据、分支信息、工作区状态、git status、路径说明，或“已完成/已核对/已复核/继续执行”之类的元话语。",
-    "7. 禁止输出任何控制面标签或指令文本，例如 <hook_prompt ...>、OMX、Ralph、stop:...、::git-*、::archive 等。",
+    "6. 术语处理：对任何锚点术语（anchor glossary 里给出的英文-中文对），只输出其 preferred_chinese_hint 即可，如 sandbox mode -> 沙盒模式、Seatbelt -> 保持英文 Seatbelt（因 english-primary），不要自己加括号中英对照，程序会统一在首次出现处补 `（English）` 括注。重复锚点只写中文或只写英文即可。",
+    "7. 禁止输出任何任务状态、验证证据、分支信息、工作区状态、git status、路径说明，或“已完成/已核对/已复核/继续执行”之类的元话语。",
+    "8. 禁止输出任何控制面标签或指令文本，例如 <hook_prompt ...>、OMX、Ralph、stop:...、::git-*、::archive 等。",
     "",
     "【按块展开的英文原文】",
     blocks
