@@ -5848,6 +5848,19 @@ function getDraftContractViolation(source: string, text: string): string | null 
     return source.trim() ? "draft returned empty content" : null;
   }
 
+  const trimmedSource = source.trim();
+  if (trimmed === trimmedSource) {
+    const strippedSource = trimmedSource
+      .replace(/```[\s\S]*?```/g, "")
+      .replace(/`[^`]*`/g, "")
+      .replace(/\bhttps?:\/\/\S+/gi, "")
+      .replace(/[\p{P}\p{S}\s]/gu, "");
+    const englishLetters = strippedSource.match(/[A-Za-z]/g);
+    if (englishLetters && englishLetters.length >= 15 && !/[\u4e00-\u9fff]/u.test(trimmed)) {
+      return "draft echoed the source verbatim instead of translating";
+    }
+  }
+
   if (
     /file:\/\//i.test(trimmed) ||
     /\[[^\]]+\.md\]\(file:\/\//i.test(trimmed) ||
