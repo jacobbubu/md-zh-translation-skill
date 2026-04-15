@@ -1490,10 +1490,46 @@ function normalizeChinesePrimaryInlineExplanation(
   );
 }
 
+function lineAlreadyHasFamilyVariantAnchorParen(text: string, english: string): string | null {
+  const target = english.trim().toLowerCase();
+  if (!target) {
+    return null;
+  }
+  for (const match of text.matchAll(/（([A-Za-z][A-Za-z0-9 .+/_\-]*)）/gu)) {
+    const raw = String(match[1]).trim();
+    if (!raw) {
+      continue;
+    }
+    const lower = raw.toLowerCase();
+    if (lower === target) {
+      return raw;
+    }
+    if (
+      target.startsWith(`${lower} `) ||
+      target.endsWith(` ${lower}`) ||
+      lower.startsWith(`${target} `) ||
+      lower.endsWith(` ${target}`)
+    ) {
+      return raw;
+    }
+  }
+  return null;
+}
+
 function injectAnchorIntoLine(text: string, anchor: PromptAnchor): string {
   const display = resolveAnchorDisplay(anchor);
 
   if (!display.english || display.mode === "english-only") {
+    return text;
+  }
+
+  // Phase 0 anti-runaway guard: if the line already carries an English paren
+  // whose content is a case-insensitive whole-word family variant of this
+  // anchor (same tokens, or one is a whole-word prefix / suffix of the other),
+  // do NOT inject another anchor paren. This is the deterministic
+  // short-circuit that prevents the `（sandbox）（sandbox mode）（Sandbox）`
+  // chain that every downstream collapser is otherwise asked to clean up.
+  if (lineAlreadyHasFamilyVariantAnchorParen(text, display.english)) {
     return text;
   }
 
