@@ -1,0 +1,225 @@
+{
+  "version": "1.0.0",
+  "lastScanned": 1776186095964,
+  "projectRoot": "/Users/rongshen/vibe-coding/md-zh-translation-skill",
+  "techStack": {
+    "languages": [
+      {
+        "name": "JavaScript/TypeScript",
+        "version": ">=20",
+        "confidence": "high",
+        "markers": [
+          "package.json"
+        ]
+      },
+      {
+        "name": "TypeScript",
+        "version": null,
+        "confidence": "high",
+        "markers": [
+          "tsconfig.json"
+        ]
+      }
+    ],
+    "frameworks": [],
+    "packageManager": "npm",
+    "runtime": "Node.js 20"
+  },
+  "build": {
+    "buildCommand": "npm run build",
+    "testCommand": "npm test",
+    "lintCommand": null,
+    "devCommand": null,
+    "scripts": {
+      "build:smoke-fixtures": "node scripts/build-smoke-fixtures.mjs",
+      "smoke:short": "node scripts/run-smoke.mjs --fixture short",
+      "smoke:full": "node scripts/run-smoke.mjs --fixture full",
+      "smoke:status": "node scripts/smoke-status.mjs",
+      "smoke:diagnose": "node scripts/smoke-diagnose.mjs",
+      "smoke:quality": "node scripts/smoke-quality.mjs",
+      "smoke:once": "node scripts/smoke-once.mjs",
+      "build": "tsc -p tsconfig.json && node scripts/copy-runtime-data.mjs",
+      "typecheck": "tsc -p tsconfig.json --noEmit",
+      "test": "tsx --test test/**/*.test.ts",
+      "verify": "npm run typecheck && npm run test && npm run build",
+      "release": "semantic-release"
+    }
+  },
+  "conventions": {
+    "namingStyle": "camelCase/PascalCase",
+    "importStyle": "ES modules",
+    "testPattern": "*.test.ts",
+    "fileOrganization": null
+  },
+  "structure": {
+    "isMonorepo": false,
+    "workspaces": [],
+    "mainDirectories": [
+      "docs",
+      "scripts",
+      "src",
+      "test"
+    ],
+    "gitBranches": {
+      "defaultBranch": "main",
+      "branchingStrategy": null
+    }
+  },
+  "customNotes": [],
+  "directoryMap": {
+    "agents": {
+      "path": "agents",
+      "purpose": null,
+      "fileCount": 1,
+      "lastAccessed": 1776186095857,
+      "keyFiles": [
+        "openai.yaml"
+      ]
+    },
+    "docs": {
+      "path": "docs",
+      "purpose": "Documentation",
+      "fileCount": 4,
+      "lastAccessed": 1776186095857,
+      "keyFiles": [
+        "known-entities-governance.md",
+        "translation-handoff-memo.md",
+        "translation-pipeline-deep-dive.md",
+        "translation-system-design.md"
+      ]
+    },
+    "scripts": {
+      "path": "scripts",
+      "purpose": "Build/utility scripts",
+      "fileCount": 7,
+      "lastAccessed": 1776186095864,
+      "keyFiles": [
+        "build-smoke-fixtures.mjs",
+        "copy-runtime-data.mjs",
+        "run-smoke.mjs",
+        "smoke-diagnose.mjs",
+        "smoke-once.mjs"
+      ]
+    },
+    "src": {
+      "path": "src",
+      "purpose": "Source code",
+      "fileCount": 14,
+      "lastAccessed": 1776186095866,
+      "keyFiles": [
+        "anchor-normalization.ts",
+        "cli.ts",
+        "codex-exec.ts",
+        "errors.ts",
+        "format.ts"
+      ]
+    },
+    "test": {
+      "path": "test",
+      "purpose": "Test files",
+      "fileCount": 10,
+      "lastAccessed": 1776186095866,
+      "keyFiles": [
+        "anchor-normalization.test.ts",
+        "cli.test.ts",
+        "codex-exec.test.ts",
+        "format.test.ts",
+        "install.test.ts"
+      ]
+    },
+    "src/data": {
+      "path": "src/data",
+      "purpose": "Data files",
+      "fileCount": 1,
+      "lastAccessed": 1776186095868,
+      "keyFiles": [
+        "known_entities.json"
+      ]
+    },
+    "test/fixtures": {
+      "path": "test/fixtures",
+      "purpose": "Test fixtures",
+      "fileCount": 2,
+      "lastAccessed": 1776186095868,
+      "keyFiles": [
+        "article.md",
+        "mixed-layout.md"
+      ]
+    }
+  },
+  "hotPaths": [
+    {
+      "path": "src/translate.ts",
+      "accessCount": 57,
+      "lastAccessed": 1776228749424,
+      "type": "file"
+    },
+    {
+      "path": "src/anchor-normalization.ts",
+      "accessCount": 27,
+      "lastAccessed": 1776232978205,
+      "type": "file"
+    },
+    {
+      "path": "src/translation-state.ts",
+      "accessCount": 18,
+      "lastAccessed": 1776234947901,
+      "type": "directory"
+    },
+    {
+      "path": "src",
+      "accessCount": 9,
+      "lastAccessed": 1776218567659,
+      "type": "directory"
+    },
+    {
+      "path": "test/translate.test.ts",
+      "accessCount": 7,
+      "lastAccessed": 1776234937885,
+      "type": "file"
+    },
+    {
+      "path": "test/translation-state.test.ts",
+      "accessCount": 4,
+      "lastAccessed": 1776232803945,
+      "type": "file"
+    },
+    {
+      "path": "test/anchor-normalization.test.ts",
+      "accessCount": 4,
+      "lastAccessed": 1776234915511,
+      "type": "file"
+    },
+    {
+      "path": "README.md",
+      "accessCount": 1,
+      "lastAccessed": 1776186161183,
+      "type": "file"
+    },
+    {
+      "path": "docs/translation-system-design.md",
+      "accessCount": 1,
+      "lastAccessed": 1776186162159,
+      "type": "file"
+    },
+    {
+      "path": "docs/known-entities-governance.md",
+      "accessCount": 1,
+      "lastAccessed": 1776186162756,
+      "type": "file"
+    },
+    {
+      "path": "docs/translation-handoff-memo.md",
+      "accessCount": 1,
+      "lastAccessed": 1776186162943,
+      "type": "file"
+    },
+    {
+      "path": "docs/translation-pipeline-deep-dive.md",
+      "accessCount": 1,
+      "lastAccessed": 1776186168118,
+      "type": "file"
+    }
+  ],
+  "userDirectives": []
+}

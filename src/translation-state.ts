@@ -458,13 +458,10 @@ export type PromptSlice = {
   analysisPlanDraft: string;
   /**
    * Owner map for the current segment. See `OwnerMap` docstring. Populated by
-   * `buildSegmentTaskSlice`; consumers must treat it as read-only. Optional
-   * during the Phase 1 foundation commit because no normalizer reads it yet
-   * and a few test fixtures construct `PromptSlice` literals directly; later
-   * steps that wire it into normalizers can tighten this to required once
-   * all call sites populate it.
+   * `buildSegmentTaskSlice` and required on every slice; empty array means
+   * "no owned spans". Consumers must treat it as read-only.
    */
-  ownerMap?: OwnerMap;
+  ownerMap: OwnerMap;
 };
 
 export function buildLocalFallbackAnchorId(segmentId: string, english: string): string {

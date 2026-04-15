@@ -54,6 +54,7 @@ function createSlice(overrides: Partial<PromptSlice>): PromptSlice {
     headingPlanGovernedAnchorIds: [],
     analysisPlans: [],
     analysisPlanDraft: '<SEGMENT id="chunk-1-segment-1">\n</SEGMENT>',
+    ownerMap: [],
     ...overrides
   };
 }

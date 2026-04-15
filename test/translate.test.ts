@@ -3165,7 +3165,8 @@ test("translateMarkdownArticle surfaces IR targets in repair guidance when pendi
         ],
         headingPlanGovernedAnchorIds: [],
         analysisPlans: [],
-        analysisPlanDraft: '<SEGMENT id="chunk-1-segment-1">\n  <PLAN id="anchor:anchor-1" kind="anchor" scope="required" source="sandbox mode" target="沙盒模式（sandbox mode）" />\n</SEGMENT>'
+        analysisPlanDraft: '<SEGMENT id="chunk-1-segment-1">\n  <PLAN id="anchor:anchor-1" kind="anchor" scope="required" source="sandbox mode" target="沙盒模式（sandbox mode）" />\n</SEGMENT>',
+        ownerMap: []
       }
     }),
     ["当前句“Sandbox mode is now active.”中的“sandbox mode”需补为“沙盒模式（sandbox mode）”。"]
