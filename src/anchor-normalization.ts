@@ -1612,11 +1612,18 @@ function injectAnchorIntoLine(
       );
     }
 
-    if (text.includes(anchor.chineseHint)) {
+    if (
+      text.includes(anchor.chineseHint) &&
+      !chineseHintIsInsideChineseParen(text, anchor.chineseHint)
+    ) {
       return normalizeExplicitRepairReplacementSpacing(replaceFirst(text, anchor.chineseHint, display.canonical));
     }
 
-    if (display.chineseDisplay && text.includes(display.chineseDisplay)) {
+    if (
+      display.chineseDisplay &&
+      text.includes(display.chineseDisplay) &&
+      !chineseHintIsInsideChineseParen(text, display.chineseDisplay)
+    ) {
       return normalizeExplicitRepairReplacementSpacing(replaceFirst(text, display.chineseDisplay, display.canonical));
     }
 
@@ -1647,15 +1654,38 @@ function injectAnchorIntoLine(
     return text;
   }
 
-  if (text.includes(display.chineseDisplay)) {
+  if (
+    text.includes(display.chineseDisplay) &&
+    !chineseHintIsInsideChineseParen(text, display.chineseDisplay)
+  ) {
     return normalizeExplicitRepairReplacementSpacing(replaceFirst(text, display.chineseDisplay, display.canonical));
   }
 
-  if (text.includes(anchor.chineseHint)) {
+  if (
+    text.includes(anchor.chineseHint) &&
+    !chineseHintIsInsideChineseParen(text, anchor.chineseHint)
+  ) {
     return normalizeExplicitRepairReplacementSpacing(replaceFirst(text, anchor.chineseHint, display.canonical));
   }
 
   return normalizeExplicitRepairReplacementSpacing(text);
+}
+
+function chineseHintIsInsideChineseParen(text: string, chineseHint: string): boolean {
+  const idx = text.indexOf(chineseHint);
+  if (idx < 0) {
+    return false;
+  }
+  for (let i = idx - 1; i >= 0; i -= 1) {
+    const ch = text[i];
+    if (ch === "）") {
+      return false;
+    }
+    if (ch === "（") {
+      return true;
+    }
+  }
+  return false;
 }
 
 function englishIsInsideChineseParen(text: string, english: string): boolean {
