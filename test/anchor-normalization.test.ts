@@ -1006,3 +1006,18 @@ test("injectPlannedAnchorText skips mention injection when ownerMap marks the sp
   // mention-layer injector must not re-inject a second `（sandbox mode）`.
   assert.equal(normalized, translated);
 });
+
+test("injectAnchorIntoLine upgrades bare English inside a Chinese paren list to canonical bilingual (#3)", () => {
+  const slice = createSlice({
+    requiredAnchors: [createAnchor("anchor-1", "npm registry", "npm 注册表")]
+  });
+  const source = "- Pre-approved destinations (npm registry, GitHub, your APIs)";
+  const translated = "- 预先批准的目标（npm registry、GitHub、你的 API）";
+
+  const normalized = injectPlannedAnchorText(source, translated, slice);
+
+  assert.equal(
+    normalized,
+    "- 预先批准的目标（npm 注册表（npm registry）、GitHub、你的 API）"
+  );
+});
