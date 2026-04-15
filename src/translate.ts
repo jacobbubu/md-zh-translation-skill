@@ -5880,8 +5880,9 @@ function buildJsonBlockDraftPrompt(source: string): string {
     "2. 每个 block 只写该块对应的中文 Markdown 内容。",
     "3. 不要解释，不要添加额外 block，不要合并或重排。",
     "4. 引用仍是引用，source 中没有 heading 或 code block 的地方，译文中不得凭空新增。",
-    "5. 禁止输出任何任务状态、验证证据、分支信息、工作区状态、git status、路径说明，或“已完成/已核对/已复核/继续执行”之类的元话语。",
-    "6. 禁止输出任何控制面标签或指令文本，例如 <hook_prompt ...>、OMX、Ralph、stop:...、::git-*、::archive 等。",
+    "5. 对标注为 code 的 block：保持原样返回，不要翻译代码、注释或命令输出；如果无法原样返回，可以返回空字符串，程序会把源代码贴回来。",
+    "6. 禁止输出任何任务状态、验证证据、分支信息、工作区状态、git status、路径说明，或“已完成/已核对/已复核/继续执行”之类的元话语。",
+    "7. 禁止输出任何控制面标签或指令文本，例如 <hook_prompt ...>、OMX、Ralph、stop:...、::git-*、::archive 等。",
     "",
     "【按块展开的英文原文】",
     blocks
@@ -5968,7 +5969,12 @@ function reconstructJsonBlockDraft(source: string, jsonText: string): string {
 
   return sourceBlocks
     .map((block, index) => {
-      const translated = typeof translatedBlocks[index] === "string" ? translatedBlocks[index] : "";
+      const translatedRaw = typeof translatedBlocks[index] === "string" ? translatedBlocks[index] : "";
+      // P2: fenced / indented code blocks are not translated. Ignore whatever
+      // the LLM returned for those slots and pin them to the source content so
+      // code cannot be re-wrapped or paraphrased.
+      const kind = classifyPromptBlockKind(block.content);
+      const translated = kind === "code" ? block.content : translatedRaw;
       return index === sourceBlocks.length - 1 ? translated : `${translated}${block.separator}`;
     })
     .join("");
@@ -6014,63 +6020,38 @@ function buildBlockStructuredDraftPrompt(source: string): string {
 }
 
 function classifyStructuralSegmentDraftStrategy(source: string): StructuralSegmentDraftStrategy | null {
+  // P2 (#14) default inversion: every translatable segment goes to the
+  // JSON-blocks lane unless it is a single-line literal (heading /
+  // attribution / kicker). The previous conservative size / kind thresholds
+  // funneled most medium-complexity segments back to freeform, where LLM
+  // specific output pathologies (duplicate blocks, dropped list newlines,
+  // prompt-leak into body, etc.) kept producing a new failure every full
+  // smoke run. Freeform remains available as an explicit fallback when
+  // json-blocks fails schema / contract checks — see translateProtectedSegment.
   const trimmed = source.trim();
-  if (!trimmed || trimmed.includes("\n\n")) {
-    const blocks = splitPromptBlocks(source);
-    if (blocks.length >= 2 && source.length <= 2400) {
-      return { mode: "json-blocks", value: buildJsonBlockDraftPrompt(source), blockCount: blocks.length };
+
+  // Literal opt-outs (single-line, no block splitting needed).
+  if (trimmed && !trimmed.includes("\n\n")) {
+    if (isHeadingLikeBlock(trimmed)) {
+      return { mode: "literal", value: source };
     }
-    const hasBlockquote = blocks.some((block) => classifyPromptBlockKind(block.content) === "blockquote");
-    if (blocks.length >= 4 && hasBlockquote && source.length <= 2200) {
-      return { mode: "json-blocks", value: buildJsonBlockDraftPrompt(source), blockCount: blocks.length };
+    if (isAttributionLikeBlock(trimmed)) {
+      return { mode: "literal", value: source };
     }
-    if (
-      blocks.length === 2 &&
-      isHeadingLikeBlock(blocks[0]?.content?.trim() ?? "") &&
-      classifyPromptBlockKind(blocks[1]?.content?.trim() ?? "") === "paragraph" &&
-      source.length <= 260
-    ) {
-      return { mode: "json-blocks", value: buildJsonBlockDraftPrompt(source), blockCount: blocks.length };
+    if (isNumericKickerLikeBlock(trimmed)) {
+      return { mode: "literal", value: source };
     }
+  }
+
+  const blocks = splitPromptBlocks(source);
+  if (blocks.length === 0) {
     return null;
   }
-
-  if (isHeadingLikeBlock(trimmed)) {
-    return { mode: "literal", value: source };
-  }
-
-  if (isAttributionLikeBlock(trimmed)) {
-    return { mode: "literal", value: source };
-  }
-
-  if (isNumericKickerLikeBlock(trimmed)) {
-    return { mode: "literal", value: source };
-  }
-
-  if (
-    !trimmed.includes("\n") &&
-    classifyPromptBlockKind(trimmed) === "blockquote" &&
-    trimmed.length <= 420
-  ) {
-    return { mode: "json-blocks", value: buildJsonBlockDraftPrompt(source), blockCount: 1 };
-  }
-
-  if (
-    classifyPromptBlockKind(trimmed) === "list" &&
-    source.length <= 900
-  ) {
-    return { mode: "json-blocks", value: buildJsonBlockDraftPrompt(source), blockCount: 1 };
-  }
-
-  if (
-    !trimmed.includes("\n") &&
-    classifyPromptBlockKind(trimmed) === "paragraph" &&
-    trimmed.length <= 220
-  ) {
-    return { mode: "json-blocks", value: buildJsonBlockDraftPrompt(source), blockCount: 1 };
-  }
-
-  return null;
+  return {
+    mode: "json-blocks",
+    value: buildJsonBlockDraftPrompt(source),
+    blockCount: blocks.length
+  };
 }
 
 function buildStructuralSegmentDraftPrompt(
