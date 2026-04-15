@@ -1223,14 +1223,6 @@ function reconcileSegmentSemanticPlans(
   state: TranslationRunState,
   segment: SegmentState
 ): { headingPlans: HeadingPlanState[]; blockPlans: BlockPlanState[]; emphasisPlans: EmphasisPlanState[] } {
-  if (segment.headingPlans.length === 0) {
-    return {
-      headingPlans: segment.headingPlans.map((plan) => ({ ...plan })),
-      blockPlans: segment.blockPlans.map((plan) => ({ ...plan })),
-      emphasisPlans: segment.emphasisPlans.map((plan) => ({ ...plan }))
-    };
-  }
-
   const headingPlans = segment.headingPlans.map((plan) => ({ ...plan }));
   const blockPlans = segment.blockPlans.map((plan) => ({ ...plan }));
   const emphasisPlans = segment.emphasisPlans.map((plan) => ({ ...plan }));
