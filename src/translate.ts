@@ -3551,6 +3551,40 @@ function extractHeadingEnglishCoreTerm(
 // against the source, so a segment that came back untranslated can pass every
 // structural check. Inject a synthetic must_fix (with a matching structured
 // target) so the repair lane is forced to retranslate it.
+// Promote failed hard_check problems into must_fix entries. The audit LLM
+// sometimes reports a structural / style failure via hard_checks (e.g.
+// chinese_punctuation.pass=false with a clear problem) but leaves must_fix
+// empty. Without a must_fix entry the repair loop treats the chunk as "no work
+// to do", exits early, and the failure is never repaired even though
+// isBundledHardPass remains false. Mirror each failed hard_check problem into
+// must_fix so the repair lane has an actionable instruction.
+function materializeFailedHardCheckProblems(audit: GateAudit): GateAudit {
+  const extras: string[] = [];
+  const existing = new Set((audit.must_fix ?? []).map((entry) => entry.trim()));
+  for (const [checkName, check] of Object.entries(audit.hard_checks ?? {})) {
+    if (check?.pass !== false) {
+      continue;
+    }
+    const problem = check.problem?.trim();
+    if (!problem) {
+      continue;
+    }
+    const mustFixEntry = `硬性检查 ${checkName} 未通过：${problem}`;
+    if (existing.has(mustFixEntry)) {
+      continue;
+    }
+    existing.add(mustFixEntry);
+    extras.push(mustFixEntry);
+  }
+  if (extras.length === 0) {
+    return audit;
+  }
+  return {
+    ...audit,
+    must_fix: [...(audit.must_fix ?? []), ...extras]
+  };
+}
+
 function injectUntranslatedSegmentMustFix(
   draftedSegment: DraftedSegmentState,
   audit: GateAudit
@@ -3593,7 +3627,9 @@ function buildStructuredSegmentAuditResult(
 ): StateSegmentAuditResult {
   const chunkId = draftedSegment.segmentId.split("-segment-")[0] ?? `chunk-${draftedSegment.segment.index + 1}`;
   const slice = buildSegmentTaskSlice(state, chunkId, draftedSegment.segmentId);
-  const guardedAudit = injectUntranslatedSegmentMustFix(draftedSegment, audit);
+  const guardedAudit = materializeFailedHardCheckProblems(
+    injectUntranslatedSegmentMustFix(draftedSegment, audit)
+  );
   const expandedAudit = expandMissingAnchorMustFixes(guardedAudit);
   const filteredAudit = suppressCoveredAnchorMustFix(state, draftedSegment, slice, expandedAudit);
   const repairTasks = buildRepairTasksForSegment(state, draftedSegment.segmentId, {
