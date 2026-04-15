@@ -2457,7 +2457,12 @@ test("translateMarkdownArticle skips bundled audit for large multi-segment chunk
         return createExecResult(current);
       }
       const sourceSection = extractPromptSection(prompt, "【英文原文】");
-      return createExecResult(sourceSection ?? "");
+      // Return Chinese placeholder content rather than echoing the English
+      // source so the draft contract and the untranslated-segment guard treat
+      // the mock as a real translation. This test exists to verify that
+      // bundled audit is skipped for large multi-segment chunks, not to
+      // exercise the echoed-source repair path.
+      return createExecResult(sourceSection ? "中文占位译文" : "");
     }
   };
 

@@ -3585,30 +3585,43 @@ function materializeFailedHardCheckProblems(audit: GateAudit): GateAudit {
   };
 }
 
-function injectUntranslatedSegmentMustFix(
-  draftedSegment: DraftedSegmentState,
-  audit: GateAudit
-): GateAudit {
+// Predicate for "this segment's translated body is just an echo of the English
+// source". Used by injectUntranslatedSegmentMustFix to add a repair
+// instruction during audit. Central rules: segment must be translatable (not
+// a fixed non-translatable block); source trimmed equals body trimmed; after
+// stripping fenced/inline code and URLs the source has at least 15 English
+// letters; the body contains zero CJK characters.
+function isSegmentStillEchoingSource(draftedSegment: DraftedSegmentState): boolean {
+  if (draftedSegment.segment.kind !== "translatable") {
+    return false;
+  }
   const source = draftedSegment.segment.source ?? "";
   const body = draftedSegment.restoredBody ?? "";
-  if (!source.trim() || source.trim() !== body.trim()) {
-    return audit;
+  const trimmedSource = source.trim();
+  const trimmedBody = body.trim();
+  if (!trimmedSource || trimmedSource !== trimmedBody) {
+    return false;
   }
-  // Strip fenced/inline code + link destinations so we don't trip on segments
-  // that are legitimately code-only or URL-only.
-  const strippedSource = source
+  const strippedSource = trimmedSource
     .replace(/```[\s\S]*?```/g, "")
     .replace(/`[^`]*`/g, "")
     .replace(/\bhttps?:\/\/\S+/gi, "")
     .replace(/[\p{P}\p{S}\s]/gu, "");
   const englishLetters = strippedSource.match(/[A-Za-z]/g);
   if (!englishLetters || englishLetters.length < 15) {
-    return audit;
+    return false;
   }
-  // If the body contains any CJK ideograph, assume the translator at least
-  // partially rendered Chinese and skip the guard (the existing anchor checks
-  // will catch finer issues).
-  if (/[\u4e00-\u9fff]/u.test(body)) {
+  if (/[\u4e00-\u9fff]/u.test(trimmedBody)) {
+    return false;
+  }
+  return true;
+}
+
+function injectUntranslatedSegmentMustFix(
+  draftedSegment: DraftedSegmentState,
+  audit: GateAudit
+): GateAudit {
+  if (!isSegmentStillEchoingSource(draftedSegment)) {
     return audit;
   }
 
