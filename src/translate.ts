@@ -3546,6 +3546,247 @@ function extractHeadingEnglishCoreTerm(
   return null;
 }
 
+// Detect the "draft echoed the source verbatim" failure mode. The bundled /
+// per-segment audit LLMs have no hard_check that actually compares the body
+// against the source, so a segment that came back untranslated can pass every
+// structural check. Inject a synthetic must_fix (with a matching structured
+// target) so the repair lane is forced to retranslate it.
+// Promote failed hard_check problems into must_fix entries. The audit LLM
+// sometimes reports a structural / style failure via hard_checks (e.g.
+// chinese_punctuation.pass=false with a clear problem) but leaves must_fix
+// empty. Without a must_fix entry the repair loop treats the chunk as "no work
+// to do", exits early, and the failure is never repaired even though
+// isBundledHardPass remains false. Mirror each failed hard_check problem into
+// must_fix so the repair lane has an actionable instruction.
+function materializeFailedHardCheckProblems(audit: GateAudit): GateAudit {
+  const extras: string[] = [];
+  const existing = new Set((audit.must_fix ?? []).map((entry) => entry.trim()));
+  for (const [checkName, check] of Object.entries(audit.hard_checks ?? {})) {
+    if (check?.pass !== false) {
+      continue;
+    }
+    const problem = check.problem?.trim();
+    if (!problem) {
+      continue;
+    }
+    const mustFixEntry = `硬性检查 ${checkName} 未通过：${problem}`;
+    if (existing.has(mustFixEntry)) {
+      continue;
+    }
+    existing.add(mustFixEntry);
+    extras.push(mustFixEntry);
+  }
+  if (extras.length === 0) {
+    return audit;
+  }
+  return {
+    ...audit,
+    must_fix: [...(audit.must_fix ?? []), ...extras]
+  };
+}
+
+// Predicate for "this segment's translated body is just an echo of the English
+// source". Used by injectUntranslatedSegmentMustFix to add a repair
+// instruction during audit. Central rules: segment must be translatable (not
+// a fixed non-translatable block); source trimmed equals body trimmed; after
+// stripping fenced/inline code and URLs the source has at least 15 English
+// letters; the body contains zero CJK characters.
+// When the draft / repair LLM visibly "retries" by appending a re-run of
+// earlier blocks, the chunk ends up with its bullets or paragraphs duplicated
+// back-to-back. Detect this pattern deterministically so the downstream
+// normalizers see a cleanly-sized body: require (a) draft block count to
+// exceed source block count, and (b) the longest possible tail to be a
+// near-duplicate of the preceding window of the same length. When both hold,
+// trim the tail. Block similarity is measured as normalized-char overlap to
+// accommodate LLM paraphrase.
+// Collapse runaway English-anchor parenthesis chains like
+// `（sandbox mode）（Sandbox）（sandbox mode）**（sandbox mode）**` that the
+// anchor injection chain can produce when several passes each append a
+// canonical display without detecting the one inserted by an earlier layer.
+// Also collapses `****` (double bold delimiter) that the same sequence can
+// leave behind. Only fires when 3 or more adjacent parens share a case-
+// insensitive English form, so cases with a single anchor or two legitimately
+// distinct English tokens are left untouched.
+function collapseRunawayEnglishAnchorChain(text: string): string {
+  const collapseChain = (input: string): string =>
+    input.replace(
+      /(?:（([A-Za-z][A-Za-z0-9 .+/_\-]*)）(?:\s*\*{0,4}\s*)){3,}/gu,
+      (match) => {
+        const parens = [...match.matchAll(/（([A-Za-z][A-Za-z0-9 .+/_\-]*)）/gu)].map((m) =>
+          String(m[1]).trim()
+        );
+        if (parens.length < 3) {
+          return match;
+        }
+        const seen = new Set<string>();
+        const kept: string[] = [];
+        for (const paren of parens) {
+          const key = paren.toLowerCase();
+          if (seen.has(key)) {
+            continue;
+          }
+          seen.add(key);
+          kept.push(paren);
+        }
+        return kept.map((paren) => `（${paren}）`).join("");
+      }
+    );
+  // Separately collapse two adjacent parens that are case-only duplicates or
+  // case-insensitive whole-word family variants (e.g. `（Sandbox）`, `（sandbox
+  // mode）`). Runs at the post-normalizer stage so lines where anchor injection
+  // short-circuited earlier still get the cleanup.
+  const collapsePairs = (input: string): string =>
+    input.replace(
+      /（([A-Za-z][A-Za-z0-9 .+/_\-]*)）\s*（([A-Za-z][A-Za-z0-9 .+/_\-]*)）/gu,
+      (match, first, second) => {
+        const a = String(first).trim();
+        const b = String(second).trim();
+        if (!a || !b) return match;
+        const aLower = a.toLowerCase();
+        const bLower = b.toLowerCase();
+        if (aLower === bLower) {
+          return `（${b}）`;
+        }
+        if (
+          bLower.startsWith(`${aLower} `) ||
+          bLower.endsWith(` ${aLower}`) ||
+          aLower.startsWith(`${bLower} `) ||
+          aLower.endsWith(` ${bLower}`)
+        ) {
+          return aLower.length >= bLower.length ? `（${a}）` : `（${b}）`;
+        }
+        return match;
+      }
+    );
+  // Normalize accidental 4-star bold delimiters `****` to `**`; keep paired so
+  // we do not corrupt balanced bold sequences elsewhere in the line.
+  const collapseDoubleBold = (input: string): string => input.replace(/\*{4,}/g, "**");
+  // If a line has an odd number of `**` markers, anchor injection likely
+  // inserted `（anchor）` after a closed bold span and appended a stray `**`
+  // tail (e.g. `**拒绝**。（Deny）**。`). Trim the dangling tail so the
+  // protected_span_integrity audit no longer sees an unpaired `**`.
+  const stripDanglingBoldTail = (input: string): string =>
+    input
+      .split(/\r?\n/)
+      .map((line) => {
+        const boldCount = (line.match(/\*\*/g) ?? []).length;
+        if (boldCount === 0 || boldCount % 2 === 0) {
+          return line;
+        }
+        return line.replace(/\*\*([\p{P}\p{S}\s]*)$/u, "$1");
+      })
+      .join("\n");
+  return stripDanglingBoldTail(collapseDoubleBold(collapsePairs(collapseChain(text))));
+}
+
+function dedupDraftDuplicateTailBlocks(source: string, draft: string): string {
+  if (!draft || !source) {
+    return draft;
+  }
+  const splitBlocks = (text: string): string[] =>
+    text
+      .split(/\n{2,}/)
+      .map((block) => block.replace(/\s+$/, ""))
+      .filter((block) => block.trim().length > 0);
+  const sourceBlocks = splitBlocks(source);
+  const draftBlocks = splitBlocks(draft);
+  if (draftBlocks.length <= sourceBlocks.length) {
+    return draft;
+  }
+  const maxTrim = draftBlocks.length - sourceBlocks.length;
+  for (let tailLen = maxTrim; tailLen >= 1; tailLen -= 1) {
+    const tailStart = draftBlocks.length - tailLen;
+    if (tailStart < tailLen) {
+      continue;
+    }
+    const earlierStart = tailStart - tailLen;
+    let allSimilar = true;
+    for (let k = 0; k < tailLen; k += 1) {
+      if (!draftBlocksLookLikeDuplicate(draftBlocks[earlierStart + k] ?? "", draftBlocks[tailStart + k] ?? "")) {
+        allSimilar = false;
+        break;
+      }
+    }
+    if (allSimilar) {
+      return draftBlocks.slice(0, tailStart).join("\n\n");
+    }
+  }
+  return draft;
+}
+
+function draftBlocksLookLikeDuplicate(a: string, b: string): boolean {
+  const normalize = (s: string) =>
+    s
+      .replace(/\s+/gu, "")
+      .replace(/[（(][^）)]{0,60}[）)]/gu, "")
+      .replace(/[\p{P}\p{S}]/gu, "");
+  const na = normalize(a);
+  const nb = normalize(b);
+  if (!na || !nb) {
+    return false;
+  }
+  if (na === nb) {
+    return true;
+  }
+  const minLen = Math.min(na.length, nb.length);
+  const maxLen = Math.max(na.length, nb.length);
+  if (minLen < 12 || minLen / maxLen < 0.6) {
+    return false;
+  }
+  const sample = na.length <= nb.length ? na : nb;
+  const other = na.length <= nb.length ? nb : na;
+  let hits = 0;
+  for (let i = 0; i + 3 <= sample.length; i += 3) {
+    if (other.includes(sample.slice(i, i + 3))) {
+      hits += 1;
+    }
+  }
+  const ngrams = Math.max(1, Math.floor(sample.length / 3));
+  return hits / ngrams >= 0.55;
+}
+
+function isSegmentStillEchoingSource(draftedSegment: DraftedSegmentState): boolean {
+  if (draftedSegment.segment.kind !== "translatable") {
+    return false;
+  }
+  const source = draftedSegment.segment.source ?? "";
+  const body = draftedSegment.restoredBody ?? "";
+  const trimmedSource = source.trim();
+  const trimmedBody = body.trim();
+  if (!trimmedSource || trimmedSource !== trimmedBody) {
+    return false;
+  }
+  const strippedSource = trimmedSource
+    .replace(/```[\s\S]*?```/g, "")
+    .replace(/`[^`]*`/g, "")
+    .replace(/\bhttps?:\/\/\S+/gi, "")
+    .replace(/[\p{P}\p{S}\s]/gu, "");
+  const englishLetters = strippedSource.match(/[A-Za-z]/g);
+  if (!englishLetters || englishLetters.length < 15) {
+    return false;
+  }
+  if (/[\u4e00-\u9fff]/u.test(trimmedBody)) {
+    return false;
+  }
+  return true;
+}
+
+function injectUntranslatedSegmentMustFix(
+  draftedSegment: DraftedSegmentState,
+  audit: GateAudit
+): GateAudit {
+  if (!isSegmentStillEchoingSource(draftedSegment)) {
+    return audit;
+  }
+
+  const instruction =
+    "当前分段译文与原文完全一致，未完成翻译。请将其翻译为中文正文，保留 Markdown 结构与受保护片段。";
+  return {
+    ...audit,
+    must_fix: [instruction, ...(audit.must_fix ?? [])]
+  };
+}
+
 function buildStructuredSegmentAuditResult(
   state: TranslationRunState,
   draftedSegment: DraftedSegmentState,
@@ -3553,7 +3794,10 @@ function buildStructuredSegmentAuditResult(
 ): StateSegmentAuditResult {
   const chunkId = draftedSegment.segmentId.split("-segment-")[0] ?? `chunk-${draftedSegment.segment.index + 1}`;
   const slice = buildSegmentTaskSlice(state, chunkId, draftedSegment.segmentId);
-  const expandedAudit = expandMissingAnchorMustFixes(audit);
+  const guardedAudit = materializeFailedHardCheckProblems(
+    injectUntranslatedSegmentMustFix(draftedSegment, audit)
+  );
+  const expandedAudit = expandMissingAnchorMustFixes(guardedAudit);
   const filteredAudit = suppressCoveredAnchorMustFix(state, draftedSegment, slice, expandedAudit);
   const repairTasks = buildRepairTasksForSegment(state, draftedSegment.segmentId, {
     segment: { source: draftedSegment.segment.source },
@@ -3566,6 +3810,23 @@ function buildStructuredSegmentAuditResult(
     repairTasks,
     rawMustFix: filteredAudit.must_fix
   };
+}
+
+// Apply a structured audit to state and sync the filter-truth must_fix back onto
+// the raw `segmentAudit` so the outer repair loop agrees with the state engine on
+// what still needs work. Without this sync the while-loop reads the pre-filter
+// must_fix while the repair dispatch reads the post-filter pendingRepairs, which
+// causes the loop to spin without making progress whenever the filter suppresses
+// an instruction (e.g. anchor already covered) that the auditor still listed.
+function applyStructuredSegmentAuditAndSync(
+  state: TranslationRunState,
+  draftedSegment: DraftedSegmentState,
+  segmentAudit: GateAudit & { segment_index?: number }
+): void {
+  const structured = buildStructuredSegmentAuditResult(state, draftedSegment, segmentAudit);
+  applySegmentAudit(state, structured);
+  segmentAudit.must_fix = [...structured.rawMustFix];
+  segmentAudit.hard_checks = structured.hardChecks;
 }
 
 function buildRepairTasksForSegment(
@@ -3992,6 +4253,13 @@ function suppressCoveredAnchorMustFix(
   }
 
   const remainingMustFix = audit.must_fix.filter((instruction) => {
+    // materializeFailedHardCheckProblems injects structural-check failures as
+    // must_fix with a stable sentinel prefix ("硬性检查 "). Those are not
+    // anchor-related even if the underlying problem text happens to mention
+    // an anchor surface — never let anchor-coverage heuristics suppress them.
+    if (/^硬性检查\s/u.test(instruction.trim())) {
+      return true;
+    }
     const anchors = [...slice.requiredAnchors, ...slice.repeatAnchors, ...slice.establishedAnchors];
     const explicitLocationText = extractExplicitRepairLocationText(instruction);
     if (isAnalysisPlanTargetAlreadySatisfied(slice, draftedSegment, instruction, explicitLocationText)) {
@@ -5397,8 +5665,9 @@ async function translateProtectedSegment(
     );
   }
   threadId = draftResult.threadId;
+  const dedupedDraftText = dedupDraftDuplicateTailBlocks(protectedSource, draftResult.text);
   const normalizedDraftText = normalizeSegmentAnchorText(
-    stripAddedInlineCodeFromPlainPaths(protectedSource, draftResult.text),
+    stripAddedInlineCodeFromPlainPaths(protectedSource, dedupedDraftText),
     chunkPromptContext.stateSlice
   );
   const injectedDraftText = injectPlannedAnchorText(
@@ -5451,8 +5720,10 @@ async function translateProtectedSegment(
     protectedSource,
     restoredCodeLikeDraftText
   );
-  const normalizedDraftSurfaceText = normalizeMalformedInlineEnglishEmphasis(
-    normalizeMarkdownLinkLabelWhitespace(restoredExampleTokenDraftText)
+  const normalizedDraftSurfaceText = collapseRunawayEnglishAnchorChain(
+    normalizeMalformedInlineEnglishEmphasis(
+      normalizeMarkdownLinkLabelWhitespace(restoredExampleTokenDraftText)
+    )
   );
   const canonicalProtectedBody = reprotectMarkdownSpans(normalizedDraftSurfaceText, combinedSpans);
   const restoredBody = restoreMarkdownSpans(canonicalProtectedBody, combinedSpans);
@@ -5754,12 +6025,43 @@ function getDraftContractViolation(source: string, text: string): string | null 
     return source.trim() ? "draft returned empty content" : null;
   }
 
+  const trimmedSource = source.trim();
+  if (trimmed === trimmedSource) {
+    const strippedSource = trimmedSource
+      .replace(/```[\s\S]*?```/g, "")
+      .replace(/`[^`]*`/g, "")
+      .replace(/\bhttps?:\/\/\S+/gi, "")
+      .replace(/[\p{P}\p{S}\s]/gu, "");
+    const englishLetters = strippedSource.match(/[A-Za-z]/g);
+    if (englishLetters && englishLetters.length >= 15 && !/[\u4e00-\u9fff]/u.test(trimmed)) {
+      return "draft echoed the source verbatim instead of translating";
+    }
+  }
+
   if (
     /file:\/\//i.test(trimmed) ||
     /\[[^\]]+\.md\]\(file:\/\//i.test(trimmed) ||
     /(源文件|对应段落|当前块|硬性项|无需修正|没有发现需要|已核对|已复核|任务已完成|验证证据|当前分支|工作区|未提交改动|git status|后续：|继续执行|继续补充|OMX|Ralph|hook_prompt|hook_run_id|stop:\d+:|::git-|::archive|thread\/resume)/u.test(trimmed)
   ) {
     return "draft returned meta/audit text";
+  }
+
+  // Catch the "lazy LLM" pattern where a list item is replaced by ellipsis
+  // ("- ……" or "- ...") but the source list item is real content. The audit
+  // catches this too but repairing from a missing item is harder than rejecting
+  // it at the draft contract.
+  const ellipsisLineInBody = trimmed.split(/\r?\n/).some((line) => {
+    const stripped = line.replace(/^\s*(?:[-*+]|\d+[.)])\s+/, "").trim();
+    return /^(?:…+|\.{3,})$/.test(stripped);
+  });
+  if (ellipsisLineInBody) {
+    const sourceHasEllipsisItem = source.split(/\r?\n/).some((line) => {
+      const stripped = line.replace(/^\s*(?:[-*+]|\d+[.)])\s+/, "").trim();
+      return /^(?:…+|\.{3,})$/.test(stripped);
+    });
+    if (!sourceHasEllipsisItem) {
+      return "draft replaced a list item with ellipsis instead of translating it";
+    }
   }
 
   if (looksLikeStructuredOutputDebris(source, trimmed)) {
@@ -5992,8 +6294,12 @@ async function repairDraftedSegment(
     if (repairResult.threadId) {
       draftedSegment.threadId = repairResult.threadId;
     }
+    const dedupedRepairText = dedupDraftDuplicateTailBlocks(
+      draftedSegment.protectedSource,
+      repairResult.text
+    );
     const normalizedRepairText = normalizeSegmentAnchorText(
-      stripAddedInlineCodeFromPlainPaths(draftedSegment.protectedSource, repairResult.text),
+      stripAddedInlineCodeFromPlainPaths(draftedSegment.protectedSource, dedupedRepairText),
       buildSegmentTaskSlice(context.state, context.chunkId, draftedSegment.segmentId)
     );
     const injectedRepairText = injectPlannedAnchorText(
@@ -6051,8 +6357,10 @@ async function repairDraftedSegment(
       draftedSegment.protectedSource,
       restoredCodeLikeRepairText
     );
-    const normalizedRepairSurfaceText = normalizeMalformedInlineEnglishEmphasis(
-      normalizeMarkdownLinkLabelWhitespace(restoredExampleTokenRepairText)
+    const normalizedRepairSurfaceText = collapseRunawayEnglishAnchorChain(
+      normalizeMalformedInlineEnglishEmphasis(
+        normalizeMarkdownLinkLabelWhitespace(restoredExampleTokenRepairText)
+      )
     );
     draftedSegment.protectedBody = reprotectMarkdownSpans(
       normalizedRepairSurfaceText,
@@ -6583,10 +6891,7 @@ async function runBundledGateAudit(
           `Chunk ${chunkPromptContext.chunkIndex}/${plan.chunks.length}${chunkLabel}: unknown segment ${segmentAudit.segment_index} in per-segment audit.`
         );
       }
-      applySegmentAudit(
-        context.state,
-        buildStructuredSegmentAuditResult(context.state, draftedSegment, segmentAudit)
-      );
+      applyStructuredSegmentAuditAndSync(context.state, draftedSegment, segmentAudit);
     }
     return bundledAudit;
   }
@@ -6647,10 +6952,7 @@ async function runBundledGateAudit(
             `Chunk ${chunkPromptContext.chunkIndex}/${plan.chunks.length}${chunkLabel}: unknown segment ${segmentAudit.segment_index} in bundled audit.`
           );
         }
-        applySegmentAudit(
-          context.state,
-          buildStructuredSegmentAuditResult(context.state, draftedSegment, segmentAudit)
-        );
+        applyStructuredSegmentAuditAndSync(context.state, draftedSegment, segmentAudit);
       }
       return bundledAudit;
     }
@@ -6690,10 +6992,7 @@ async function runBundledGateAudit(
         `Chunk ${chunkPromptContext.chunkIndex}/${plan.chunks.length}${chunkLabel}: unknown segment ${segmentAudit.segment_index} in bundled audit.`
       );
     }
-    applySegmentAudit(
-      context.state,
-      buildStructuredSegmentAuditResult(context.state, draftedSegment, segmentAudit)
-    );
+    applyStructuredSegmentAuditAndSync(context.state, draftedSegment, segmentAudit);
   }
   return bundledAudit;
 }
@@ -6789,10 +7088,7 @@ async function runFallbackSegmentAudits(
 
     const audit = parseGateAudit(auditResult.text);
     validateStructuralGateChecks(audit);
-    applySegmentAudit(
-      context.state,
-      buildStructuredSegmentAuditResult(context.state, draftedSegment, audit)
-    );
+    applyStructuredSegmentAuditAndSync(context.state, draftedSegment, audit);
     segments.push({
       segment_index: draftedSegment.segment.index + 1,
       ...audit

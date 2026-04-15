@@ -1399,7 +1399,40 @@ function normalizeSingleAnchor(
 
 function collapseRepeatedEnglishParentheses(text: string, english: string): string {
   const escapedEnglish = escapeRegExp(english);
-  return text.replace(new RegExp(`（${escapedEnglish}）\\s*（${escapedEnglish}）`, "g"), `（${english}）`);
+  const collapsedExact = text.replace(
+    new RegExp(`（${escapedEnglish}）\\s*（${escapedEnglish}）`, "g"),
+    `（${english}）`
+  );
+  // Also collapse adjacent English-only parens whose contents differ only in
+  // letter case (e.g. `（Prompt injection attacks）（Prompt Injection Attacks）`
+  // produced when heading-recovery appends the source Title Case while anchor
+  // injection has already placed the canonical lowercase form). Keep the
+  // latter paren, since it usually matches the source heading surface shape.
+  return collapsedExact.replace(
+    /（([A-Za-z][A-Za-z0-9 .+/_\-]*)）\s*（([A-Za-z][A-Za-z0-9 .+/_\-]*)）/gu,
+    (match, first, second) => {
+      const a = String(first).trim();
+      const b = String(second).trim();
+      if (!a || !b) return match;
+      const aLower = a.toLowerCase();
+      const bLower = b.toLowerCase();
+      if (aLower === bLower) {
+        return `（${b}）`;
+      }
+      // Family-variant collapse: when one paren is a whole-word case-insensitive
+      // prefix / suffix of the other (e.g. `（Sandbox）` vs
+      // `（sandbox mode）`), keep the longer surface form and drop the other.
+      if (
+        bLower.startsWith(`${aLower} `) ||
+        bLower.endsWith(` ${aLower}`) ||
+        aLower.startsWith(`${bLower} `) ||
+        aLower.endsWith(` ${bLower}`)
+      ) {
+        return aLower.length >= bLower.length ? `（${a}）` : `（${b}）`;
+      }
+      return match;
+    }
+  );
 }
 
 function normalizeMixedChinesePrimaryParentheses(
@@ -1457,10 +1490,46 @@ function normalizeChinesePrimaryInlineExplanation(
   );
 }
 
+function lineAlreadyHasFamilyVariantAnchorParen(text: string, english: string): string | null {
+  const target = english.trim().toLowerCase();
+  if (!target) {
+    return null;
+  }
+  for (const match of text.matchAll(/（([A-Za-z][A-Za-z0-9 .+/_\-]*)）/gu)) {
+    const raw = String(match[1]).trim();
+    if (!raw) {
+      continue;
+    }
+    const lower = raw.toLowerCase();
+    if (lower === target) {
+      return raw;
+    }
+    if (
+      target.startsWith(`${lower} `) ||
+      target.endsWith(` ${lower}`) ||
+      lower.startsWith(`${target} `) ||
+      lower.endsWith(` ${target}`)
+    ) {
+      return raw;
+    }
+  }
+  return null;
+}
+
 function injectAnchorIntoLine(text: string, anchor: PromptAnchor): string {
   const display = resolveAnchorDisplay(anchor);
 
   if (!display.english || display.mode === "english-only") {
+    return text;
+  }
+
+  // Phase 0 anti-runaway guard: if the line already carries an English paren
+  // whose content is a case-insensitive whole-word family variant of this
+  // anchor (same tokens, or one is a whole-word prefix / suffix of the other),
+  // do NOT inject another anchor paren. This is the deterministic
+  // short-circuit that prevents the `（sandbox）（sandbox mode）（Sandbox）`
+  // chain that every downstream collapser is otherwise asked to clean up.
+  if (lineAlreadyHasFamilyVariantAnchorParen(text, display.english)) {
     return text;
   }
 
@@ -2272,9 +2341,45 @@ function replaceExplicitRepairAliasText(
 }
 
 function normalizeExplicitRepairReplacementSpacing(text: string): string {
-  return text
+  const baseNormalized = text
     .replace(/（([^）\n]+)）(?:（\1）)+/gu, "（$1）")
     .replace(/）\s+(?=[\u4e00-\u9fff])/gu, "）");
+  return baseNormalized
+    .split(/\r?\n/)
+    .map((line) => mergeEnglishAnchorWithAdjacentChineseParenInLine(line))
+    .join("\n");
+}
+
+// Collapse `（English anchor）（中文...）` introduced by anchor injection when the
+// original text already carried a Chinese parenthetical (typically the
+// translated explanation of the source `(English ...)` surface). Leaving both
+// parens adjacent reads as a duplicate anchor; merging with a comma preserves
+// both the first-mention anchor and the translated explanation.
+//
+// Only fires on list-item lines (unordered or ordered) because that is where
+// the draft pipeline has produced the duplicate-anchor pattern in smoke runs.
+// Heading content, blockquotes, and plain paragraphs are left untouched so we
+// do not fold legitimately separate trailing parentheticals on heading lines
+// like `## 文件系统权限（Filesystem Permissions）（关键）`, which existing
+// tests expect to stay as two parens.
+function mergeEnglishAnchorWithAdjacentChineseParenInLine(line: string): string {
+  if (!/^\s*(?:[-*+]|\d+[.)])\s+/.test(line)) {
+    return line;
+  }
+  return line.replace(
+    /（([A-Za-z][A-Za-z0-9 .+/_\-]*)）（([^（）\n]+)）/gu,
+    (match, englishInner, chineseInner) => {
+      const english = String(englishInner).trim();
+      const chinese = String(chineseInner).trim();
+      if (!english || !chinese) {
+        return match;
+      }
+      if (!/[\u4e00-\u9fff]/u.test(chinese)) {
+        return match;
+      }
+      return `（${english}，${chinese}）`;
+    }
+  );
 }
 
 function normalizeRepeatedEnglishParenthesesWithLocalHints(text: string): string {
