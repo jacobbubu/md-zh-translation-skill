@@ -1399,7 +1399,25 @@ function normalizeSingleAnchor(
 
 function collapseRepeatedEnglishParentheses(text: string, english: string): string {
   const escapedEnglish = escapeRegExp(english);
-  return text.replace(new RegExp(`（${escapedEnglish}）\\s*（${escapedEnglish}）`, "g"), `（${english}）`);
+  const collapsedExact = text.replace(
+    new RegExp(`（${escapedEnglish}）\\s*（${escapedEnglish}）`, "g"),
+    `（${english}）`
+  );
+  // Also collapse adjacent English-only parens whose contents differ only in
+  // letter case (e.g. `（Prompt injection attacks）（Prompt Injection Attacks）`
+  // produced when heading-recovery appends the source Title Case while anchor
+  // injection has already placed the canonical lowercase form). Keep the
+  // latter paren, since it usually matches the source heading surface shape.
+  return collapsedExact.replace(
+    /（([A-Za-z][A-Za-z0-9 .+/_\-]*)）\s*（([A-Za-z][A-Za-z0-9 .+/_\-]*)）/gu,
+    (match, first, second) => {
+      const a = String(first).trim();
+      const b = String(second).trim();
+      if (!a || !b) return match;
+      if (a.toLowerCase() !== b.toLowerCase()) return match;
+      return `（${b}）`;
+    }
+  );
 }
 
 function normalizeMixedChinesePrimaryParentheses(
