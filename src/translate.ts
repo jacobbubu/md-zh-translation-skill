@@ -3599,6 +3599,44 @@ function materializeFailedHardCheckProblems(audit: GateAudit): GateAudit {
 // near-duplicate of the preceding window of the same length. When both hold,
 // trim the tail. Block similarity is measured as normalized-char overlap to
 // accommodate LLM paraphrase.
+// Collapse runaway English-anchor parenthesis chains like
+// `（sandbox mode）（Sandbox）（sandbox mode）**（sandbox mode）**` that the
+// anchor injection chain can produce when several passes each append a
+// canonical display without detecting the one inserted by an earlier layer.
+// Also collapses `****` (double bold delimiter) that the same sequence can
+// leave behind. Only fires when 3 or more adjacent parens share a case-
+// insensitive English form, so cases with a single anchor or two legitimately
+// distinct English tokens are left untouched.
+function collapseRunawayEnglishAnchorChain(text: string): string {
+  const collapseChain = (input: string): string =>
+    input.replace(
+      /(?:（([A-Za-z][A-Za-z0-9 .+/_\-]*)）(?:\s*\*{0,4}\s*)){3,}/gu,
+      (match) => {
+        const parens = [...match.matchAll(/（([A-Za-z][A-Za-z0-9 .+/_\-]*)）/gu)].map((m) =>
+          String(m[1]).trim()
+        );
+        if (parens.length < 3) {
+          return match;
+        }
+        const seen = new Set<string>();
+        const kept: string[] = [];
+        for (const paren of parens) {
+          const key = paren.toLowerCase();
+          if (seen.has(key)) {
+            continue;
+          }
+          seen.add(key);
+          kept.push(paren);
+        }
+        return kept.map((paren) => `（${paren}）`).join("");
+      }
+    );
+  // Normalize accidental 4-star bold delimiters `****` to `**`; keep paired so
+  // we do not corrupt balanced bold sequences elsewhere in the line.
+  const collapseDoubleBold = (input: string): string => input.replace(/\*{4,}/g, "**");
+  return collapseDoubleBold(collapseChain(text));
+}
+
 function dedupDraftDuplicateTailBlocks(source: string, draft: string): string {
   if (!draft || !source) {
     return draft;
@@ -5633,8 +5671,10 @@ async function translateProtectedSegment(
     protectedSource,
     restoredCodeLikeDraftText
   );
-  const normalizedDraftSurfaceText = normalizeMalformedInlineEnglishEmphasis(
-    normalizeMarkdownLinkLabelWhitespace(restoredExampleTokenDraftText)
+  const normalizedDraftSurfaceText = collapseRunawayEnglishAnchorChain(
+    normalizeMalformedInlineEnglishEmphasis(
+      normalizeMarkdownLinkLabelWhitespace(restoredExampleTokenDraftText)
+    )
   );
   const canonicalProtectedBody = reprotectMarkdownSpans(normalizedDraftSurfaceText, combinedSpans);
   const restoredBody = restoreMarkdownSpans(canonicalProtectedBody, combinedSpans);
@@ -6268,8 +6308,10 @@ async function repairDraftedSegment(
       draftedSegment.protectedSource,
       restoredCodeLikeRepairText
     );
-    const normalizedRepairSurfaceText = normalizeMalformedInlineEnglishEmphasis(
-      normalizeMarkdownLinkLabelWhitespace(restoredExampleTokenRepairText)
+    const normalizedRepairSurfaceText = collapseRunawayEnglishAnchorChain(
+      normalizeMalformedInlineEnglishEmphasis(
+        normalizeMarkdownLinkLabelWhitespace(restoredExampleTokenRepairText)
+      )
     );
     draftedSegment.protectedBody = reprotectMarkdownSpans(
       normalizedRepairSurfaceText,
