@@ -5699,7 +5699,10 @@ async function translateProtectedSegment(
       : null;
   let lastDraftViolation: string | null = null;
   if (structuralSegmentDraft?.mode === "json-blocks" && structuralSegmentDraft.blockCount) {
-    const jsonDraftResult = await executeJsonBlockDraft(structuralSegmentDraft.value, structuralSegmentDraft.blockCount);
+    const jsonDraftResult = await executeJsonBlockDraft(
+      withJsonBlockDraftChunkContext(structuralSegmentDraft.value, chunkPromptContext),
+      structuralSegmentDraft.blockCount
+    );
     draftResult = {
       ...jsonDraftResult,
       text: stripControlPlaneContamination(reconstructJsonBlockDraft(protectedSource, jsonDraftResult.text))
@@ -5713,7 +5716,7 @@ async function translateProtectedSegment(
         `Chunk ${chunkPromptContext.chunkIndex}/${plan.chunks.length}${chunkLabel}: ${initialJsonViolation}; retrying with a stricter JSON-block draft before text rescue.`
       );
       const strictJsonDraftResult = await executeJsonBlockDraft(
-        buildStrictJsonBlockDraftPrompt(protectedSource),
+        withJsonBlockDraftChunkContext(buildStrictJsonBlockDraftPrompt(protectedSource), chunkPromptContext),
         structuralSegmentDraft.blockCount
       );
       draftResult = {
@@ -7924,6 +7927,20 @@ function withChunkContext(prompt: string, context: ChunkPromptContext): string {
 
 function withDraftChunkContext(prompt: string, context: ChunkPromptContext): string {
   return withChunkContextAt(prompt, context, "【英文原文】", {
+    includeStateSliceJson: false,
+    includePendingRepairs: false
+  });
+}
+
+function withJsonBlockDraftChunkContext(prompt: string, context: ChunkPromptContext): string {
+  // JSON blocks prompt uses `【按块展开的英文原文】` as its marker instead of
+  // the plain `【英文原文】`; reuse the same chunk context (anchor glossary,
+  // heading path, special notes, etc.) so the LLM sees preferred_chinese_hint
+  // and display policy for every required anchor and does not have to guess
+  // terminology it hasn't been told. Without this, json-blocks lane would
+  // freelance on terms like `Seatbelt` or `bubblewrap` even when the state
+  // layer already has the canonical chineseHint.
+  return withChunkContextAt(prompt, context, "【按块展开的英文原文】", {
     includeStateSliceJson: false,
     includePendingRepairs: false
   });
