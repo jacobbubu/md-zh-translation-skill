@@ -3677,7 +3677,25 @@ function collapseRunawayEnglishAnchorChain(text: string): string {
       })
       .join("\n");
   return stripDanglingBoldTail(
-    collapseDoubleBold(collapsePairs(collapseChain(collapseCaseVariantSlashInParens(text))))
+    collapseDoubleBold(
+      collapsePairs(
+        collapseChain(
+          collapseCaseVariantSlashInParens(collapseAdjacentDuplicateEnglishBeforeChineseParen(text))
+        )
+      )
+    )
+  );
+}
+
+// Collapse `Seatbelt Seatbelt（...）` style adjacent-duplicate English word
+// immediately before a Chinese canonical paren. LLM occasionally writes the
+// source phrase AND the anchor canonical form side by side. Safely narrow:
+// only when the exact same English token appears twice separated by a single
+// whitespace and is immediately followed by a Chinese `（...）`.
+function collapseAdjacentDuplicateEnglishBeforeChineseParen(text: string): string {
+  return text.replace(
+    /\b([A-Za-z][A-Za-z0-9.+_-]*)\s+\1(\s*（)/gu,
+    (_match, word, tail) => `${word}${tail}`
   );
 }
 
