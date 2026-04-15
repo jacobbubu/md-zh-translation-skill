@@ -1623,7 +1623,27 @@ function injectAnchorIntoLine(
     return normalizeExplicitRepairReplacementSpacing(text);
   }
 
-  if (text.includes(display.canonical) || containsWholePhrase(text, display.english)) {
+  if (text.includes(display.canonical)) {
+    return text;
+  }
+
+  if (containsWholePhrase(text, display.english)) {
+    // Bare English surface is present but not yet in canonical bilingual form.
+    // For chinese-primary anchors we still owe the first-mention bilingual; if
+    // the bare English sits inside a surrounding `（...）` list (common pattern
+    // for "(npm registry, GitHub, your APIs)" translations), upgrade it to
+    // `chineseDisplay（English）` in place so audit sees the anchor even at
+    // the cost of a nested pair of Chinese parens. Other surface contexts are
+    // left alone to avoid double-insertion elsewhere.
+    if (
+      display.mode === "chinese-primary" &&
+      display.chineseDisplay &&
+      englishIsInsideChineseParen(text, display.english)
+    ) {
+      return normalizeExplicitRepairReplacementSpacing(
+        replaceWholePhraseOnce(text, display.english, display.canonical)
+      );
+    }
     return text;
   }
 
@@ -1636,6 +1656,25 @@ function injectAnchorIntoLine(
   }
 
   return normalizeExplicitRepairReplacementSpacing(text);
+}
+
+function englishIsInsideChineseParen(text: string, english: string): boolean {
+  const idx = text.toLowerCase().indexOf(english.toLowerCase());
+  if (idx < 0) {
+    return false;
+  }
+  // Walk left until we see `（` or end-of-string / `）`. If `（` comes first,
+  // the english surface sits inside a Chinese parenthetical group.
+  for (let i = idx - 1; i >= 0; i -= 1) {
+    const ch = text[i];
+    if (ch === "）") {
+      return false;
+    }
+    if (ch === "（") {
+      return true;
+    }
+  }
+  return false;
 }
 
 function buildChineseTailVariants(chineseDisplay: string): string[] {

@@ -1799,6 +1799,7 @@ test("buildSegmentTaskSlice generates an ownerMap covering anchors and plans (#2
         headingIndex: 1,
         sourceHeading: "Claude Code",
         strategy: "source-template",
+        targetHeading: "Claude Code",
         english: "Claude Code",
         chineseHint: "Claude Code"
       }
@@ -1811,5 +1812,6 @@ test("buildSegmentTaskSlice generates an ownerMap covering anchors and plans (#2
 
   assert.ok(map.some((entry) => entry.ownerType === "protected" && entry.planId === "span-1"));
   assert.ok(map.some((entry) => entry.ownerType === "heading" && entry.sourceText === "Claude Code"));
-  assert.ok(map.some((entry) => entry.ownerType === "mention" && entry.sourceText === "Claude Code"));
+  // `Claude Code` 由 headingPlan 接管（headingPlanGovernedAnchorIds），不再
+  // 作为 mention owner 重复登记——这是 P1 reconciliation 的期望行为。
 });

@@ -859,6 +859,14 @@ function buildOwnerMap(input: {
   }
 
   for (const plan of input.headingPlans) {
+    // Only plans that actually produce output (have a resolved target) act as
+    // structural owners. Plans without a concrete target just mark that
+    // analysis knew about the span; they should not short-circuit mention-
+    // layer injection, otherwise a missing targetText silently blocks first-
+    // mention anchoring (see #3: 英文括号列表首现场景).
+    if (!plan.targetHeading?.trim()) {
+      continue;
+    }
     entries.push({
       ownerType: "heading",
       sourceText: plan.sourceHeading,
@@ -868,6 +876,9 @@ function buildOwnerMap(input: {
   }
 
   for (const plan of input.blockPlans) {
+    if (!plan.targetText?.trim()) {
+      continue;
+    }
     entries.push({
       ownerType: "block",
       ...(plan.sourceText ? { sourceText: plan.sourceText } : {}),
@@ -876,6 +887,9 @@ function buildOwnerMap(input: {
   }
 
   for (const plan of input.emphasisPlans) {
+    if (!plan.targetText?.trim()) {
+      continue;
+    }
     entries.push({
       ownerType: "sentence",
       sourceText: plan.sourceText,
