@@ -1,4 +1,4 @@
-import type { PromptSlice } from "./translation-state.js";
+import type { OwnerMap, PromptSlice } from "./translation-state.js";
 
 export type PromptAnchor = PromptSlice["requiredAnchors"][number];
 type AnchorLike = Pick<PromptAnchor, "english" | "chineseHint" | "displayPolicy" | "category"> & {
@@ -460,7 +460,7 @@ export function injectPlannedAnchorText(
         continue;
       }
 
-      const injectedLine = injectAnchorIntoLine(translatedLine, anchor);
+      const injectedLine = injectAnchorIntoLine(translatedLine, anchor, slice.ownerMap);
       if (injectedLine !== translatedLine) {
         translatedLine = injectedLine;
         changed = true;
@@ -830,7 +830,7 @@ export function normalizeExplicitRepairAnchorText(
       }
 
       if (matchingAnchor) {
-        const normalizedLine = injectAnchorIntoLine(translatedLine, matchingAnchor);
+        const normalizedLine = injectAnchorIntoLine(translatedLine, matchingAnchor, slice.ownerMap);
         if (normalizedLine !== translatedLine) {
           translatedLine = normalizedLine;
           changed = true;
@@ -1490,6 +1490,34 @@ function normalizeChinesePrimaryInlineExplanation(
   );
 }
 
+function anchorGovernedByStructuralOwner(ownerMap: OwnerMap, english: string): boolean {
+  const target = english.trim().toLowerCase();
+  if (!target) {
+    return false;
+  }
+  for (const entry of ownerMap) {
+    if (entry.ownerType !== "heading" && entry.ownerType !== "block" && entry.ownerType !== "sentence") {
+      continue;
+    }
+    const source = entry.sourceText?.trim().toLowerCase();
+    if (!source) {
+      continue;
+    }
+    if (source === target) {
+      return true;
+    }
+    // Heading / block / sentence plans "own" an anchor when their source text
+    // contains the anchor english as a whole-word phrase. Use space-padded
+    // boundaries so `npm` inside `npm registry` matches but `api` inside
+    // `api-server` does not.
+    const padded = ` ${source} `;
+    if (padded.includes(` ${target} `)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 function lineAlreadyHasFamilyVariantAnchorParen(text: string, english: string): string | null {
   const target = english.trim().toLowerCase();
   if (!target) {
@@ -1516,10 +1544,24 @@ function lineAlreadyHasFamilyVariantAnchorParen(text: string, english: string): 
   return null;
 }
 
-function injectAnchorIntoLine(text: string, anchor: PromptAnchor): string {
+function injectAnchorIntoLine(
+  text: string,
+  anchor: PromptAnchor,
+  ownerMap?: OwnerMap
+): string {
   const display = resolveAnchorDisplay(anchor);
 
   if (!display.english || display.mode === "english-only") {
+    return text;
+  }
+
+  // Phase 1 owner-map short-circuit: when the analysis layer already assigned
+  // this anchor's surface to a structural owner (heading / block / sentence
+  // plan), the mention-layer injector must stop. Without this, heading and
+  // block plans insert their canonical display and this function then stacks
+  // a second paren on top, producing the runaway chain we spent many guards
+  // cleaning up after the fact.
+  if (ownerMap && anchorGovernedByStructuralOwner(ownerMap, display.english)) {
     return text;
   }
 
