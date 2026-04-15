@@ -3591,6 +3591,80 @@ function materializeFailedHardCheckProblems(audit: GateAudit): GateAudit {
 // a fixed non-translatable block); source trimmed equals body trimmed; after
 // stripping fenced/inline code and URLs the source has at least 15 English
 // letters; the body contains zero CJK characters.
+// When the draft / repair LLM visibly "retries" by appending a re-run of
+// earlier blocks, the chunk ends up with its bullets or paragraphs duplicated
+// back-to-back. Detect this pattern deterministically so the downstream
+// normalizers see a cleanly-sized body: require (a) draft block count to
+// exceed source block count, and (b) the longest possible tail to be a
+// near-duplicate of the preceding window of the same length. When both hold,
+// trim the tail. Block similarity is measured as normalized-char overlap to
+// accommodate LLM paraphrase.
+function dedupDraftDuplicateTailBlocks(source: string, draft: string): string {
+  if (!draft || !source) {
+    return draft;
+  }
+  const splitBlocks = (text: string): string[] =>
+    text
+      .split(/\n{2,}/)
+      .map((block) => block.replace(/\s+$/, ""))
+      .filter((block) => block.trim().length > 0);
+  const sourceBlocks = splitBlocks(source);
+  const draftBlocks = splitBlocks(draft);
+  if (draftBlocks.length <= sourceBlocks.length) {
+    return draft;
+  }
+  const maxTrim = draftBlocks.length - sourceBlocks.length;
+  for (let tailLen = maxTrim; tailLen >= 1; tailLen -= 1) {
+    const tailStart = draftBlocks.length - tailLen;
+    if (tailStart < tailLen) {
+      continue;
+    }
+    const earlierStart = tailStart - tailLen;
+    let allSimilar = true;
+    for (let k = 0; k < tailLen; k += 1) {
+      if (!draftBlocksLookLikeDuplicate(draftBlocks[earlierStart + k] ?? "", draftBlocks[tailStart + k] ?? "")) {
+        allSimilar = false;
+        break;
+      }
+    }
+    if (allSimilar) {
+      return draftBlocks.slice(0, tailStart).join("\n\n");
+    }
+  }
+  return draft;
+}
+
+function draftBlocksLookLikeDuplicate(a: string, b: string): boolean {
+  const normalize = (s: string) =>
+    s
+      .replace(/\s+/gu, "")
+      .replace(/[（(][^）)]{0,60}[）)]/gu, "")
+      .replace(/[\p{P}\p{S}]/gu, "");
+  const na = normalize(a);
+  const nb = normalize(b);
+  if (!na || !nb) {
+    return false;
+  }
+  if (na === nb) {
+    return true;
+  }
+  const minLen = Math.min(na.length, nb.length);
+  const maxLen = Math.max(na.length, nb.length);
+  if (minLen < 12 || minLen / maxLen < 0.6) {
+    return false;
+  }
+  const sample = na.length <= nb.length ? na : nb;
+  const other = na.length <= nb.length ? nb : na;
+  let hits = 0;
+  for (let i = 0; i + 3 <= sample.length; i += 3) {
+    if (other.includes(sample.slice(i, i + 3))) {
+      hits += 1;
+    }
+  }
+  const ngrams = Math.max(1, Math.floor(sample.length / 3));
+  return hits / ngrams >= 0.55;
+}
+
 function isSegmentStillEchoingSource(draftedSegment: DraftedSegmentState): boolean {
   if (draftedSegment.segment.kind !== "translatable") {
     return false;
@@ -5504,8 +5578,9 @@ async function translateProtectedSegment(
     );
   }
   threadId = draftResult.threadId;
+  const dedupedDraftText = dedupDraftDuplicateTailBlocks(protectedSource, draftResult.text);
   const normalizedDraftText = normalizeSegmentAnchorText(
-    stripAddedInlineCodeFromPlainPaths(protectedSource, draftResult.text),
+    stripAddedInlineCodeFromPlainPaths(protectedSource, dedupedDraftText),
     chunkPromptContext.stateSlice
   );
   const injectedDraftText = injectPlannedAnchorText(
@@ -6112,8 +6187,12 @@ async function repairDraftedSegment(
     if (repairResult.threadId) {
       draftedSegment.threadId = repairResult.threadId;
     }
+    const dedupedRepairText = dedupDraftDuplicateTailBlocks(
+      draftedSegment.protectedSource,
+      repairResult.text
+    );
     const normalizedRepairText = normalizeSegmentAnchorText(
-      stripAddedInlineCodeFromPlainPaths(draftedSegment.protectedSource, repairResult.text),
+      stripAddedInlineCodeFromPlainPaths(draftedSegment.protectedSource, dedupedRepairText),
       buildSegmentTaskSlice(context.state, context.chunkId, draftedSegment.segmentId)
     );
     const injectedRepairText = injectPlannedAnchorText(
