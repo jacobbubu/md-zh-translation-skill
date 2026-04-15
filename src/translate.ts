@@ -3730,7 +3730,7 @@ function draftBlocksLookLikeDuplicate(a: string, b: string): boolean {
   }
   const minLen = Math.min(na.length, nb.length);
   const maxLen = Math.max(na.length, nb.length);
-  if (minLen < 12 || minLen / maxLen < 0.6) {
+  if (minLen < 8 || minLen / maxLen < 0.6) {
     return false;
   }
   const sample = na.length <= nb.length ? na : nb;
@@ -3743,6 +3743,67 @@ function draftBlocksLookLikeDuplicate(a: string, b: string): boolean {
   }
   const ngrams = Math.max(1, Math.floor(sample.length / 3));
   return hits / ngrams >= 0.55;
+}
+
+// Issue #9: draft LLM sometimes appends a full "retry" run of the latter
+// sentences to the end of a block — all inside the same line / blockquote,
+// so `dedupDraftDuplicateTailBlocks` (which splits on blank lines) never
+// sees the duplicate. Split by sentence-ending punctuation, and if the
+// translated count exceeds the source count, trim tail sentences that
+// near-duplicate an earlier run of the same length.
+function dedupDraftDuplicateTailSentences(source: string, draft: string): string {
+  if (!draft || !source) {
+    return draft;
+  }
+  const sourceSentences = splitIntoSentencesForDedup(source);
+  const draftSentences = splitIntoSentencesForDedup(draft);
+  if (draftSentences.length <= sourceSentences.length) {
+    return draft;
+  }
+  const maxTrim = draftSentences.length - sourceSentences.length;
+  for (let tailLen = maxTrim; tailLen >= 1; tailLen -= 1) {
+    const tailStart = draftSentences.length - tailLen;
+    if (tailStart < tailLen) {
+      continue;
+    }
+    const earlierStart = tailStart - tailLen;
+    let allSimilar = true;
+    for (let k = 0; k < tailLen; k += 1) {
+      if (
+        !draftBlocksLookLikeDuplicate(
+          draftSentences[earlierStart + k] ?? "",
+          draftSentences[tailStart + k] ?? ""
+        )
+      ) {
+        allSimilar = false;
+        break;
+      }
+    }
+    if (allSimilar) {
+      // Rejoin kept sentences. Each sentence already carries its trailing
+      // punctuation from splitIntoSentencesForDedup; no separator needed.
+      return draftSentences.slice(0, tailStart).join("").replace(/\s+$/u, "");
+    }
+  }
+  return draft;
+}
+
+function splitIntoSentencesForDedup(text: string): string[] {
+  const sentences: string[] = [];
+  let buffer = "";
+  for (const ch of text) {
+    buffer += ch;
+    if (ch === "。" || ch === "！" || ch === "？" || ch === "." || ch === "!" || ch === "?") {
+      sentences.push(buffer);
+      buffer = "";
+    }
+  }
+  if (buffer.trim().length > 0) {
+    sentences.push(buffer);
+  }
+  return sentences
+    .map((sentence) => sentence.trim())
+    .filter((sentence) => sentence.length > 0);
 }
 
 function isSegmentStillEchoingSource(draftedSegment: DraftedSegmentState): boolean {
@@ -5665,7 +5726,10 @@ async function translateProtectedSegment(
     );
   }
   threadId = draftResult.threadId;
-  const dedupedDraftText = dedupDraftDuplicateTailBlocks(protectedSource, draftResult.text);
+  const dedupedDraftText = dedupDraftDuplicateTailSentences(
+    protectedSource,
+    dedupDraftDuplicateTailBlocks(protectedSource, draftResult.text)
+  );
   const normalizedDraftText = normalizeSegmentAnchorText(
     stripAddedInlineCodeFromPlainPaths(protectedSource, dedupedDraftText),
     chunkPromptContext.stateSlice
@@ -6294,9 +6358,9 @@ async function repairDraftedSegment(
     if (repairResult.threadId) {
       draftedSegment.threadId = repairResult.threadId;
     }
-    const dedupedRepairText = dedupDraftDuplicateTailBlocks(
+    const dedupedRepairText = dedupDraftDuplicateTailSentences(
       draftedSegment.protectedSource,
-      repairResult.text
+      dedupDraftDuplicateTailBlocks(draftedSegment.protectedSource, repairResult.text)
     );
     const normalizedRepairText = normalizeSegmentAnchorText(
       stripAddedInlineCodeFromPlainPaths(draftedSegment.protectedSource, dedupedRepairText),
