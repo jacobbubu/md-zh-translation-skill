@@ -4211,6 +4211,13 @@ function suppressCoveredAnchorMustFix(
   }
 
   const remainingMustFix = audit.must_fix.filter((instruction) => {
+    // materializeFailedHardCheckProblems injects structural-check failures as
+    // must_fix with a stable sentinel prefix ("硬性检查 "). Those are not
+    // anchor-related even if the underlying problem text happens to mention
+    // an anchor surface — never let anchor-coverage heuristics suppress them.
+    if (/^硬性检查\s/u.test(instruction.trim())) {
+      return true;
+    }
     const anchors = [...slice.requiredAnchors, ...slice.repeatAnchors, ...slice.establishedAnchors];
     const explicitLocationText = extractExplicitRepairLocationText(instruction);
     if (isAnalysisPlanTargetAlreadySatisfied(slice, draftedSegment, instruction, explicitLocationText)) {
