@@ -3634,7 +3634,22 @@ function collapseRunawayEnglishAnchorChain(text: string): string {
   // Normalize accidental 4-star bold delimiters `****` to `**`; keep paired so
   // we do not corrupt balanced bold sequences elsewhere in the line.
   const collapseDoubleBold = (input: string): string => input.replace(/\*{4,}/g, "**");
-  return collapseDoubleBold(collapseChain(text));
+  // If a line has an odd number of `**` markers, anchor injection likely
+  // inserted `（anchor）` after a closed bold span and appended a stray `**`
+  // tail (e.g. `**拒绝**。（Deny）**。`). Trim the dangling tail so the
+  // protected_span_integrity audit no longer sees an unpaired `**`.
+  const stripDanglingBoldTail = (input: string): string =>
+    input
+      .split(/\r?\n/)
+      .map((line) => {
+        const boldCount = (line.match(/\*\*/g) ?? []).length;
+        if (boldCount === 0 || boldCount % 2 === 0) {
+          return line;
+        }
+        return line.replace(/\*\*([\p{P}\p{S}\s]*)$/u, "$1");
+      })
+      .join("\n");
+  return stripDanglingBoldTail(collapseDoubleBold(collapseChain(text)));
 }
 
 function dedupDraftDuplicateTailBlocks(source: string, draft: string): string {
