@@ -5957,6 +5957,24 @@ function getDraftContractViolation(source: string, text: string): string | null 
     return "draft returned meta/audit text";
   }
 
+  // Catch the "lazy LLM" pattern where a list item is replaced by ellipsis
+  // ("- ……" or "- ...") but the source list item is real content. The audit
+  // catches this too but repairing from a missing item is harder than rejecting
+  // it at the draft contract.
+  const ellipsisLineInBody = trimmed.split(/\r?\n/).some((line) => {
+    const stripped = line.replace(/^\s*(?:[-*+]|\d+[.)])\s+/, "").trim();
+    return /^(?:…+|\.{3,})$/.test(stripped);
+  });
+  if (ellipsisLineInBody) {
+    const sourceHasEllipsisItem = source.split(/\r?\n/).some((line) => {
+      const stripped = line.replace(/^\s*(?:[-*+]|\d+[.)])\s+/, "").trim();
+      return /^(?:…+|\.{3,})$/.test(stripped);
+    });
+    if (!sourceHasEllipsisItem) {
+      return "draft replaced a list item with ellipsis instead of translating it";
+    }
+  }
+
   if (looksLikeStructuredOutputDebris(source, trimmed)) {
     return "draft returned structured-output debris instead of translated content";
   }
