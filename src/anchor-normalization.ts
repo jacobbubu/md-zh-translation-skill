@@ -1,4 +1,4 @@
-import type { PromptSlice } from "./translation-state.js";
+import type { OwnerMap, OwnerType, PromptSlice } from "./translation-state.js";
 
 export type PromptAnchor = PromptSlice["requiredAnchors"][number];
 type AnchorLike = Pick<PromptAnchor, "english" | "chineseHint" | "displayPolicy" | "category"> & {
@@ -460,7 +460,7 @@ export function injectPlannedAnchorText(
         continue;
       }
 
-      const injectedLine = injectAnchorIntoLine(translatedLine, anchor);
+      const injectedLine = injectAnchorIntoLine(translatedLine, anchor, slice.ownerMap);
       if (injectedLine !== translatedLine) {
         translatedLine = injectedLine;
         changed = true;
@@ -546,6 +546,12 @@ export function normalizeHeadingLikeAnchorText(
     for (const anchor of lineAnchors) {
       const display = resolveAnchorDisplay(anchor);
       if (display.mode === "english-primary") {
+        continue;
+      }
+      // Phase 1 owner-map short-circuit: if this anchor's surface is owned by
+      // a block or sentence plan, the heading layer must not fight with them.
+      // Heading-owned spans still proceed (callerScope = "heading").
+      if (anchorGovernedByStructuralOwner(slice.ownerMap, anchor.english, "heading")) {
         continue;
       }
       const headingEnglish = normalizeHeadingAnchorEnglishForLine(anchor.english, translatedLine.content);
@@ -721,7 +727,8 @@ export function normalizeExplicitRepairAnchorText(
               ? injectAnchorIntoHeadingRepairContent(
                   refreshedHeading.content,
                   target.chineseHint,
-                  explicitRepairAnchor
+                  explicitRepairAnchor,
+                  slice.ownerMap
                 )
               : english
                 ? normalizeHeadingRepairContent(refreshedHeading.content, english)
@@ -830,7 +837,7 @@ export function normalizeExplicitRepairAnchorText(
       }
 
       if (matchingAnchor) {
-        const normalizedLine = injectAnchorIntoLine(translatedLine, matchingAnchor);
+        const normalizedLine = injectAnchorIntoLine(translatedLine, matchingAnchor, slice.ownerMap);
         if (normalizedLine !== translatedLine) {
           translatedLine = normalizedLine;
           changed = true;
@@ -1162,9 +1169,14 @@ function normalizeHeadingRepairContent(content: string, english: string): string
 function injectAnchorIntoHeadingRepairContent(
   content: string,
   targetChineseHint: string,
-  anchor: PromptAnchor
+  anchor: PromptAnchor,
+  ownerMap?: OwnerMap
 ): string {
-  const directlyInjected = injectAnchorIntoLine(content, anchor);
+  // Heading-layer repair is itself the "heading" owner, so pass callerScope
+  // accordingly. This keeps ownerMap from short-circuiting the heading layer
+  // against its own plans while still blocking cross-layer overreach from
+  // block / sentence plans.
+  const directlyInjected = injectAnchorIntoLine(content, anchor, ownerMap, "heading");
   if (directlyInjected !== content) {
     return collapseRepeatedEnglishParentheses(directlyInjected, anchor.english);
   }
@@ -1490,6 +1502,45 @@ function normalizeChinesePrimaryInlineExplanation(
   );
 }
 
+function anchorGovernedByStructuralOwner(
+  ownerMap: OwnerMap,
+  english: string,
+  excludeOwnerType?: OwnerType
+): boolean {
+  const target = english.trim().toLowerCase();
+  if (!target) {
+    return false;
+  }
+  for (const entry of ownerMap) {
+    if (entry.ownerType !== "heading" && entry.ownerType !== "block" && entry.ownerType !== "sentence") {
+      continue;
+    }
+    // When the caller is itself the structural owner (e.g. heading-layer
+    // repair calls injectAnchorIntoLine), passing `excludeOwnerType` lets the
+    // caller skip self-ownership checks so it is not short-circuited by its
+    // own plans.
+    if (excludeOwnerType && entry.ownerType === excludeOwnerType) {
+      continue;
+    }
+    const source = entry.sourceText?.trim().toLowerCase();
+    if (!source) {
+      continue;
+    }
+    if (source === target) {
+      return true;
+    }
+    // Heading / block / sentence plans "own" an anchor when their source text
+    // contains the anchor english as a whole-word phrase. Use space-padded
+    // boundaries so `npm` inside `npm registry` matches but `api` inside
+    // `api-server` does not.
+    const padded = ` ${source} `;
+    if (padded.includes(` ${target} `)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 function lineAlreadyHasFamilyVariantAnchorParen(text: string, english: string): string | null {
   const target = english.trim().toLowerCase();
   if (!target) {
@@ -1516,10 +1567,27 @@ function lineAlreadyHasFamilyVariantAnchorParen(text: string, english: string): 
   return null;
 }
 
-function injectAnchorIntoLine(text: string, anchor: PromptAnchor): string {
+function injectAnchorIntoLine(
+  text: string,
+  anchor: PromptAnchor,
+  ownerMap?: OwnerMap,
+  callerScope?: OwnerType
+): string {
   const display = resolveAnchorDisplay(anchor);
 
   if (!display.english || display.mode === "english-only") {
+    return text;
+  }
+
+  // Phase 1 owner-map short-circuit: when the analysis layer already assigned
+  // this anchor's surface to a structural owner (heading / block / sentence
+  // plan), the calling layer must stop unless it is itself that owner (e.g.
+  // heading-layer repair passes `callerScope = "heading"` so it does not
+  // short-circuit on heading plans it is trying to execute). Without this
+  // guard, heading and block plans insert their canonical display and this
+  // function then stacks a second paren on top, producing the runaway chain
+  // we spent many guards cleaning up after the fact.
+  if (ownerMap && anchorGovernedByStructuralOwner(ownerMap, display.english, callerScope)) {
     return text;
   }
 

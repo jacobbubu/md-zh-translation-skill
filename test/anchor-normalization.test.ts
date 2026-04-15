@@ -54,6 +54,7 @@ function createSlice(overrides: Partial<PromptSlice>): PromptSlice {
     headingPlanGovernedAnchorIds: [],
     analysisPlans: [],
     analysisPlanDraft: '<SEGMENT id="chunk-1-segment-1">\n</SEGMENT>',
+    ownerMap: [],
     ...overrides
   };
 }
@@ -983,4 +984,25 @@ test("normalizeExplicitRepairAnchorText injects a named anchor back into a list 
   const normalized = normalizeExplicitRepairAnchorText(source, translated, slice);
 
   assert.equal(normalized, "- 包含秘密信息的环境变量（Environment variables）");
+});
+
+test("injectPlannedAnchorText skips mention injection when ownerMap marks the span as structurally owned (#2 P1 step 2)", () => {
+  const slice = createSlice({
+    requiredAnchors: [createAnchor("anchor-1", "sandbox mode", "沙盒模式")],
+    ownerMap: [
+      {
+        ownerType: "sentence",
+        sourceText: "now has a sandbox mode",
+        planId: "emphasis-1"
+      }
+    ]
+  });
+  const source = "Claude Code **now has a sandbox mode** today.";
+  const translated = "Claude Code **现在有了沙盒模式（sandbox mode）** 今天。";
+
+  const normalized = injectPlannedAnchorText(source, translated, slice);
+
+  // Guard fires: the emphasisPlan already owns the `sandbox mode` span, so the
+  // mention-layer injector must not re-inject a second `（sandbox mode）`.
+  assert.equal(normalized, translated);
 });

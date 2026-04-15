@@ -325,6 +325,34 @@ export type PromptBlockPlan = {
   targetText?: string;
 };
 
+/**
+ * Phase 1 foundation of the owner-map work tracked in issue #2.
+ *
+ * Each `OwnerEntry` marks a span in the source body as owned by a specific
+ * execution-layer plan (protected span, heading, block, sentence, or mention
+ * anchor). Later commits in the same issue will wire the map into
+ * `injectAnchorIntoLine`, `normalizeExplicitRepairAnchorText`, and
+ * `normalizeHeadingLikeAnchorText` so those normalizers short-circuit on
+ * already-owned spans instead of each one independently scanning the whole
+ * line. In this first cut we only generate the map; no normalizer reads it
+ * yet. Exact char offsets are optional and may be filled in later; for now
+ * we carry the `sourceText` / `lineIndex` produced by analysis so normalizer
+ * lookups stay deterministic when they do start consuming it.
+ */
+export type OwnerType = "protected" | "heading" | "block" | "sentence" | "mention" | "unowned";
+
+export type OwnerEntry = {
+  ownerType: OwnerType;
+  sourceText?: string;
+  lineIndex?: number;
+  charStart?: number;
+  charEnd?: number;
+  anchorId?: string;
+  planId?: string;
+};
+
+export type OwnerMap = OwnerEntry[];
+
 export type PromptSlice = {
   documentTitle: string | null;
   chunkId: string;
@@ -428,6 +456,12 @@ export type PromptSlice = {
   headingPlanGovernedAnchorIds: string[];
   analysisPlans: PromptAnalysisPlan[];
   analysisPlanDraft: string;
+  /**
+   * Owner map for the current segment. See `OwnerMap` docstring. Populated by
+   * `buildSegmentTaskSlice` and required on every slice; empty array means
+   * "no owned spans". Consumers must treat it as read-only.
+   */
+  ownerMap: OwnerMap;
 };
 
 export function buildLocalFallbackAnchorId(segmentId: string, english: string): string {
@@ -800,8 +834,70 @@ export function buildSegmentTaskSlice(
     pendingRepairs,
     headingPlanGovernedAnchorIds: [...headingPlanGovernedAnchorIds],
     analysisPlans,
-    analysisPlanDraft: renderPromptAnalysisPlanDraft(segmentId, analysisPlans)
+    analysisPlanDraft: renderPromptAnalysisPlanDraft(segmentId, analysisPlans),
+    ownerMap: buildOwnerMap({
+      segmentSpanIds: segment.spanIds,
+      headingPlans,
+      blockPlans,
+      emphasisPlans,
+      mentionAnchors: [...requiredAnchors, ...repeatAnchors, ...establishedAnchors]
+    })
   };
+}
+
+function buildOwnerMap(input: {
+  segmentSpanIds: readonly string[];
+  headingPlans: readonly PromptSlice["headingPlans"][number][];
+  blockPlans: readonly PromptBlockPlan[];
+  emphasisPlans: readonly PromptSlice["emphasisPlans"][number][];
+  mentionAnchors: readonly PromptSlice["requiredAnchors"][number][];
+}): OwnerMap {
+  const entries: OwnerEntry[] = [];
+
+  for (const spanId of input.segmentSpanIds) {
+    entries.push({ ownerType: "protected", planId: spanId });
+  }
+
+  for (const plan of input.headingPlans) {
+    entries.push({
+      ownerType: "heading",
+      sourceText: plan.sourceHeading,
+      ...(typeof plan.headingIndex === "number" ? { lineIndex: plan.headingIndex } : {}),
+      ...(plan.english ? { planId: plan.english } : {})
+    });
+  }
+
+  for (const plan of input.blockPlans) {
+    entries.push({
+      ownerType: "block",
+      ...(plan.sourceText ? { sourceText: plan.sourceText } : {}),
+      ...(typeof plan.blockIndex === "number" ? { planId: `block-${plan.blockIndex}` } : {})
+    });
+  }
+
+  for (const plan of input.emphasisPlans) {
+    entries.push({
+      ownerType: "sentence",
+      sourceText: plan.sourceText,
+      ...(typeof plan.lineIndex === "number" ? { lineIndex: plan.lineIndex } : {}),
+      ...(typeof plan.emphasisIndex === "number" ? { planId: `emphasis-${plan.emphasisIndex}` } : {})
+    });
+  }
+
+  const seenAnchorIds = new Set<string>();
+  for (const anchor of input.mentionAnchors) {
+    if (seenAnchorIds.has(anchor.anchorId)) {
+      continue;
+    }
+    seenAnchorIds.add(anchor.anchorId);
+    entries.push({
+      ownerType: "mention",
+      anchorId: anchor.anchorId,
+      sourceText: anchor.english
+    });
+  }
+
+  return entries;
 }
 
 function collectEntityDisambiguationGovernedAnchorIds(

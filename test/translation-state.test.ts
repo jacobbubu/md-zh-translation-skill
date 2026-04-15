@@ -1756,3 +1756,60 @@ test("translation state does not treat a singular anchor as mentioned by a plura
   assert.equal(slice.repeatAnchors.length, 0);
   assert.equal(slice.establishedAnchors.some((anchor) => anchor.english === "Claude Code sandbox"), true);
 });
+
+test("buildSegmentTaskSlice generates an ownerMap covering anchors and plans (#2 P1 step 1)", () => {
+  const state = createTranslationRunState({
+    sourcePathHint: "sample.md",
+    documentTitle: "Sample",
+    frontmatterPresent: false,
+    protectedSpans: [],
+    chunks: [
+      {
+        source: "## Claude Code\n\nClaude Code is useful.",
+        separatorAfter: "",
+        headingPath: ["Sample"],
+        segments: [
+          {
+            kind: "translatable",
+            source: "## Claude Code\n\nClaude Code is useful.",
+            separatorAfter: "",
+            spanIds: ["span-1"],
+            headingHints: ["Claude Code"],
+            specialNotes: []
+          }
+        ]
+      }
+    ]
+  });
+
+  applyAnchorCatalog(state, {
+    anchors: [
+      {
+        english: "Claude Code",
+        chineseHint: "Claude Code",
+        familyKey: "claude code",
+        displayPolicy: "english-only",
+        firstOccurrence: { chunkId: "chunk-1", segmentId: "chunk-1-segment-1" }
+      }
+    ],
+    headingPlans: [
+      {
+        chunkId: "chunk-1",
+        segmentId: "chunk-1-segment-1",
+        headingIndex: 1,
+        sourceHeading: "Claude Code",
+        strategy: "source-template",
+        english: "Claude Code",
+        chineseHint: "Claude Code"
+      }
+    ],
+    ignoredTerms: []
+  });
+
+  const slice = buildSegmentTaskSlice(state, "chunk-1", "chunk-1-segment-1");
+  const map = slice.ownerMap ?? [];
+
+  assert.ok(map.some((entry) => entry.ownerType === "protected" && entry.planId === "span-1"));
+  assert.ok(map.some((entry) => entry.ownerType === "heading" && entry.sourceText === "Claude Code"));
+  assert.ok(map.some((entry) => entry.ownerType === "mention" && entry.sourceText === "Claude Code"));
+});
