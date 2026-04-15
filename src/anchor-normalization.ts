@@ -2272,9 +2272,45 @@ function replaceExplicitRepairAliasText(
 }
 
 function normalizeExplicitRepairReplacementSpacing(text: string): string {
-  return text
+  const baseNormalized = text
     .replace(/（([^）\n]+)）(?:（\1）)+/gu, "（$1）")
     .replace(/）\s+(?=[\u4e00-\u9fff])/gu, "）");
+  return baseNormalized
+    .split(/\r?\n/)
+    .map((line) => mergeEnglishAnchorWithAdjacentChineseParenInLine(line))
+    .join("\n");
+}
+
+// Collapse `（English anchor）（中文...）` introduced by anchor injection when the
+// original text already carried a Chinese parenthetical (typically the
+// translated explanation of the source `(English ...)` surface). Leaving both
+// parens adjacent reads as a duplicate anchor; merging with a comma preserves
+// both the first-mention anchor and the translated explanation.
+//
+// Only fires on list-item lines (unordered or ordered) because that is where
+// the draft pipeline has produced the duplicate-anchor pattern in smoke runs.
+// Heading content, blockquotes, and plain paragraphs are left untouched so we
+// do not fold legitimately separate trailing parentheticals on heading lines
+// like `## 文件系统权限（Filesystem Permissions）（关键）`, which existing
+// tests expect to stay as two parens.
+function mergeEnglishAnchorWithAdjacentChineseParenInLine(line: string): string {
+  if (!/^\s*(?:[-*+]|\d+[.)])\s+/.test(line)) {
+    return line;
+  }
+  return line.replace(
+    /（([A-Za-z][A-Za-z0-9 .+/_\-]*)）（([^（）\n]+)）/gu,
+    (match, englishInner, chineseInner) => {
+      const english = String(englishInner).trim();
+      const chinese = String(chineseInner).trim();
+      if (!english || !chinese) {
+        return match;
+      }
+      if (!/[\u4e00-\u9fff]/u.test(chinese)) {
+        return match;
+      }
+      return `（${english}，${chinese}）`;
+    }
+  );
 }
 
 function normalizeRepeatedEnglishParenthesesWithLocalHints(text: string): string {
