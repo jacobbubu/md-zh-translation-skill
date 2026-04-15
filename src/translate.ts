@@ -3676,7 +3676,31 @@ function collapseRunawayEnglishAnchorChain(text: string): string {
         return line.replace(/\*\*([\p{P}\p{S}\s]*)$/u, "$1");
       })
       .join("\n");
-  return stripDanglingBoldTail(collapseDoubleBold(collapsePairs(collapseChain(text))));
+  return stripDanglingBoldTail(
+    collapseDoubleBold(collapsePairs(collapseChain(collapseCaseVariantSlashInParens(text))))
+  );
+}
+
+// Issue #8: when draft LLM emits `（git / Git、...）` or `（Docker / Docker）`,
+// collapse the `A / B` pair to a single token when A and B differ only in
+// letter case. Scoped to the content inside Chinese parens so normal
+// `and / or`-style text outside parens is not touched.
+function collapseCaseVariantSlashInParens(text: string): string {
+  return text.replace(/（([^（）\n]+)）/gu, (match, innerRaw) => {
+    const inner = String(innerRaw);
+    const collapsed = inner.replace(
+      /([A-Za-z][A-Za-z0-9.+_-]*)\s*\/\s*([A-Za-z][A-Za-z0-9.+_-]*)/g,
+      (pairMatch, left, right) => {
+        const a = String(left);
+        const b = String(right);
+        if (a.toLowerCase() !== b.toLowerCase()) {
+          return pairMatch;
+        }
+        return a.length <= b.length ? a : b;
+      }
+    );
+    return collapsed === inner ? match : `（${collapsed}）`;
+  });
 }
 
 function dedupDraftDuplicateTailBlocks(source: string, draft: string): string {
