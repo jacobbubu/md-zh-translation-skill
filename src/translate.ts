@@ -6132,7 +6132,7 @@ function getDraftContractViolation(source: string, text: string): string | null 
   if (
     /file:\/\//i.test(trimmed) ||
     /\[[^\]]+\.md\]\(file:\/\//i.test(trimmed) ||
-    /(源文件|对应段落|当前块|硬性项|无需修正|没有发现需要|已核对|已复核|任务已完成|验证证据|当前分支|工作区|未提交改动|git status|后续：|继续执行|继续补充|OMX|Ralph|hook_prompt|hook_run_id|stop:\d+:|::git-|::archive|thread\/resume|首现需补双语锚定|补双语锚定|首次出现需补)/u.test(trimmed)
+    /(源文件|对应段落|当前块|硬性项|无需修正|没有发现需要|已核对|已复核|任务已完成|验证证据|当前分支|工作区|未提交改动|后续：|继续执行|继续补充|OMX|Ralph|hook_prompt|hook_run_id|stop:\d+:|::git-|::archive|thread\/resume|首现需补双语锚定|补双语锚定|首次出现需补)/u.test(trimmed)
   ) {
     return "draft returned meta/audit text";
   }
