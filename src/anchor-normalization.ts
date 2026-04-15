@@ -1414,8 +1414,23 @@ function collapseRepeatedEnglishParentheses(text: string, english: string): stri
       const a = String(first).trim();
       const b = String(second).trim();
       if (!a || !b) return match;
-      if (a.toLowerCase() !== b.toLowerCase()) return match;
-      return `（${b}）`;
+      const aLower = a.toLowerCase();
+      const bLower = b.toLowerCase();
+      if (aLower === bLower) {
+        return `（${b}）`;
+      }
+      // Family-variant collapse: when one paren is a whole-word case-insensitive
+      // prefix / suffix of the other (e.g. `（Sandbox）` vs
+      // `（sandbox mode）`), keep the longer surface form and drop the other.
+      if (
+        bLower.startsWith(`${aLower} `) ||
+        bLower.endsWith(` ${aLower}`) ||
+        aLower.startsWith(`${bLower} `) ||
+        aLower.endsWith(` ${bLower}`)
+      ) {
+        return aLower.length >= bLower.length ? `（${a}）` : `（${b}）`;
+      }
+      return match;
     }
   );
 }
