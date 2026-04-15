@@ -548,6 +548,12 @@ export function normalizeHeadingLikeAnchorText(
       if (display.mode === "english-primary") {
         continue;
       }
+      // Phase 1 owner-map short-circuit: if this anchor's surface is owned by
+      // a block or sentence plan, the heading layer must not fight with them.
+      // Heading-owned spans still proceed (callerScope = "heading").
+      if (anchorGovernedByStructuralOwner(slice.ownerMap, anchor.english, "heading")) {
+        continue;
+      }
       const headingEnglish = normalizeHeadingAnchorEnglishForLine(anchor.english, translatedLine.content);
       if (shouldSkipWholeHeadingAnchorInjection(sourceLine.content, anchor.english)) {
         normalizedLine = stripOperationalHeadingAnchor(normalizedLine, headingEnglish);
