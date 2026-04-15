@@ -3568,6 +3568,23 @@ function buildStructuredSegmentAuditResult(
   };
 }
 
+// Apply a structured audit to state and sync the filter-truth must_fix back onto
+// the raw `segmentAudit` so the outer repair loop agrees with the state engine on
+// what still needs work. Without this sync the while-loop reads the pre-filter
+// must_fix while the repair dispatch reads the post-filter pendingRepairs, which
+// causes the loop to spin without making progress whenever the filter suppresses
+// an instruction (e.g. anchor already covered) that the auditor still listed.
+function applyStructuredSegmentAuditAndSync(
+  state: TranslationRunState,
+  draftedSegment: DraftedSegmentState,
+  segmentAudit: GateAudit & { segment_index?: number }
+): void {
+  const structured = buildStructuredSegmentAuditResult(state, draftedSegment, segmentAudit);
+  applySegmentAudit(state, structured);
+  segmentAudit.must_fix = [...structured.rawMustFix];
+  segmentAudit.hard_checks = structured.hardChecks;
+}
+
 function buildRepairTasksForSegment(
   state: TranslationRunState,
   segmentId: string,
@@ -6583,10 +6600,7 @@ async function runBundledGateAudit(
           `Chunk ${chunkPromptContext.chunkIndex}/${plan.chunks.length}${chunkLabel}: unknown segment ${segmentAudit.segment_index} in per-segment audit.`
         );
       }
-      applySegmentAudit(
-        context.state,
-        buildStructuredSegmentAuditResult(context.state, draftedSegment, segmentAudit)
-      );
+      applyStructuredSegmentAuditAndSync(context.state, draftedSegment, segmentAudit);
     }
     return bundledAudit;
   }
@@ -6647,10 +6661,7 @@ async function runBundledGateAudit(
             `Chunk ${chunkPromptContext.chunkIndex}/${plan.chunks.length}${chunkLabel}: unknown segment ${segmentAudit.segment_index} in bundled audit.`
           );
         }
-        applySegmentAudit(
-          context.state,
-          buildStructuredSegmentAuditResult(context.state, draftedSegment, segmentAudit)
-        );
+        applyStructuredSegmentAuditAndSync(context.state, draftedSegment, segmentAudit);
       }
       return bundledAudit;
     }
@@ -6690,10 +6701,7 @@ async function runBundledGateAudit(
         `Chunk ${chunkPromptContext.chunkIndex}/${plan.chunks.length}${chunkLabel}: unknown segment ${segmentAudit.segment_index} in bundled audit.`
       );
     }
-    applySegmentAudit(
-      context.state,
-      buildStructuredSegmentAuditResult(context.state, draftedSegment, segmentAudit)
-    );
+    applyStructuredSegmentAuditAndSync(context.state, draftedSegment, segmentAudit);
   }
   return bundledAudit;
 }
@@ -6789,10 +6797,7 @@ async function runFallbackSegmentAudits(
 
     const audit = parseGateAudit(auditResult.text);
     validateStructuralGateChecks(audit);
-    applySegmentAudit(
-      context.state,
-      buildStructuredSegmentAuditResult(context.state, draftedSegment, audit)
-    );
+    applyStructuredSegmentAuditAndSync(context.state, draftedSegment, audit);
     segments.push({
       segment_index: draftedSegment.segment.index + 1,
       ...audit
