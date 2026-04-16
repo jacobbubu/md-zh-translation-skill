@@ -1722,9 +1722,17 @@ function injectAnchorIntoLine(
       display.chineseDisplay &&
       englishIsInsideChineseParen(text, display.english)
     ) {
-      return normalizeExplicitRepairReplacementSpacing(
-        replaceWholePhraseOnce(text, display.english, display.canonical)
+      const upgraded = replaceWholePhraseOnce(text, display.english, display.canonical);
+      // Drop a trailing duplicate chineseDisplay that the LLM may have added
+      // next to the bare English (e.g. `npm registry 注册表` -> upgraded to
+      // `npm 注册表（npm registry） 注册表`). Pattern: canonical followed by
+      // optional whitespace + chineseDisplay.
+      const canonicalTrailing = new RegExp(
+        `${escapeRegExp(display.canonical)}\\s*${escapeRegExp(display.chineseDisplay)}`,
+        "g"
       );
+      const cleaned = upgraded.replace(canonicalTrailing, display.canonical);
+      return normalizeExplicitRepairReplacementSpacing(cleaned);
     }
     return text;
   }
