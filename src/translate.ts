@@ -6184,6 +6184,29 @@ function getDraftContractViolation(source: string, text: string): string | null 
     return "draft returned meta/audit text";
   }
 
+  // Detect protected-span placeholder duplication: any `@@MDZH_*@@` token that
+  // appears more times in draft than in source means LLM cloned the link /
+  // code placeholder, which would fail validateStructuralGateChecks later
+  // with no repair path. Catch at draft contract so retry prompts can try
+  // again.
+  const placeholderPattern = /@@MDZH_[A-Z_]+_\d+@@/g;
+  const sourcePlaceholderCounts = new Map<string, number>();
+  for (const match of source.matchAll(placeholderPattern)) {
+    const token = match[0];
+    sourcePlaceholderCounts.set(token, (sourcePlaceholderCounts.get(token) ?? 0) + 1);
+  }
+  const draftPlaceholderCounts = new Map<string, number>();
+  for (const match of trimmed.matchAll(placeholderPattern)) {
+    const token = match[0];
+    draftPlaceholderCounts.set(token, (draftPlaceholderCounts.get(token) ?? 0) + 1);
+  }
+  for (const [token, count] of draftPlaceholderCounts) {
+    const sourceCount = sourcePlaceholderCounts.get(token) ?? 0;
+    if (count > sourceCount) {
+      return `draft duplicated protected-span placeholder ${token} (source=${sourceCount}, draft=${count})`;
+    }
+  }
+
   // Catch the "lazy LLM" pattern where a list item is replaced by ellipsis
   // ("- ……" or "- ...") but the source list item is real content. The audit
   // catches this too but repairing from a missing item is harder than rejecting
