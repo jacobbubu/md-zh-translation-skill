@@ -90,7 +90,35 @@ export function normalizeSegmentAnchorText(text: string, slice: PromptSlice | nu
     );
   }
 
+  normalized = flipReversedBilingualForChinesePrimary(normalized, anchors);
   return normalizeRepeatedEnglishParenthesesWithLocalHints(normalized);
+}
+
+// Fix the case where LLM draft emits `English（chineseHint）` (English first)
+// for an anchor whose display_policy is chinese-primary — canonical should be
+// `chineseHint（English）`. Runs after normalizeSingleAnchor so anchor-specific
+// paths have their chance first.
+function flipReversedBilingualForChinesePrimary(
+  text: string,
+  anchors: readonly PromptAnchor[]
+): string {
+  let result = text;
+  for (const anchor of anchors) {
+    if (anchor.displayPolicy !== "chinese-primary") {
+      continue;
+    }
+    const english = anchor.english.trim();
+    const chineseHint = anchor.chineseHint.trim();
+    if (!english || !chineseHint || english.toLowerCase() === chineseHint.toLowerCase()) {
+      continue;
+    }
+    const reversed = `${english}（${chineseHint}）`;
+    const canonical = `${chineseHint}（${english}）`;
+    if (result.includes(reversed) && !result.includes(canonical)) {
+      result = result.split(reversed).join(canonical);
+    }
+  }
+  return result;
 }
 
 export function normalizeSourceSurfaceAnchorText(
