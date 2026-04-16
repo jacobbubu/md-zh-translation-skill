@@ -451,7 +451,22 @@ export function injectPlannedAnchorText(
       requiredAnchors.filter((anchor) => containsSourceAnchorPhrase(sourceLine, anchor.english))
     );
 
+    // Issue #22: track which anchor families have already injected a canonical
+    // display into this line. Once any family member fires, later members of
+    // the same family skip (Q1: longest surface = primary fires first via sort;
+    // Q3: first canonical inserted wins).
+    const injectedFamilyIds = new Set<string>();
+
     for (const anchor of lineAnchors) {
+      if (injectedFamilyIds.has(anchor.familyId)) {
+        continue;
+      }
+
+      if (lineAlreadyHasFamilyCanonical(translatedLine, anchor.familyId, lineAnchors)) {
+        injectedFamilyIds.add(anchor.familyId);
+        continue;
+      }
+
       if (shouldSkipEnglishPrimaryHeadingCanonicalInjection(sourceLine, anchor)) {
         continue;
       }
@@ -464,6 +479,7 @@ export function injectPlannedAnchorText(
       if (injectedLine !== translatedLine) {
         translatedLine = injectedLine;
         changed = true;
+        injectedFamilyIds.add(anchor.familyId);
       }
     }
 
@@ -543,9 +559,18 @@ export function normalizeHeadingLikeAnchorText(
       normalizedLine = templateRestoredLine;
     }
 
+    const injectedHeadingFamilyIds = new Set<string>();
+
     for (const anchor of lineAnchors) {
       const display = resolveAnchorDisplay(anchor);
       if (display.mode === "english-primary") {
+        continue;
+      }
+      if (injectedHeadingFamilyIds.has(anchor.familyId)) {
+        continue;
+      }
+      if (lineAlreadyHasFamilyCanonical(normalizedLine, anchor.familyId, lineAnchors)) {
+        injectedHeadingFamilyIds.add(anchor.familyId);
         continue;
       }
       // Phase 1 owner-map short-circuit: if this anchor's surface is owned by
@@ -572,12 +597,14 @@ export function normalizeHeadingLikeAnchorText(
           anchor.chineseHint,
           `${anchor.chineseHint}（${headingEnglish}）`
         );
+        injectedHeadingFamilyIds.add(anchor.familyId);
         continue;
       }
 
       const fuzzyCandidate = findFuzzyChineseHeadingAnchorCandidate(normalizedLine, display.chineseDisplay);
       if (fuzzyCandidate) {
         normalizedLine = replaceFirst(normalizedLine, fuzzyCandidate, `${display.chineseDisplay}（${headingEnglish}）`);
+        injectedHeadingFamilyIds.add(anchor.familyId);
       }
     }
 
@@ -1500,6 +1527,26 @@ function normalizeChinesePrimaryInlineExplanation(
     new RegExp(`${escapedChinese}（${escapedEnglish}\\s*[，,:：]\\s*([^）]+)）`, "g"),
     (_match, explanation: string) => `${canonical}：${explanation.trim()}`
   );
+}
+
+// Issue #22 Q3: check whether the line already contains ANY canonical display
+// from anchors in the same family. If so, the family's first-mention is
+// already satisfied and later same-family anchors should skip.
+function lineAlreadyHasFamilyCanonical(
+  translatedLine: string,
+  familyId: string,
+  allLineAnchors: readonly PromptAnchor[]
+): boolean {
+  for (const sibling of allLineAnchors) {
+    if (sibling.familyId !== familyId) {
+      continue;
+    }
+    const display = resolveAnchorDisplay(sibling);
+    if (display.canonical && translatedLine.includes(display.canonical)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 function anchorGovernedByStructuralOwner(
