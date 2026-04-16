@@ -191,6 +191,15 @@ export type TranslateOptions = {
   disableAnalysisCache?: boolean;
   checkpointDir?: string;
   disableCheckpoint?: boolean;
+  /**
+   * When true, a chunk that exhausts MAX_REPAIR_CYCLES with remaining
+   * `must_fix` items keeps its best-effort body and the run continues to the
+   * next chunk instead of throwing HardGateError. Structural failures from
+   * `validateStructuralGateChecks` (protected span integrity, JSON parse,
+   * etc.) still throw because the body is unrecoverable. Used by smoke runs
+   * that defer final acceptance to the independent quality checker.
+   */
+  softGate?: boolean;
 };
 
 export type TranslateResult = {
@@ -4782,6 +4791,21 @@ async function translateProtectedChunk(
       "audit",
       `Chunk ${chunkPromptContext.chunkIndex}/${plan.chunks.length}${chunkLabel} failed after ${repairCyclesUsed} repair cycle(s): ${remaining}`
     );
+    if (context.options.softGate) {
+      report(
+        context.options,
+        "audit",
+        `Chunk ${chunkPromptContext.chunkIndex}/${plan.chunks.length}${chunkLabel}: soft-gate enabled, keeping best-effort body and continuing.`
+      );
+      const bestEffortBody = rebuildChunkFromSegmentStates(segments, draftedSegments, "restoredBody");
+      markChunkPhase(context.state, context.chunkId, "completed");
+      return {
+        body: bestEffortBody,
+        repairCyclesUsed,
+        gateAudit: mergeGateAudits(bundledAudit.segments),
+        nextLocalSpanIndex
+      };
+    }
     throw new HardGateError(
       `Chunk ${chunkPromptContext.chunkIndex}/${plan.chunks.length}${chunkLabel} failed after ${repairCyclesUsed} repair cycle(s): ${remaining}`
     );

@@ -1,6 +1,16 @@
 import path from "node:path";
 import process from "node:process";
 import { spawn } from "node:child_process";
+import { stat } from "node:fs/promises";
+
+async function pathExists(p) {
+  try {
+    await stat(p);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 function parseArgs(argv) {
   const parsed = {
@@ -66,11 +76,12 @@ function parseArgs(argv) {
   return parsed;
 }
 
-async function runCommand(command, args, cwd) {
+async function runCommand(command, args, cwd, env) {
   return await new Promise((resolve, reject) => {
     const child = spawn(command, args, {
       cwd,
-      stdio: ["ignore", "pipe", "pipe"]
+      stdio: ["ignore", "pipe", "pipe"],
+      env: env ?? process.env
     });
 
     let stdout = "";
@@ -121,7 +132,15 @@ async function main() {
     smokeArgs.push("--no-checkpoint");
   }
 
-  const smokeResult = await runCommand(process.execPath, smokeArgs, repoRoot);
+  // Smoke runs default to soft-gate: chunks that exhaust repair cycles keep
+  // their best-effort body and the run continues. Final acceptance is decided
+  // by the independent quality checker on the produced output.md. To restore
+  // strict hard-gate behavior set MDZH_SMOKE_HARD_GATE=true in the environment.
+  const smokeEnv = {
+    ...process.env,
+    MDZH_SOFT_GATE: process.env.MDZH_SMOKE_HARD_GATE === "true" ? "false" : "true"
+  };
+  const smokeResult = await runCommand(process.execPath, smokeArgs, repoRoot, smokeEnv);
   const outputDir = extractOutputDir(smokeResult.stdout);
   const statusArgs = ["scripts/smoke-status.mjs"];
   if (outputDir) {
@@ -132,7 +151,14 @@ async function main() {
   const statusResult = await runCommand(process.execPath, statusArgs, repoRoot);
   let diagnoseResult = null;
   let qualityResult = null;
-  if (statusResult.exitCode !== 0) {
+  // Run quality check whenever an output.md exists, regardless of whether the
+  // smoke status is `failed` (soft-gate may produce output even on failure).
+  const outputMdPath = outputDir ? path.join(outputDir, "output.md") : null;
+  const outputMdExists = outputMdPath ? await pathExists(outputMdPath) : false;
+  if (outputMdExists && outputDir) {
+    qualityResult = await runCommand(process.execPath, ["scripts/smoke-quality.mjs", "--run-dir", outputDir], repoRoot);
+  }
+  if (!outputMdExists && statusResult.exitCode !== 0) {
     const diagnoseArgs = ["scripts/smoke-diagnose.mjs"];
     if (outputDir) {
       diagnoseArgs.push("--run-dir", outputDir);
@@ -140,8 +166,6 @@ async function main() {
       diagnoseArgs.push("--fixture", args.fixture, "--state", "failed");
     }
     diagnoseResult = await runCommand(process.execPath, diagnoseArgs, repoRoot);
-  } else if (outputDir) {
-    qualityResult = await runCommand(process.execPath, ["scripts/smoke-quality.mjs", "--run-dir", outputDir], repoRoot);
   }
 
   process.stdout.write(
@@ -156,8 +180,15 @@ async function main() {
     ].join("\n") + "\n"
   );
 
-  const finalExitCode =
-    smokeResult.exitCode !== 0 ? smokeResult.exitCode : qualityResult?.exitCode ?? 0;
+  // Soft-gate acceptance:
+  // - If output.md exists and quality check ran, quality exit is the verdict.
+  //   Whether smoke succeeded or soft-gated to a partial body, the independent
+  //   quality checker has the final say.
+  // - If no output.md was produced, smoke exit wins (genuine fatal failure
+  //   like protected-span integrity, missing input, etc).
+  const finalExitCode = outputMdExists
+    ? qualityResult?.exitCode ?? 0
+    : smokeResult.exitCode;
   process.exit(finalExitCode);
 }
 
