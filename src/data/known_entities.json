@@ -288,6 +288,17 @@
       "notes": "macOS 沙箱安全框架名，首次出现保留英文并补中文说明。"
     },
     {
+      "id": "wsl2",
+      "surface_forms": ["WSL2"],
+      "aliases": ["WSL 2"],
+      "category": "tool",
+      "display_policy": "english_primary_with_cn_hint",
+      "preferred_english": "WSL2",
+      "preferred_chinese_hint": "适用于 Linux 的 Windows 子系统",
+      "family_id": "wsl2",
+      "notes": "Windows Subsystem for Linux v2 的常见缩写，保留英文并补中文说明。"
+    },
+    {
       "id": "prompt-injection-attacks",
       "surface_forms": ["prompt injection attacks", "Prompt injection attacks"],
       "aliases": ["prompt injection"],
