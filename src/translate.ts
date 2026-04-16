@@ -2575,20 +2575,45 @@ export async function translateMarkdownArticle(source: string, options: Translat
         report(options, "draft", `Skipping ${chunkId}; restored from checkpoint.`);
         continue;
       }
-      const chunkResult = await translateProtectedChunk(chunk, chunkPlan, {
-        state,
-        chunkId,
-        cwd,
-        executor,
-        draftModel,
-        postDraftModel,
-        options,
-        sourcePathHint,
-        spanIndex,
-        nextLocalSpanIndex,
-        draftReasoningEffort: DRAFT_REASONING_EFFORT as ReasoningEffort,
-        postDraftReasoningEffort
-      });
+      let chunkResult;
+      try {
+        chunkResult = await translateProtectedChunk(chunk, chunkPlan, {
+          state,
+          chunkId,
+          cwd,
+          executor,
+          draftModel,
+          postDraftModel,
+          options,
+          sourcePathHint,
+          spanIndex,
+          nextLocalSpanIndex,
+          draftReasoningEffort: DRAFT_REASONING_EFFORT as ReasoningEffort,
+          postDraftReasoningEffort
+        });
+      } catch (error) {
+        // Soft-gate fallback for any chunk-level error (HardGateError from
+        // structural validate, repair contract failures, etc.). Preserve the
+        // protected source for this chunk so the final output.md has a
+        // structurally complete document, just with the failed chunk left in
+        // its English / partial form. Quality checker will surface this.
+        if (!options.softGate) {
+          throw error;
+        }
+        const message = error instanceof Error ? error.message : String(error);
+        report(
+          options,
+          "audit",
+          `Chunk ${chunk.index + 1}/${chunkPlan.chunks.length} (${chunk.headingPath.join(" > ") || "untitled"}): soft-gate caught chunk failure (${message}); falling back to source content.`
+        );
+        const fallbackBody = restoreMarkdownSpans(chunk.source, []);
+        chunkResult = {
+          body: fallbackBody,
+          repairCyclesUsed: 0,
+          gateAudit: createSyntheticChunkFailureAudit(message),
+          nextLocalSpanIndex
+        };
+      }
 
       restoredChunks.push(chunkResult.body + chunk.separatorAfter);
       gateAudits.push(chunkResult.gateAudit);
@@ -2662,6 +2687,20 @@ function resolveStyleMode(optionStyleMode: TranslateOptions["styleMode"]): Style
 
   const raw = process.env.MDZH_STYLE_MODE?.trim().toLowerCase();
   return raw === "final" ? "final" : "none";
+}
+
+function createSyntheticChunkFailureAudit(message: string): GateAudit {
+  return {
+    hard_checks: {
+      paragraph_match: { pass: false, problem: `soft-gate fallback: ${message}` },
+      first_mention_bilingual: { pass: true, problem: "" },
+      numbers_units_logic: { pass: true, problem: "" },
+      chinese_punctuation: { pass: true, problem: "" },
+      unit_conversion_boundary: { pass: true, problem: "" },
+      protected_span_integrity: { pass: true, problem: "" }
+    },
+    must_fix: [`chunk fell back to source content under soft-gate: ${message}`]
+  };
 }
 
 function mergeGateAudits(audits: readonly GateAudit[]): GateAudit {
