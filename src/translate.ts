@@ -2606,7 +2606,7 @@ export async function translateMarkdownArticle(source: string, options: Translat
           "audit",
           `Chunk ${chunk.index + 1}/${chunkPlan.chunks.length} (${chunk.headingPath.join(" > ") || "untitled"}): soft-gate caught chunk failure (${message}); falling back to source content.`
         );
-        const fallbackBody = restoreMarkdownSpans(chunk.source, []);
+        const fallbackBody = restoreMarkdownSpans(chunk.source, spans);
         chunkResult = {
           body: fallbackBody,
           repairCyclesUsed: 0,
