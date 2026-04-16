@@ -3607,6 +3607,36 @@ function materializeFailedHardCheckProblems(audit: GateAudit): GateAudit {
 // leave behind. Only fires when 3 or more adjacent parens share a case-
 // insensitive English form, so cases with a single anchor or two legitimately
 // distinct English tokens are left untouched.
+// Collapse `（中文A（English B）） → 中文A（English B）`: when LLM draft wraps
+// a canonical bilingual form inside an outer Chinese paren, the result reads
+// as a double-nested paren that audit rejects. Lift the inner canonical out
+// by removing the outer `（` and trailing `）`. Only fires when the outer
+// paren's content is `CJK+（ASCII+）` pattern — no effect on single-layer
+// parens or non-nested content.
+function collapseNestedChineseEnglishParens(text: string): string {
+  // Match an optional Chinese prefix BEFORE the outer paren + the nested
+  // structure. When the prefix is a substring of the inner Chinese, the whole
+  // span collapses to `innerChinese（English）` (canonical form).
+  return text.replace(
+    /([\u4e00-\u9fff]+)（([\u4e00-\u9fff][\u4e00-\u9fff\w\s]*?)（([A-Za-z][A-Za-z0-9 .+/_\-]*)）\s*）/gu,
+    (_match, prefix, innerChinese, english) => {
+      const pre = String(prefix).trim();
+      const cn = String(innerChinese).trim();
+      const en = String(english).trim();
+      if (!cn || !en) {
+        return _match;
+      }
+      // If prefix is a leading substring of inner Chinese (e.g. 沙盒 of 沙盒模式),
+      // drop the prefix — the canonical `innerChinese（English）` already covers it.
+      if (cn.startsWith(pre)) {
+        return `${cn}（${en}）`;
+      }
+      // Otherwise keep prefix, just unwrap the nesting.
+      return `${pre}${cn}（${en}）`;
+    }
+  );
+}
+
 function collapseRunawayEnglishAnchorChain(text: string): string {
   const collapseChain = (input: string): string =>
     input.replace(
@@ -3680,7 +3710,11 @@ function collapseRunawayEnglishAnchorChain(text: string): string {
     collapseDoubleBold(
       collapsePairs(
         collapseChain(
-          collapseCaseVariantSlashInParens(collapseAdjacentDuplicateEnglishBeforeChineseParen(text))
+          collapseCaseVariantSlashInParens(
+            collapseAdjacentDuplicateEnglishBeforeChineseParen(
+              collapseNestedChineseEnglishParens(text)
+            )
+          )
         )
       )
     )
