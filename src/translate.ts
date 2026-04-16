@@ -3706,14 +3706,17 @@ function collapseRunawayEnglishAnchorChain(text: string): string {
         return line.replace(/\*\*([\p{P}\p{S}\s]*)$/u, "$1");
       })
       .join("\n");
+  // Issue #14 guard reduction step 1: #8 collapseCaseVariantSlashInParens
+  // temporarily removed from the chain. Three consecutive full-smoke runs
+  // after P2 / #22 did not surface any `X / Y` case-variant slash pattern,
+  // so the guard is no longer needed as a safety net. Function kept for now
+  // to make re-enable trivial if regression appears.
   return stripDanglingBoldTail(
     collapseDoubleBold(
       collapsePairs(
         collapseChain(
-          collapseCaseVariantSlashInParens(
-            collapseAdjacentDuplicateEnglishBeforeChineseParen(
-              collapseNestedChineseEnglishParens(text)
-            )
+          collapseAdjacentDuplicateEnglishBeforeChineseParen(
+            collapseNestedChineseEnglishParens(text)
           )
         )
       )
