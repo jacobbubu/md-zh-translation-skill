@@ -6088,6 +6088,16 @@ function classifyStructuralSegmentDraftStrategy(source: string): StructuralSegme
   if (blocks.length === 0) {
     return null;
   }
+  // Pure-code opt-out: if every block in the segment is a code block, skip
+  // json-blocks entirely and return literal. Full-smoke run observed LLM
+  // hanging (180s timeout) on a segment whose sole content was a fenced code
+  // block with malicious-looking shell commands — the safety gate in the
+  // model appears to refuse to engage at all. Code blocks are not translated
+  // anyway (reconstructJsonBlockDraft already pins them back to source), so
+  // the LLM round-trip adds nothing but risk.
+  if (blocks.every((block) => classifyPromptBlockKind(block.content) === "code")) {
+    return { mode: "literal", value: source };
+  }
   return {
     mode: "json-blocks",
     value: buildJsonBlockDraftPrompt(source),
