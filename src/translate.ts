@@ -2606,7 +2606,12 @@ export async function translateMarkdownArticle(source: string, options: Translat
           "audit",
           `Chunk ${chunk.index + 1}/${chunkPlan.chunks.length} (${chunk.headingPath.join(" > ") || "untitled"}): soft-gate caught chunk failure (${message}); falling back to source content.`
         );
-        const fallbackBody = restoreMarkdownSpans(chunk.source, spans);
+        // Pass only spans whose placeholder ID appears in this chunk's source
+        // — restoreMarkdownSpans throws if asked to restore a span absent from
+        // the body, and the document-wide `spans` includes IDs from other
+        // chunks.
+        const chunkSpans = spans.filter((span) => chunk.source.includes(span.id));
+        const fallbackBody = restoreMarkdownSpans(chunk.source, chunkSpans);
         chunkResult = {
           body: fallbackBody,
           repairCyclesUsed: 0,
