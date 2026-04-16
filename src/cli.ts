@@ -246,6 +246,7 @@ export async function runCli(
     const result = await dependencies.translate(source, {
       cwd: dependencies.cwd,
       sourcePathHint: args.inputPath ?? "stdin.md",
+      softGate: process.env.MDZH_SOFT_GATE === "true",
       onProgress: (message) => {
         const normalized = normalizeProgressMessage(message);
         if (normalized) {
