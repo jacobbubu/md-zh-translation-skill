@@ -3764,15 +3764,14 @@ function collapseRunawayEnglishAnchorChain(text: string): string {
   // after P2 / #22 did not surface any `X / Y` case-variant slash pattern,
   // so the guard is no longer needed as a safety net. Function kept for now
   // to make re-enable trivial if regression appears.
-  //
-  // Issue #14 guard reduction step 2: #13 collapseAdjacentDuplicateEnglishBe-
-  // foreChineseParen temporarily removed. Three consecutive post-P2 full-smoke
-  // runs did not surface any `X X（...）` adjacent-duplicate English pattern.
-  // Function body kept to keep revert trivial.
   return stripDanglingBoldTail(
     collapseDoubleBold(
       collapsePairs(
-        collapseChain(collapseNestedChineseEnglishParens(text))
+        collapseChain(
+          collapseAdjacentDuplicateEnglishBeforeChineseParen(
+            collapseNestedChineseEnglishParens(text)
+          )
+        )
       )
     )
   );
