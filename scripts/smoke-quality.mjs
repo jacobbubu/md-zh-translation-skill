@@ -86,7 +86,16 @@ function looksLikeCodeFenceLine(line) {
 }
 
 function countAsciiWords(text) {
-  return (text.match(/[A-Za-z]{3,}/g) ?? []).length;
+  // Ignore ASCII tokens that sit inside Chinese parens, Markdown emphasis,
+  // or inline code — those are legitimate anchor displays / kept-source
+  // surfaces, not English leakage.
+  const stripped = text
+    .replace(/（[^）\n]+）/g, "")
+    .replace(/\*\*[^*\n]+\*\*/g, "")
+    .replace(/\*[^*\n]+\*/g, "")
+    .replace(/_[^_\n]+_/g, "")
+    .replace(/`[^`\n]+`/g, "");
+  return (stripped.match(/[A-Za-z]{3,}/g) ?? []).length;
 }
 
 async function main() {
@@ -101,9 +110,28 @@ async function main() {
   const lines = markdown.split(/\r?\n/);
   const issues = [];
   let inFence = false;
+  // Skip YAML frontmatter at the top of the file (between leading `---`
+  // markers). frontmatter is metadata, not body translation.
+  let inFrontmatter = false;
+  let frontmatterClosed = false;
+  if (lines[0]?.trim() === "---") {
+    inFrontmatter = true;
+  }
 
   for (let index = 0; index < lines.length; index += 1) {
     const line = lines[index] ?? "";
+
+    if (inFrontmatter) {
+      if (index > 0 && line.trim() === "---") {
+        inFrontmatter = false;
+        frontmatterClosed = true;
+      }
+      continue;
+    }
+    if (!frontmatterClosed && index === 0 && line.trim() === "---") {
+      // Already handled above; safety guard.
+      continue;
+    }
 
     if (looksLikeCodeFenceLine(line)) {
       inFence = !inFence;
@@ -116,7 +144,11 @@ async function main() {
     if (/If you were to multiply this by 20/u.test(line)) {
       pushIssue(issues, "english-leak", "正文句仍为整句英文。", index + 1);
     }
-    if (/Sandbox mode(?!（sandbox mode）)/u.test(line)) {
+    if (
+      /Sandbox mode/i.test(line) &&
+      !/沙盒模式（[Ss]andbox mode）/.test(line) &&
+      !/[Ss]andbox mode（沙盒模式）/.test(line)
+    ) {
       pushIssue(issues, "anchor-leak", "正文里仍有裸英文 `Sandbox mode`。", index + 1);
     }
     if (/Prompt injection attacks）（/u.test(line) || /Supply chain attacks）（/u.test(line)) {
