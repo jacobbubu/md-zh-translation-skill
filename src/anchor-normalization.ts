@@ -91,7 +91,16 @@ export function normalizeSegmentAnchorText(text: string, slice: PromptSlice | nu
   }
 
   normalized = flipReversedBilingualForChinesePrimary(normalized, anchors);
-  return normalizeRepeatedEnglishParenthesesWithLocalHints(normalized);
+  const afterLocalHints = normalizeRepeatedEnglishParenthesesWithLocalHints(normalized);
+  // Always run list-item English+Chinese paren merge on every line at the
+  // end. This was previously only reached via injectAnchorIntoLine's internal
+  // normalizeExplicitRepairReplacementSpacing, but LLM draft sometimes
+  // produces `（English）（Chinese）` directly on list items without any
+  // anchor injection firing, leaving the two adjacent parens unmerged.
+  return afterLocalHints
+    .split(/\r?\n/)
+    .map((line) => mergeEnglishAnchorWithAdjacentChineseParenInLine(line))
+    .join("\n");
 }
 
 // Fix the case where LLM draft emits `English（chineseHint）` (English first)
