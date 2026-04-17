@@ -298,6 +298,14 @@ function createP2CompatibleExecutor(inner: CodexExecutor): CodexExecutor {
   return {
     async execute(prompt: string, options: CodexExecOptions): Promise<CodexExecResult> {
       if (options.outputSchema && prompt.includes("### BLOCK")) {
+        // Try inner executor first — it may return valid JSON blocks
+        const innerResult = await inner.execute(prompt, options);
+        try {
+          const parsed = JSON.parse(innerResult.text);
+          if (Array.isArray(parsed.blocks) && parsed.blocks.length > 0) {
+            return innerResult;
+          }
+        } catch { /* not valid JSON blocks, use placeholder */ }
         const blockCount = (prompt.match(/^### BLOCK \d+ \([^)]+\)$/gm) ?? []).length || 1;
         return createExecResult(
           JSON.stringify({ blocks: Array.from({ length: blockCount }, () => "中文占位译文") })
