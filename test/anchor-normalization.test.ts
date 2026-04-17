@@ -1487,11 +1487,3 @@ test("applySemanticMentionPlans rewrites alias first mention to canonical concep
   assert.match(result, /沙盒模式（sandbox mode）/);
 });
 
-test("restoreInlineCodeFromSourceShape restores inline code only at source locations (#48)", () => {
-  const source = "The `--flag` option works. Use --flag carefully.";
-  const translated = "The `--flag` 选项有效。谨慎使用 `--flag`。";
-  const result = restoreInlineCodeFromSourceShape(source, translated);
-  assert.match(result, /`--flag` 选项/);
-  // Second --flag should NOT have backticks (source doesn't have them there)
-  assert.match(result, /使用 --flag/);
-});

@@ -506,15 +506,15 @@ test("writeKnownEntityCandidatesIfRequested persists unknown anchors into a cand
     const result = await writeKnownEntityCandidatesIfRequested({
       anchors: [
         {
-          english: "Seatbelt",
-          chineseHint: "macOS 沙箱框架",
-          familyKey: "seatbelt",
+          english: "Firejail",
+          chineseHint: "Linux 沙箱工具",
+          familyKey: "firejail",
           displayPolicy: "english-primary",
           firstOccurrence: {
             chunkId: "chunk-2",
             segmentId: "chunk-2-segment-1"
           },
-          sourceForms: ["Seatbelt"]
+          sourceForms: ["Firejail"]
         }
       ],
       ignoredTerms: []
@@ -530,7 +530,7 @@ test("writeKnownEntityCandidatesIfRequested persists unknown anchors into a cand
     };
 
     assert.equal(saved.version, 1);
-    assert.equal(saved.entities[0]?.preferred_english, "Seatbelt");
+    assert.equal(saved.entities[0]?.preferred_english, "Firejail");
     assert.equal(saved.entities[0]?.display_policy, "english_primary_with_cn_hint");
   } finally {
     if (previous === undefined) {
