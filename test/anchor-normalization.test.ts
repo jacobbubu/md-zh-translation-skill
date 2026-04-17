@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 
 import {
   applyEmphasisPlanTargets,
+  applySemanticMentionPlans,
   formatAnchorDisplay,
   injectPlannedAnchorText,
   normalizeExplicitRepairAnchorText,
@@ -1020,4 +1021,207 @@ test("injectAnchorIntoLine upgrades bare English inside a Chinese paren list to 
     normalized,
     "- 预先批准的目标（npm 注册表（npm registry）、GitHub、你的 API）"
   );
+});
+
+// --- Session A: normalizer tests migrated from translate.test.ts (#48) ---
+
+test("applySemanticMentionPlans applies alias plan to replace bare Chinese with canonical display (#48)", () => {
+  const source = "> The Sandbox works by separating these two cases.\n";
+  const translated = "> 沙盒的工作方式，就是把这两种情况区分开来。\n";
+  const slice = createSlice({
+    aliasPlans: [
+      {
+        lineIndex: 1,
+        sourceText: "The Sandbox works by separating these two cases.",
+        currentText: "沙盒",
+        targetText: "沙盒（Sandbox）",
+        english: "Sandbox",
+        chineseHint: "沙盒"
+      }
+    ]
+  });
+
+  const result = applySemanticMentionPlans(source, translated, slice);
+
+  assert.match(result, /沙盒（Sandbox）的工作方式/);
+});
+
+test("applySemanticMentionPlans applies entity disambiguation plan before family canonicalization (#48)", () => {
+  const source = "This is not Claude code by default.\n";
+  const translated = "默认情况下，这不是 Claude Code 代码。\n";
+  const slice = createSlice({
+    entityDisambiguationPlans: [
+      {
+        lineIndex: 1,
+        sourceText: "This is not Claude code by default.",
+        currentText: "Claude Code 代码",
+        targetText: "Claude 代码",
+        english: "Claude code",
+        forbiddenDisplays: ["Claude Code 代码", "Claude Code代码"]
+      }
+    ]
+  });
+
+  const result = applySemanticMentionPlans(source, translated, slice);
+
+  assert.match(result, /Claude 代码/);
+  assert.ok(!result.includes("Claude Code 代码"));
+});
+
+test("applySemanticMentionPlans avoids duplicating Chinese suffix when alias target already contains canonical (#48)", () => {
+  const source = "> The Sandbox separates safe from unsafe.\n";
+  const translated = "> 沙盒模式（sandbox mode）将安全与不安全隔开。\n";
+  const slice = createSlice({
+    aliasPlans: [
+      {
+        lineIndex: 1,
+        sourceText: "The Sandbox separates safe from unsafe.",
+        currentText: "Sandbox",
+        targetText: "沙盒模式（sandbox mode）",
+        english: "sandbox mode",
+        chineseHint: "沙盒模式"
+      }
+    ]
+  });
+
+  const result = applySemanticMentionPlans(source, translated, slice);
+
+  // Should not duplicate — canonical already present
+  assert.equal(result, translated);
+});
+
+test("injectPlannedAnchorText skips anchor injection for command phrases (#48)", () => {
+  const slice = createSlice({
+    requiredAnchors: [
+      createAnchor("anchor-1", "git status", "Git 状态")
+    ]
+  });
+  const source = "Run `git status` to check.";
+  const translated = "运行 `git status` 来检查。";
+
+  const result = injectPlannedAnchorText(source, translated, slice);
+
+  // git status is a command phrase — should not get anchor injection
+  assert.ok(!result.includes("（git status）"));
+  assert.ok(!result.includes("Git 状态"));
+});
+
+test("normalizeSegmentAnchorText does not let generic registry normalization override a satisfied anchor (#48)", () => {
+  const slice = createSlice({
+    requiredAnchors: [
+      createAnchor("anchor-1", "npm registry", "npm 注册表", "npm-registry", "chinese-primary")
+    ]
+  });
+  const text = "- 预先批准的目标（npm 注册表（npm registry）、GitHub）";
+
+  const result = normalizeSegmentAnchorText(text, slice);
+
+  assert.match(result, /npm 注册表（npm registry）/);
+});
+
+test("applyEmphasisPlanTargets restores translatable strong emphasis from emphasis plan (#48)", () => {
+  const source = "Claude Code **now has a sandbox mode** that changes the workflow.";
+  const translated = "Claude Code **现在有了沙盒模式** 改变了工作流程。";
+  const slice = createSlice({
+    emphasisPlans: [
+      {
+        emphasisIndex: 1,
+        lineIndex: 1,
+        sourceText: "now has a sandbox mode",
+        strategy: "preserve-strong",
+        targetText: "现在有了沙盒模式（sandbox mode）",
+        governedTerms: ["sandbox mode"]
+      }
+    ]
+  });
+
+  const result = applyEmphasisPlanTargets(source, translated, slice);
+
+  assert.match(result, /现在有了沙盒模式（sandbox mode）/);
+});
+
+test("normalizeHeadingLikeAnchorText executes natural-heading plans directly (#48)", () => {
+  const source = "## Claude Code Permission Problem";
+  const translated = "## Claude Code 权限问题";
+  const slice = createSlice({
+    headingPlans: [
+      {
+        headingIndex: 1,
+        sourceHeading: "Claude Code Permission Problem",
+        strategy: "natural-heading",
+        targetHeading: "Claude Code 的权限问题",
+        governedTerms: ["Claude Code", "Permission Problem"]
+      }
+    ],
+    headingHints: ["Claude Code Permission Problem"]
+  });
+
+  const result = normalizeHeadingLikeAnchorText(source, translated, slice);
+
+  assert.match(result, /Claude Code 的权限问题/);
+});
+
+test("normalizeHeadingLikeAnchorText restores concept english-primary headings to bilingual form (#48)", () => {
+  const source = "**Network Isolation**";
+  const translated = "**网络隔离**";
+  const slice = createSlice({
+    requiredAnchors: [
+      {
+        ...createAnchor("anchor-1", "Network Isolation", "网络隔离", "network-isolation", "english-primary"),
+        displayMode: "english-primary",
+        canonicalDisplay: "Network Isolation（网络隔离）",
+        allowedDisplayForms: ["Network Isolation（网络隔离）"]
+      }
+    ],
+    headingHints: ["Network Isolation"]
+  });
+
+  const result = normalizeHeadingLikeAnchorText(source, translated, slice);
+
+  assert.match(result, /Network Isolation（网络隔离）/);
+});
+
+test("normalizeHeadingLikeAnchorText skips duplicate child anchors inside composite heading (#48)", () => {
+  const source = "## Filesystem Isolation";
+  const translated = "## 文件系统隔离（Filesystem Isolation）";
+  const slice = createSlice({
+    requiredAnchors: [
+      createAnchor("anchor-1", "Filesystem Isolation", "文件系统隔离", "filesystem-isolation", "chinese-primary")
+    ],
+    headingHints: ["Filesystem Isolation"]
+  });
+
+  const result = normalizeHeadingLikeAnchorText(source, translated, slice);
+
+  // Should not duplicate — canonical already present
+  const parenCount = (result.match(/（Filesystem Isolation）/g) ?? []).length;
+  assert.equal(parenCount, 1);
+});
+
+test("normalizeHeadingLikeAnchorText restores missing qualifiers inside category-style headings (#48)", () => {
+  const source = "## Filesystem Permissions (Critical)";
+  const translated = "## 文件系统权限";
+  const slice = createSlice({
+    requiredAnchors: [
+      {
+        ...createAnchor("anchor-1", "Filesystem Permissions", "文件系统权限", "filesystem-permissions", "chinese-primary"),
+        displayMode: "chinese-primary",
+        canonicalDisplay: "文件系统权限（Filesystem Permissions）",
+        allowedDisplayForms: ["文件系统权限（Filesystem Permissions）"]
+      }
+    ],
+    headingPlans: [
+      {
+        headingIndex: 1,
+        sourceHeading: "Filesystem Permissions (Critical)",
+        strategy: "source-template",
+        targetHeading: "文件系统权限（Filesystem Permissions）（关键）"
+      }
+    ],
+    headingHints: ["Filesystem Permissions (Critical)"]
+  });
+
+  const result = normalizeHeadingLikeAnchorText(source, translated, slice);
+
+  assert.match(result, /文件系统权限（Filesystem Permissions）/);
 });
