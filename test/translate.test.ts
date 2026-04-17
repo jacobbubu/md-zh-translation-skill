@@ -1167,6 +1167,10 @@ test("translateMarkdownArticle falls back to the hard-pass translation when styl
 
   class BrokenStyleExecutor implements CodexExecutor {
     async execute(prompt: string, options: CodexExecOptions): Promise<CodexExecResult> {
+      if (options.outputSchema && prompt.includes("### BLOCK")) {
+        const bc = (prompt.match(/^### BLOCK \d+ \([^)]+\)$/gm) ?? []).length || 1;
+        return createExecResult(JSON.stringify({ blocks: Array.from({ length: bc }, () => "中文占位译文") }));
+      }
       if (options.outputSchema || prompt.includes('"hard_checks"') || prompt.includes("只返回 JSON")) {
         return createExecResult(wrapAuditForSegments(prompt, passingAudit));
       }
@@ -1256,6 +1260,10 @@ test("translateMarkdownArticle falls back to the hard-pass translation when styl
 
   class MetaStyleExecutor implements CodexExecutor {
     async execute(prompt: string, options: CodexExecOptions): Promise<CodexExecResult> {
+      if (options.outputSchema && prompt.includes("### BLOCK")) {
+        const bc = (prompt.match(/^### BLOCK \d+ \([^)]+\)$/gm) ?? []).length || 1;
+        return createExecResult(JSON.stringify({ blocks: Array.from({ length: bc }, () => "中文占位译文") }));
+      }
       if (options.outputSchema || prompt.includes('"hard_checks"') || prompt.includes("只返回 JSON")) {
         return createExecResult(wrapAuditForSegments(prompt, passingAudit));
       }
@@ -1279,7 +1287,7 @@ test("translateMarkdownArticle falls back to the hard-pass translation when styl
   });
 
   assert.equal(result.styleApplied, false);
-  assert.match(result.markdown, /Prompt injection attacks can be blocked/);
+  assert.match(result.markdown, /中文占位译文/);
   assert.ok(
     progress.some((message) =>
       message.includes("style polish returned task-management or refusal text")
@@ -1300,6 +1308,10 @@ test("translateMarkdownArticle falls back to the hard-pass translation when styl
 
   class AgentsRuleStyleExecutor implements CodexExecutor {
     async execute(prompt: string, options: CodexExecOptions): Promise<CodexExecResult> {
+      if (options.outputSchema && prompt.includes("### BLOCK")) {
+        const bc = (prompt.match(/^### BLOCK \d+ \([^)]+\)$/gm) ?? []).length || 1;
+        return createExecResult(JSON.stringify({ blocks: Array.from({ length: bc }, () => "中文占位译文") }));
+      }
       if (options.outputSchema || prompt.includes('"hard_checks"') || prompt.includes("只返回 JSON")) {
         return createExecResult(wrapAuditForSegments(prompt, passingAudit));
       }
@@ -1323,7 +1335,7 @@ test("translateMarkdownArticle falls back to the hard-pass translation when styl
   });
 
   assert.equal(result.styleApplied, false);
-  assert.match(result.markdown, /Supply chain attacks can be blocked/);
+  assert.match(result.markdown, /中文占位译文/);
   assert.ok(
     progress.some((message) =>
       message.includes("style polish returned task-management or refusal text")
@@ -1344,6 +1356,10 @@ test("translateMarkdownArticle falls back to the hard-pass translation when styl
 
   class MissingProjectStyleExecutor implements CodexExecutor {
     async execute(prompt: string, options: CodexExecOptions): Promise<CodexExecResult> {
+      if (options.outputSchema && prompt.includes("### BLOCK")) {
+        const bc = (prompt.match(/^### BLOCK \d+ \([^)]+\)$/gm) ?? []).length || 1;
+        return createExecResult(JSON.stringify({ blocks: Array.from({ length: bc }, () => "中文占位译文") }));
+      }
       if (options.outputSchema || prompt.includes('"hard_checks"') || prompt.includes("只返回 JSON")) {
         return createExecResult(wrapAuditForSegments(prompt, passingAudit));
       }
@@ -1367,7 +1383,7 @@ test("translateMarkdownArticle falls back to the hard-pass translation when styl
   });
 
   assert.equal(result.styleApplied, false);
-  assert.match(result.markdown, /Supply chain attacks can be blocked/);
+  assert.match(result.markdown, /中文占位译文/);
   assert.ok(
     progress.some((message) =>
       message.includes("style polish returned task-management or refusal text")
@@ -1388,6 +1404,10 @@ test("translateMarkdownArticle falls back to the hard-pass translation when styl
 
   class MissingProjectOnlyStyleExecutor implements CodexExecutor {
     async execute(prompt: string, options: CodexExecOptions): Promise<CodexExecResult> {
+      if (options.outputSchema && prompt.includes("### BLOCK")) {
+        const bc = (prompt.match(/^### BLOCK \d+ \([^)]+\)$/gm) ?? []).length || 1;
+        return createExecResult(JSON.stringify({ blocks: Array.from({ length: bc }, () => "中文占位译文") }));
+      }
       if (options.outputSchema || prompt.includes('"hard_checks"') || prompt.includes("只返回 JSON")) {
         return createExecResult(wrapAuditForSegments(prompt, passingAudit));
       }
@@ -1411,7 +1431,7 @@ test("translateMarkdownArticle falls back to the hard-pass translation when styl
   });
 
   assert.equal(result.styleApplied, false);
-  assert.match(result.markdown, /Autonomous coding agents need file access/);
+  assert.match(result.markdown, /中文占位译文/);
   assert.ok(
     progress.some((message) =>
       message.includes("style polish returned task-management or refusal text")
@@ -1927,6 +1947,10 @@ test("translateMarkdownArticle canonicalizes expanded URL spans before final sty
     readonly prompts: string[] = [];
 
     async execute(prompt: string, options: CodexExecOptions): Promise<CodexExecResult> {
+      if (options.outputSchema && prompt.includes("### BLOCK")) {
+        const bc = (prompt.match(/^### BLOCK \d+ \([^)]+\)$/gm) ?? []).length || 1;
+        return createExecResult(JSON.stringify({ blocks: Array.from({ length: bc }, () => "中文占位译文") }));
+      }
       this.prompts.push(prompt);
 
       if (options.outputSchema || prompt.includes('"hard_checks"') || prompt.includes("只返回 JSON")) {
@@ -1972,6 +1996,10 @@ test("translateMarkdownArticle restores style-polish output that expands markdow
 
   class ExpandedStyleLinkExecutor implements CodexExecutor {
     async execute(prompt: string, options: CodexExecOptions): Promise<CodexExecResult> {
+      if (options.outputSchema && prompt.includes("### BLOCK")) {
+        const bc = (prompt.match(/^### BLOCK \d+ \([^)]+\)$/gm) ?? []).length || 1;
+        return createExecResult(JSON.stringify({ blocks: Array.from({ length: bc }, () => "中文占位译文") }));
+      }
       if (options.outputSchema || prompt.includes('"hard_checks"') || prompt.includes("只返回 JSON")) {
         return createExecResult(wrapAuditForSegments(prompt, createAudit(true)));
       }
