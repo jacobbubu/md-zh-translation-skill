@@ -7405,7 +7405,7 @@ const MIN_SEGMENT_HEADING_SPLIT_CHARACTERS = 2600;
 const MIN_COMPLEX_SEGMENT_CHARACTERS = 160;
 const COMPLEX_SEGMENT_SCORE_THRESHOLD = 4;
 
-function splitProtectedChunkSegments(
+export function splitProtectedChunkSegments(
   source: string,
   spanIndex: ReadonlyMap<string, ProtectedSpan>
 ): ProtectedChunkSegment[] {

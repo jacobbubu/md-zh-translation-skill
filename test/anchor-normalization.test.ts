@@ -1327,3 +1327,72 @@ test("normalizeHeadingLikeAnchorText strips full english back-reference from ope
 
   assert.match(result, /编辑配置：/);
 });
+
+// --- Session A: segment-split tests migrated (#48) ---
+
+import { splitProtectedChunkSegments } from "../src/translate.js";
+import { protectMarkdownSpans, type ProtectedSpan } from "../src/markdown-protection.js";
+import { planMarkdownChunks } from "../src/markdown-chunks.js";
+
+function buildSpanIndex(spans: readonly ProtectedSpan[]) {
+  return new Map(spans.map((s) => [s.id, s]));
+}
+
+function getChunkSegmentSources(source: string): string[] {
+  const { protectedBody, spans } = protectMarkdownSpans(source);
+  const plan = planMarkdownChunks(protectedBody);
+  const spanIndex = buildSpanIndex(spans);
+  const allSegments: string[] = [];
+  for (const chunk of plan.chunks) {
+    const segments = splitProtectedChunkSegments(chunk.source, spanIndex);
+    for (const seg of segments) {
+      if (seg.kind === "translatable") {
+        allSegments.push(seg.source);
+      }
+    }
+  }
+  return allSegments;
+}
+
+test("splitProtectedChunkSegments splits heading-like block away from a following list (#48)", () => {
+  const source = "**Network Isolation**\n\n- Pre-approved destinations (npm registry, GitHub)\n- Blocked destinations\n";
+  const segments = getChunkSegmentSources(source);
+
+  assert.ok(segments.some((s) => s.includes("**Network Isolation**") && !s.includes("Pre-approved")));
+  assert.ok(segments.some((s) => s.includes("Pre-approved") && !s.includes("**Network Isolation**")));
+});
+
+test("splitProtectedChunkSegments splits standalone intro blockquote away from following paragraphs (#48)", () => {
+  const source = "> If you've been coding with Claude Code, you've hit two walls.\n\nNeither option is sustainable.\n";
+  const segments = getChunkSegmentSources(source);
+
+  assert.ok(segments.some((s) => s.startsWith(">") && !s.includes("Neither")));
+  assert.ok(segments.some((s) => s.includes("Neither") && !s.startsWith(">")));
+});
+
+test("splitProtectedChunkSegments splits before heading when pending content has list or blockquote (#48)", () => {
+  const source = "- Item one\n- Item two\n\n## Next Section\n\nParagraph.\n";
+  const segments = getChunkSegmentSources(source);
+
+  assert.ok(segments.some((s) => s.includes("Item one") && !s.includes("## Next")));
+  assert.ok(segments.some((s) => s.includes("## Next")));
+});
+
+test("splitProtectedChunkSegments splits blockquote away from preceding list before next heading (#48)", () => {
+  const source = "- Item A\n- Item B\n\n> Quote here.\n\n## Heading\n";
+  const segments = getChunkSegmentSources(source);
+
+  assert.ok(segments.some((s) => s.includes("Item A") && !s.includes("> Quote")));
+  assert.ok(segments.some((s) => s.startsWith(">") && s.includes("Quote")));
+});
+
+test("splitProtectedChunkSegments keeps standalone code blocks as fixed segments (#48)", () => {
+  const source = "Intro text.\n\n```\nconst x = 1;\n```\n\nAfter code.\n";
+  const { protectedBody, spans } = protectMarkdownSpans(source);
+  const plan = planMarkdownChunks(protectedBody);
+  const spanIndex = buildSpanIndex(spans);
+  const allSegments = plan.chunks.flatMap((chunk) => splitProtectedChunkSegments(chunk.source, spanIndex));
+
+  assert.ok(allSegments.some((s) => s.kind === "fixed"));
+  assert.ok(allSegments.some((s) => s.kind === "translatable" && s.source.includes("Intro")));
+});
