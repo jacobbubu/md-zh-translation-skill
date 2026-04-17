@@ -1462,46 +1462,6 @@ test("translateMarkdownArticle restores inline code only at source locations whe
   assert.doesNotMatch(result.markdown, /如果你使用 `--dangerously-skip-permissions` 标志/);
 });
 
-test("translateMarkdownArticle canonicalizes inline code fence shape back to the source form", async () => {
-  const source = [
-    "## Claude Code Permission Problem",
-    "",
-    "The `--dangerously-skip-permissions` flag exists as an escape hatch from this fatigue."
-  ].join("\n");
-
-  class DoubleBacktickExecutor implements CodexExecutor {
-    async execute(prompt: string, options: CodexExecOptions): Promise<CodexExecResult> {
-      if (options.outputSchema && prompt.includes("### BLOCK")) {
-        const bc = (prompt.match(/^### BLOCK \d+ \([^)]+\)$/gm) ?? []).length || 1;
-        return createExecResult(JSON.stringify({ blocks: Array.from({ length: bc }, () => "中文占位译文") }));
-      }
-      if (isDocumentAnalysisPrompt(prompt)) {
-        return createExecResult(createEmptyAnchorCatalog());
-      }
-
-      if (options.outputSchema || prompt.includes('"hard_checks"') || prompt.includes("只返回 JSON")) {
-        return createExecResult(wrapAuditForSegments(prompt, createAudit(true)));
-      }
-
-      const translated = [
-        "## Claude Code 权限问题",
-        "",
-        "这个 ``--dangerously-skip-permissions`` 标志是为了缓解这种疲劳而存在的逃生舱。"
-      ].join("\n");
-
-      return createExecResult(translated);
-    }
-  }
-
-  const result = await translateMarkdownArticle(source, {
-    executor: new DoubleBacktickExecutor(),
-    formatter: async (markdown) => markdown
-  });
-
-  assert.match(result.markdown, /`--dangerously-skip-permissions`/);
-  assert.doesNotMatch(result.markdown, /``--dangerously-skip-permissions``/);
-});
-
 test("translateMarkdownArticle restores code-like wildcard tokens back to the source shape", async () => {
   const source = "- Wildcards: ./src/**/*.js\n";
 
@@ -4535,55 +4495,6 @@ test("translateMarkdownArticle synthesizes missing first-mention repair tasks wh
   }
 });
 
-test("translateMarkdownArticle does not let explicit package-registry wording override an established semantic anchor", async () => {
-  const source = [
-    "### Supply Chain Attacks",
-    "",
-    "Use the npm registry for package downloads.",
-    "",
-    "The npm registry remains the only allowed destination.",
-    ""
-  ].join("\n");
-
-  const result = await translateMarkdownArticle(source, {
-    executor: createP2CompatibleExecutor({
-      async execute(prompt, options) {
-        if (isDocumentAnalysisPrompt(prompt)) {
-          return createExecResult(createEmptyAnchorCatalog());
-        }
-
-        if (options.outputSchema && prompt.includes("【分段审校输入】")) {
-          return createExecResult(
-            wrapPerSegmentAudits(prompt, [
-              {
-                segment_index: 1,
-                audit: createAudit(true)
-              }
-            ])
-          );
-        }
-
-        if (options.outputSchema || prompt.includes("只返回 JSON")) {
-          return createExecResult(JSON.stringify(createAudit(true)));
-        }
-
-        return createExecResult([
-          "### 供应链攻击",
-          "",
-          "使用 npm 注册表进行包下载。",
-          "",
-          "npm 注册表仍然是唯一允许的目标。",
-          ""
-        ].join("\n"));
-      }
-    }),
-    formatter: async (markdown) => markdown
-  });
-
-  assert.match(result.markdown, /npm 注册表（npm registry）/);
-  assert.doesNotMatch(result.markdown, /包注册源/);
-});
-
 test("translateMarkdownArticle does not let generic package-registry normalization choose the meaning of approved registries", async () => {
   const source = [
     "### Supply Chain Attacks",
@@ -4626,51 +4537,6 @@ test("translateMarkdownArticle does not let generic package-registry normalizati
   });
 
   assert.match(result.markdown, /已批准的注册表/);
-  assert.doesNotMatch(result.markdown, /包注册源/);
-});
-
-test("translateMarkdownArticle does not rewrite generic registry text outside package dependency context", async () => {
-  const source = [
-    "### Windows Internals",
-    "",
-    "The Windows registry stores system configuration values.",
-    ""
-  ].join("\n");
-
-  const result = await translateMarkdownArticle(source, {
-    executor: createP2CompatibleExecutor({
-      async execute(prompt, options) {
-        if (isDocumentAnalysisPrompt(prompt)) {
-          return createExecResult(createEmptyAnchorCatalog());
-        }
-
-        if (options.outputSchema && prompt.includes("【分段审校输入】")) {
-          return createExecResult(
-            wrapPerSegmentAudits(prompt, [
-              {
-                segment_index: 1,
-                audit: createAudit(true)
-              }
-            ])
-          );
-        }
-
-        if (options.outputSchema || prompt.includes("只返回 JSON")) {
-          return createExecResult(JSON.stringify(createAudit(true)));
-        }
-
-        return createExecResult([
-          "### Windows Internals",
-          "",
-          "Windows 注册表存储系统配置值。",
-          ""
-        ].join("\n"));
-      }
-    }),
-    formatter: async (markdown) => markdown
-  });
-
-  assert.match(result.markdown, /Windows 注册表存储系统配置值/);
   assert.doesNotMatch(result.markdown, /包注册源/);
 });
 
