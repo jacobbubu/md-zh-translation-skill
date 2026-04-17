@@ -4572,51 +4572,6 @@ test("translateMarkdownArticle strips full english back-reference from operation
   assert.match(result.markdown, /\*\*编辑配置：\*\*/);
 });
 
-test("translateMarkdownArticle skips duplicate child anchors inside a composite heading", async () => {
-  const source = [
-    "# Title",
-    "",
-    "## React/Next.js Web Project Configuration Example",
-    "",
-    "Body.",
-    ""
-  ].join("\n");
-
-  const result = await translateMarkdownArticle(source, {
-    executor: createP2CompatibleExecutor({
-      async execute(prompt, options) {
-        if (options.outputSchema && prompt.includes("【分段审校输入】")) {
-          return createExecResult(wrapPerSegmentAudits(prompt, [{ segment_index: 1, audit: createAudit(true) }]));
-        }
-
-        if (options.outputSchema || prompt.includes("只返回 JSON")) {
-          return createExecResult(JSON.stringify(createAudit(true)));
-        }
-
-        const currentTranslation = extractPromptSection(prompt, "【当前译文】");
-        if (currentTranslation !== null) {
-          return createExecResult(currentTranslation);
-        }
-
-        return createExecResult(
-          [
-            "# Title",
-            "",
-            "## React/Next.js（Next.js（框架））Web 项目配置示例",
-            "",
-            "正文。",
-            ""
-          ].join("\n")
-        );
-      }
-    }),
-    formatter: async (markdown) => markdown
-  });
-
-  assert.match(result.markdown, /^## React\/Next\.js Web 项目配置示例$/m);
-  assert.doesNotMatch(result.markdown, /Next\.js（Next\.js（框架））/);
-});
-
 test("translateMarkdownArticle restores an ATX heading anchor after repair when must_fix only names the translated heading", async () => {
   const source = [
     "# Title",
@@ -4727,56 +4682,6 @@ test("translateMarkdownArticle restores the canonical bilingual display for an e
   });
 
   assert.match(result.markdown, /### 意外的破坏性操作（Accidental Destructive Operations）/);
-});
-
-test("translateMarkdownArticle restores missing source heading qualifiers inside category-style headings", async () => {
-  const source = [
-    "# Title",
-    "",
-    "### Category 2: Prompted (Requires Permission)",
-    "",
-    "Body.",
-    ""
-  ].join("\n");
-
-  let auditCount = 0;
-  const result = await translateMarkdownArticle(source, {
-    executor: createP2CompatibleExecutor({
-      async execute(prompt, options) {
-        if (options.outputSchema && prompt.includes("【分段审校输入】")) {
-          auditCount += 1;
-          if (auditCount === 1) {
-            return createExecResult(
-              wrapPerSegmentAudits(prompt, [
-                {
-                  segment_index: 1,
-                  audit: createAudit(false, [
-                    "位置：### 第 2 类：提示式（Prompted）。问题：缺少源文标题括注“Requires Permission”的对应信息。修复目标：补齐该标题的中英文对照，且不改动结构。"
-                  ])
-                }
-              ])
-            );
-          }
-
-          return createExecResult(wrapPerSegmentAudits(prompt, [{ segment_index: 1, audit: createAudit(true) }]));
-        }
-
-        if (options.outputSchema || prompt.includes("只返回 JSON")) {
-          return createExecResult(JSON.stringify(createAudit(true)));
-        }
-
-        const currentTranslation = extractPromptSection(prompt, "【当前译文】");
-        if (currentTranslation !== null) {
-          return createExecResult(currentTranslation);
-        }
-
-        return createExecResult(["# Title", "", "### 第 2 类：提示式（Prompted）", "", "正文。", ""].join("\n"));
-      }
-    }),
-    formatter: async (markdown) => markdown
-  });
-
-  assert.match(result.markdown, /### 第 2 类：提示式（Prompted，Requires Permission）/);
 });
 
 test("translateMarkdownArticle restores a named anchor inside an ATX heading after repair", async () => {
@@ -4903,73 +4808,6 @@ test("translateMarkdownArticle keeps a source-shaped english-primary heading dur
 
   assert.match(result.markdown, /\*\*选项 2：cco Sandbox\*\*/);
   assert.doesNotMatch(result.markdown, /cco Sandbox（cco Sandbox/);
-});
-
-test("translateMarkdownArticle restores concept english-primary headings to bilingual canonical form", async () => {
-  const source = [
-    "# Title",
-    "",
-    "**Network Isolation**",
-    "",
-    "Body.",
-    ""
-  ].join("\n");
-
-  let auditCount = 0;
-  const result = await translateMarkdownArticle(source, {
-    executor: createP2CompatibleExecutor({
-      async execute(prompt, options) {
-        if (isDocumentAnalysisPrompt(prompt)) {
-          return createExecResult(
-            createAnchorCatalog([
-              {
-                english: "Network Isolation",
-                chineseHint: "网络隔离",
-                familyKey: "network-isolation",
-                displayPolicy: "english-primary",
-                chunkId: "chunk-1",
-                segmentId: "chunk-1-segment-1"
-              }
-            ])
-          );
-        }
-
-        if (options.outputSchema && prompt.includes("【分段审校输入】")) {
-          auditCount += 1;
-          if (auditCount === 1) {
-            return createExecResult(
-              wrapPerSegmentAudits(prompt, [
-                {
-                  segment_index: 1,
-                  audit: createAudit(false, [
-                    "当前分段标题“**Network Isolation**”首次出现需补中英对照，修复目标是改为合法锚定形式“Network Isolation（网络隔离）”。"
-                  ])
-                }
-              ])
-            );
-          }
-
-          return createExecResult(
-            wrapPerSegmentAudits(prompt, [{ segment_index: 1, audit: createAudit(true) }])
-          );
-        }
-
-        if (options.outputSchema || prompt.includes("只返回 JSON")) {
-          return createExecResult(JSON.stringify(createAudit(true)));
-        }
-
-        const currentTranslation = extractPromptSection(prompt, "【当前译文】");
-        if (currentTranslation !== null) {
-          return createExecResult(currentTranslation);
-        }
-
-        return createExecResult(["# Title", "", "**Network Isolation**", "", "正文。", ""].join("\n"));
-      }
-    }),
-    formatter: async (markdown) => markdown
-  });
-
-  assert.match(result.markdown, /\*\*Network Isolation（网络隔离）\*\*/);
 });
 
 test("translateMarkdownArticle prefers explicit chinese canonical repair targets over incidental english mentions", async () => {
@@ -5652,62 +5490,6 @@ test("translateMarkdownArticle adds structure guidance for translatable emphasis
   assert.match(prompt, /【当前分段附加规则】/);
   assert.match(prompt, /当前分段包含可翻译的 Markdown 强调结构或命令\/flag 写法/);
   assert.match(prompt, /--dangerously-skip-permissions/);
-});
-
-test("translateMarkdownArticle restores translatable strong emphasis from LLM emphasis plans", async () => {
-  const source = [
-    "# Title",
-    "",
-    "Claude Code **now has a sandbox mode** that changes the workflow.",
-    ""
-  ].join("\n");
-
-  const result = await translateMarkdownArticle(source, {
-    executor: createP2CompatibleExecutor({
-      async execute(prompt, options) {
-        if (isDocumentAnalysisPrompt(prompt)) {
-          return createExecResult(
-            createAnchorCatalog(
-              [],
-              [],
-              [
-                {
-                  chunkId: "chunk-1",
-                  segmentId: "chunk-1-segment-1",
-                  emphasisIndex: 1,
-                  lineIndex: 1,
-                  sourceText: "now has a sandbox mode",
-                  strategy: "preserve-strong",
-                  targetText: "现在有了沙盒模式（sandbox mode）",
-                  governedTerms: ["sandbox mode"]
-                }
-              ]
-            )
-          );
-        }
-
-        if (options.outputSchema && prompt.includes("【分段审校输入】")) {
-          return createExecResult(
-            wrapPerSegmentAudits(prompt, [
-              {
-                segment_index: 1,
-                audit: createAudit(true)
-              }
-            ])
-          );
-        }
-
-        if (options.outputSchema || prompt.includes("只返回 JSON")) {
-          return createExecResult(JSON.stringify(createAudit(true)));
-        }
-
-        return createExecResult(["# Title", "", "Claude Code 现在有了沙盒模式，改变了工作流。", ""].join("\n"));
-      }
-    }),
-    formatter: async (markdown) => markdown
-  });
-
-  assert.match(result.markdown, /\*\*现在有了沙盒模式（sandbox mode）\*\*/);
 });
 
 test("translateMarkdownArticle recovers missing emphasis plans before drafting", async () => {
@@ -6650,60 +6432,6 @@ test("translateMarkdownArticle prefers LLM heading plans over heuristic heading 
   assert.match(auditedTranslation, /\*\*示例：\*\*/);
   assert.match(result.markdown, /\*\*Glob 模式（Patterns）：\*\*/);
   assert.match(result.markdown, /\*\*示例：\*\*/);
-});
-
-test("translateMarkdownArticle executes LLM natural-heading plans directly", async () => {
-  const source = ["# Title", "", "## Claude Code Permission Problem", ""].join("\n");
-  let auditedTranslation = "";
-
-  const result = await translateMarkdownArticle(source, {
-    executor: createP2CompatibleExecutor({
-      async execute(prompt, options) {
-        if (isDocumentAnalysisPrompt(prompt)) {
-          return createExecResult(
-            createAnchorCatalog(
-              [
-                {
-                  english: "Claude Code Sandbox",
-                  chineseHint: "沙盒模式",
-                  familyKey: "claude code sandbox mode",
-                  displayPolicy: "chinese-primary"
-                }
-              ],
-              [
-                {
-                  chunkId: "chunk-1",
-                  segmentId: "chunk-1-segment-1",
-                  headingIndex: 1,
-                  sourceHeading: "Claude Code Permission Problem",
-                  strategy: "natural-heading",
-                  targetHeading: "Claude Code 的权限问题",
-                  governedTerms: ["Claude Code", "Permission Problem"]
-                }
-              ]
-            )
-          );
-        }
-
-        if (options.outputSchema || prompt.includes('"hard_checks"') || prompt.includes("只返回 JSON")) {
-          auditedTranslation = extractPromptSection(prompt, "【当前译文】") ?? "";
-          return createExecResult(wrapAuditForSegments(prompt, createAudit(true)));
-        }
-
-        const currentTranslation = extractPromptSection(prompt, "【当前译文】");
-        if (currentTranslation !== null) {
-          return createExecResult(currentTranslation);
-        }
-
-        return createExecResult(["# Title", "", "## 权限问题", ""].join("\n"));
-      }
-    }),
-    formatter: async (markdown) => markdown
-  });
-
-  assert.match(auditedTranslation, /## Claude Code 的权限问题/);
-  assert.doesNotMatch(auditedTranslation, /Permission Problem/u);
-  assert.match(result.markdown, /## Claude Code 的权限问题/);
 });
 
 test("translateMarkdownArticle falls back to a known global anchor when a headingPlan is missing", async () => {

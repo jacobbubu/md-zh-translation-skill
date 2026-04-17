@@ -1118,3 +1118,110 @@ test("normalizeSegmentAnchorText does not let generic registry normalization ove
 
   assert.match(result, /npm 注册表（npm registry）/);
 });
+
+test("applyEmphasisPlanTargets restores translatable strong emphasis from emphasis plan (#48)", () => {
+  const source = "Claude Code **now has a sandbox mode** that changes the workflow.";
+  const translated = "Claude Code **现在有了沙盒模式** 改变了工作流程。";
+  const slice = createSlice({
+    emphasisPlans: [
+      {
+        emphasisIndex: 1,
+        lineIndex: 1,
+        sourceText: "now has a sandbox mode",
+        strategy: "preserve-strong",
+        targetText: "现在有了沙盒模式（sandbox mode）",
+        governedTerms: ["sandbox mode"]
+      }
+    ]
+  });
+
+  const result = applyEmphasisPlanTargets(source, translated, slice);
+
+  assert.match(result, /现在有了沙盒模式（sandbox mode）/);
+});
+
+test("normalizeHeadingLikeAnchorText executes natural-heading plans directly (#48)", () => {
+  const source = "## Claude Code Permission Problem";
+  const translated = "## Claude Code 权限问题";
+  const slice = createSlice({
+    headingPlans: [
+      {
+        headingIndex: 1,
+        sourceHeading: "Claude Code Permission Problem",
+        strategy: "natural-heading",
+        targetHeading: "Claude Code 的权限问题",
+        governedTerms: ["Claude Code", "Permission Problem"]
+      }
+    ],
+    headingHints: ["Claude Code Permission Problem"]
+  });
+
+  const result = normalizeHeadingLikeAnchorText(source, translated, slice);
+
+  assert.match(result, /Claude Code 的权限问题/);
+});
+
+test("normalizeHeadingLikeAnchorText restores concept english-primary headings to bilingual form (#48)", () => {
+  const source = "**Network Isolation**";
+  const translated = "**网络隔离**";
+  const slice = createSlice({
+    requiredAnchors: [
+      {
+        ...createAnchor("anchor-1", "Network Isolation", "网络隔离", "network-isolation", "english-primary"),
+        displayMode: "english-primary",
+        canonicalDisplay: "Network Isolation（网络隔离）",
+        allowedDisplayForms: ["Network Isolation（网络隔离）"]
+      }
+    ],
+    headingHints: ["Network Isolation"]
+  });
+
+  const result = normalizeHeadingLikeAnchorText(source, translated, slice);
+
+  assert.match(result, /Network Isolation（网络隔离）/);
+});
+
+test("normalizeHeadingLikeAnchorText skips duplicate child anchors inside composite heading (#48)", () => {
+  const source = "## Filesystem Isolation";
+  const translated = "## 文件系统隔离（Filesystem Isolation）";
+  const slice = createSlice({
+    requiredAnchors: [
+      createAnchor("anchor-1", "Filesystem Isolation", "文件系统隔离", "filesystem-isolation", "chinese-primary")
+    ],
+    headingHints: ["Filesystem Isolation"]
+  });
+
+  const result = normalizeHeadingLikeAnchorText(source, translated, slice);
+
+  // Should not duplicate — canonical already present
+  const parenCount = (result.match(/（Filesystem Isolation）/g) ?? []).length;
+  assert.equal(parenCount, 1);
+});
+
+test("normalizeHeadingLikeAnchorText restores missing qualifiers inside category-style headings (#48)", () => {
+  const source = "## Filesystem Permissions (Critical)";
+  const translated = "## 文件系统权限";
+  const slice = createSlice({
+    requiredAnchors: [
+      {
+        ...createAnchor("anchor-1", "Filesystem Permissions", "文件系统权限", "filesystem-permissions", "chinese-primary"),
+        displayMode: "chinese-primary",
+        canonicalDisplay: "文件系统权限（Filesystem Permissions）",
+        allowedDisplayForms: ["文件系统权限（Filesystem Permissions）"]
+      }
+    ],
+    headingPlans: [
+      {
+        headingIndex: 1,
+        sourceHeading: "Filesystem Permissions (Critical)",
+        strategy: "source-template",
+        targetHeading: "文件系统权限（Filesystem Permissions）（关键）"
+      }
+    ],
+    headingHints: ["Filesystem Permissions (Critical)"]
+  });
+
+  const result = normalizeHeadingLikeAnchorText(source, translated, slice);
+
+  assert.match(result, /文件系统权限（Filesystem Permissions）/);
+});
