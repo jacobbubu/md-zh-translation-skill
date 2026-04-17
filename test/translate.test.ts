@@ -234,10 +234,14 @@ class StubExecutor implements CodexExecutor {
     }));
   }
 
-  async execute(prompt: string, _options: CodexExecOptions): Promise<CodexExecResult> {
+  async execute(prompt: string, options: CodexExecOptions): Promise<CodexExecResult> {
     this.prompts.push(prompt);
     if (isDocumentAnalysisPrompt(prompt)) {
       return createExecResult(createEmptyAnchorCatalog());
+    }
+    if (options.outputSchema && prompt.includes("### BLOCK")) {
+      const blockCount = (prompt.match(/^### BLOCK \d+ \([^)]+\)$/gm) ?? []).length || 1;
+      return createExecResult(JSON.stringify({ blocks: Array.from({ length: blockCount }, () => "中文占位译文") }));
     }
     const next = this.responses.shift();
     assert.ok(next, "Unexpected extra Codex call");
@@ -268,6 +272,11 @@ class PromptAwareExecutor implements CodexExecutor {
       return createExecResult(createEmptyAnchorCatalog());
     }
 
+    if (options.outputSchema && prompt.includes("### BLOCK")) {
+      const blockCount = (prompt.match(/^### BLOCK \d+ \([^)]+\)$/gm) ?? []).length || 1;
+      return createExecResult(JSON.stringify({ blocks: Array.from({ length: blockCount }, () => "中文占位译文") }));
+    }
+
     if (options.outputSchema || prompt.includes('"hard_checks"') || prompt.includes("只返回 JSON")) {
       return createExecResult(wrapAuditForSegments(prompt, createAudit(true)));
     }
@@ -278,8 +287,35 @@ class PromptAwareExecutor implements CodexExecutor {
     }
 
     const source = extractPromptSection(prompt, "【英文原文】");
-    return createExecResult(source ?? "");
+    return createExecResult(source ? "中文占位译文" : "");
   }
+}
+
+// P2 wrapper: intercepts JSON-blocks draft lane, guards against echoed
+// English and empty content so inline test executors don't need individual
+// BLOCK / contract-violation handling.
+function createP2CompatibleExecutor(inner: CodexExecutor): CodexExecutor {
+  return {
+    async execute(prompt: string, options: CodexExecOptions): Promise<CodexExecResult> {
+      if (options.outputSchema && prompt.includes("### BLOCK")) {
+        const blockCount = (prompt.match(/^### BLOCK \d+ \([^)]+\)$/gm) ?? []).length || 1;
+        return createExecResult(
+          JSON.stringify({ blocks: Array.from({ length: blockCount }, () => "中文占位译文") })
+        );
+      }
+      const result = await inner.execute(prompt, options);
+      if (!result.text.trim()) {
+        return { ...result, text: "中文占位译文" };
+      }
+      if (!/[\u4e00-\u9fff]/u.test(result.text) && result.text.trim().length >= 15) {
+        const srcMatch = prompt.match(/【英文原文】\n([\s\S]*?)(?:\n\n【|$)/);
+        if (srcMatch && result.text.trim() === srcMatch[1]?.trim()) {
+          return { ...result, text: "中文占位译文" };
+        }
+      }
+      return result;
+    }
+  };
 }
 
 function createExecResult(text: string, threadId?: string): CodexExecResult {
@@ -800,7 +836,7 @@ test("translateMarkdownArticle normalizes protected link label spacing and malfo
   ].join("\n");
 
   const result = await translateMarkdownArticle(source, {
-    executor: {
+    executor: createP2CompatibleExecutor({
       async execute(prompt, options) {
         if (isDocumentAnalysisPrompt(prompt)) {
           return createExecResult(createEmptyAnchorCatalog());
@@ -829,7 +865,7 @@ test("translateMarkdownArticle normalizes protected link label spacing and malfo
           "默认情况下，这并不是 Claude Code（Anthropic 的命令行编码助手） 代码，而是由 Linux [bubblewrap（安全隔离组件） ](https://github.com/containers/bubblewrap) 或 [macOS](https://en.wikipedia.org/wiki/MacOS) * Seatbel*t 强制实施的隔离。"
         );
       }
-    },
+    }),
     formatter: async (markdown) => markdown
   });
 
@@ -1609,7 +1645,7 @@ test("translateMarkdownArticle restores code-like wildcard tokens back to the so
   const source = "- Wildcards: ./src/**/*.js\n";
 
   const result = await translateMarkdownArticle(source, {
-    executor: {
+    executor: createP2CompatibleExecutor({
       async execute(prompt, options) {
         if (isDocumentAnalysisPrompt(prompt)) {
           return createExecResult(createEmptyAnchorCatalog());
@@ -1630,7 +1666,7 @@ test("translateMarkdownArticle restores code-like wildcard tokens back to the so
 
         return createExecResult("- 通配符：./src/\\*_/_.js");
       }
-    },
+    }),
     formatter: async (markdown) => markdown
   });
 
@@ -1649,7 +1685,7 @@ test("translateMarkdownArticle restores source-shaped example tokens inside mark
   ].join("\n");
 
   const result = await translateMarkdownArticle(source, {
-    executor: {
+    executor: createP2CompatibleExecutor({
       async execute(prompt, options) {
         if (isDocumentAnalysisPrompt(prompt)) {
           return createExecResult(createEmptyAnchorCatalog());
@@ -1679,7 +1715,7 @@ test("translateMarkdownArticle restores source-shaped example tokens inside mark
           ].join("\n")
         );
       }
-    },
+    }),
     formatter: async (markdown) => markdown
   });
 
@@ -2802,7 +2838,7 @@ test("translateMarkdownArticle repeats heading-only repair guidance when must_fi
 
   const executor = new PromptAwareExecutor();
   await translateMarkdownArticle(source, {
-    executor: {
+    executor: createP2CompatibleExecutor({
       async execute(prompt, options) {
         executor.prompts.push(prompt);
 
@@ -2843,7 +2879,7 @@ test("translateMarkdownArticle repeats heading-only repair guidance when must_fi
         const sourceSection = extractPromptSection(prompt, "【英文原文】");
         return createExecResult(sourceSection ?? "");
       }
-    },
+    }),
     formatter: async (markdown) => markdown
   });
 
@@ -2870,7 +2906,7 @@ test("translateMarkdownArticle synthesizes a local heading anchor target when au
   let auditCount = 0;
   const executor = new PromptAwareExecutor();
   const result = await translateMarkdownArticle(source, {
-    executor: {
+    executor: createP2CompatibleExecutor({
       async execute(prompt, options) {
         executor.prompts.push(prompt);
 
@@ -2907,7 +2943,7 @@ test("translateMarkdownArticle synthesizes a local heading anchor target when au
 
         return createExecResult(["# Title", "", "## 沙盒模式如何改变自主编码", "", "正文。", ""].join("\n"));
       }
-    },
+    }),
     formatter: async (markdown) => markdown
   });
 
@@ -2923,7 +2959,7 @@ test("translateMarkdownArticle suppresses first-mention demands that are neither
 
   let auditCount = 0;
   const result = await translateMarkdownArticle(source, {
-    executor: {
+    executor: createP2CompatibleExecutor({
       async execute(prompt, options) {
         if (isDocumentAnalysisPrompt(prompt)) {
           return createExecResult(createEmptyAnchorCatalog());
@@ -2958,7 +2994,7 @@ test("translateMarkdownArticle suppresses first-mention demands that are neither
 
         return createExecResult(["# Title", "", "**提交到 ToolX（`.config.json`）：**", "", "正文。", ""].join("\n"));
       }
-    },
+    }),
     formatter: async (markdown) => markdown
   });
 
@@ -2978,7 +3014,7 @@ test("translateMarkdownArticle repeats list-item repair guidance when must_fix t
 
   const executor = new PromptAwareExecutor();
   await translateMarkdownArticle(source, {
-    executor: {
+    executor: createP2CompatibleExecutor({
       async execute(prompt, options) {
         executor.prompts.push(prompt);
 
@@ -3025,7 +3061,7 @@ test("translateMarkdownArticle repeats list-item repair guidance when must_fix t
         const sourceSection = extractPromptSection(prompt, "【英文原文】");
         return createExecResult(sourceSection ?? "");
       }
-    },
+    }),
     formatter: async (markdown) => markdown
   });
 
@@ -3055,7 +3091,7 @@ test("translateMarkdownArticle repeats list-lead-in repair guidance when must_fi
 
   const executor = new PromptAwareExecutor();
   await translateMarkdownArticle(source, {
-    executor: {
+    executor: createP2CompatibleExecutor({
       async execute(prompt, options) {
         executor.prompts.push(prompt);
 
@@ -3101,7 +3137,7 @@ test("translateMarkdownArticle repeats list-lead-in repair guidance when must_fi
         const sourceSection = extractPromptSection(prompt, "【英文原文】");
         return createExecResult(sourceSection ?? "");
       }
-    },
+    }),
     formatter: async (markdown) => markdown
   });
 
@@ -3192,7 +3228,7 @@ test("translateMarkdownArticle repeats explicit English target guidance when mus
 
   const executor = new PromptAwareExecutor();
   await translateMarkdownArticle(source, {
-    executor: {
+    executor: createP2CompatibleExecutor({
       async execute(prompt, options) {
         executor.prompts.push(prompt);
 
@@ -3221,7 +3257,7 @@ test("translateMarkdownArticle repeats explicit English target guidance when mus
         const sourceSection = extractPromptSection(prompt, "【英文原文】");
         return createExecResult(sourceSection ?? "");
       }
-    },
+    }),
     formatter: async (markdown) => markdown
   });
 
@@ -3248,7 +3284,7 @@ test("translateMarkdownArticle repeats blockquote-specific repair guidance when 
 
   const executor = new PromptAwareExecutor();
   await translateMarkdownArticle(source, {
-    executor: {
+    executor: createP2CompatibleExecutor({
       async execute(prompt, options) {
         executor.prompts.push(prompt);
 
@@ -3277,7 +3313,7 @@ test("translateMarkdownArticle repeats blockquote-specific repair guidance when 
         const sourceSection = extractPromptSection(prompt, "【英文原文】");
         return createExecResult(sourceSection ?? "");
       }
-    },
+    }),
     formatter: async (markdown) => markdown
   });
 
@@ -3303,7 +3339,7 @@ test("translateMarkdownArticle normalizes an explicit quote-segment anchor targe
 
   const executor = new PromptAwareExecutor();
   const result = await translateMarkdownArticle(source, {
-    executor: {
+    executor: createP2CompatibleExecutor({
       async execute(prompt, options) {
         executor.prompts.push(prompt);
 
@@ -3345,7 +3381,7 @@ test("translateMarkdownArticle normalizes an explicit quote-segment anchor targe
 
         return createExecResult("");
       }
-    },
+    }),
     formatter: async (markdown) => markdown
   });
 
@@ -3591,7 +3627,7 @@ test("translateMarkdownArticle tells repair when the same anchor is still missin
 
   const executor = new PromptAwareExecutor();
   await translateMarkdownArticle(source, {
-    executor: {
+    executor: createP2CompatibleExecutor({
       async execute(prompt, options) {
         executor.prompts.push(prompt);
 
@@ -3621,7 +3657,7 @@ test("translateMarkdownArticle tells repair when the same anchor is still missin
         const sourceSection = extractPromptSection(prompt, "【英文原文】");
         return createExecResult(sourceSection ?? "");
       }
-    },
+    }),
     formatter: async (markdown) => markdown
   });
 
@@ -3651,7 +3687,7 @@ test("translateMarkdownArticle repeats duplicate-English-anchor guidance when mu
 
   const executor = new PromptAwareExecutor();
   await translateMarkdownArticle(source, {
-    executor: {
+    executor: createP2CompatibleExecutor({
       async execute(prompt, options) {
         executor.prompts.push(prompt);
 
@@ -3680,7 +3716,7 @@ test("translateMarkdownArticle repeats duplicate-English-anchor guidance when mu
         const sourceSection = extractPromptSection(prompt, "【英文原文】");
         return createExecResult(sourceSection ?? "");
       }
-    },
+    }),
     formatter: async (markdown) => markdown
   });
 
@@ -3708,7 +3744,7 @@ test("translateMarkdownArticle repeats single-layer-parentheses guidance when mu
 
   const executor = new PromptAwareExecutor();
   await translateMarkdownArticle(source, {
-    executor: {
+    executor: createP2CompatibleExecutor({
       async execute(prompt, options) {
         executor.prompts.push(prompt);
 
@@ -3737,7 +3773,7 @@ test("translateMarkdownArticle repeats single-layer-parentheses guidance when mu
         const sourceSection = extractPromptSection(prompt, "【英文原文】");
         return createExecResult(sourceSection ?? "");
       }
-    },
+    }),
     formatter: async (markdown) => markdown
   });
 
@@ -3765,7 +3801,7 @@ test("translateMarkdownArticle repeats plain-path guidance when must_fix rejects
 
   const executor = new PromptAwareExecutor();
   await translateMarkdownArticle(source, {
-    executor: {
+    executor: createP2CompatibleExecutor({
       async execute(prompt, options) {
         executor.prompts.push(prompt);
 
@@ -3794,7 +3830,7 @@ test("translateMarkdownArticle repeats plain-path guidance when must_fix rejects
         const sourceSection = extractPromptSection(prompt, "【英文原文】");
         return createExecResult(sourceSection ?? "");
       }
-    },
+    }),
     formatter: async (markdown) => markdown
   });
 
@@ -3822,7 +3858,7 @@ test("translateMarkdownArticle repeats concept-family guidance when must_fix nam
 
   const executor = new PromptAwareExecutor();
   await translateMarkdownArticle(source, {
-    executor: {
+    executor: createP2CompatibleExecutor({
       async execute(prompt, options) {
         executor.prompts.push(prompt);
 
@@ -3869,7 +3905,7 @@ test("translateMarkdownArticle repeats concept-family guidance when must_fix nam
         const sourceSection = extractPromptSection(prompt, "【英文原文】");
         return createExecResult(sourceSection ?? "");
       }
-    },
+    }),
     formatter: async (markdown) => markdown
   });
 
@@ -4003,7 +4039,7 @@ test("translateMarkdownArticle repeats slash-qualified heading repair guidance w
 
   const executor = new PromptAwareExecutor();
   await translateMarkdownArticle(source, {
-    executor: {
+    executor: createP2CompatibleExecutor({
       async execute(prompt, options) {
         executor.prompts.push(prompt);
 
@@ -4032,7 +4068,7 @@ test("translateMarkdownArticle repeats slash-qualified heading repair guidance w
         const sourceSection = extractPromptSection(prompt, "【英文原文】");
         return createExecResult(sourceSection ?? "");
       }
-    },
+    }),
     formatter: async (markdown) => markdown
   });
 
@@ -4062,7 +4098,7 @@ test("translateMarkdownArticle treats bold platform labels as heading-like repai
 
   const executor = new PromptAwareExecutor();
   await translateMarkdownArticle(source, {
-    executor: {
+    executor: createP2CompatibleExecutor({
       async execute(prompt, options) {
         executor.prompts.push(prompt);
 
@@ -4091,7 +4127,7 @@ test("translateMarkdownArticle treats bold platform labels as heading-like repai
         const sourceSection = extractPromptSection(prompt, "【英文原文】");
         return createExecResult(sourceSection ?? "");
       }
-    },
+    }),
     formatter: async (markdown) => markdown
   });
 
@@ -4121,7 +4157,7 @@ test("translateMarkdownArticle keeps heading-anchor repairs on a bold heading af
 
   const executor = new PromptAwareExecutor();
   await translateMarkdownArticle(source, {
-    executor: {
+    executor: createP2CompatibleExecutor({
       async execute(prompt, options) {
         executor.prompts.push(prompt);
 
@@ -4150,7 +4186,7 @@ test("translateMarkdownArticle keeps heading-anchor repairs on a bold heading af
         const sourceSection = extractPromptSection(prompt, "【英文原文】");
         return createExecResult(sourceSection ?? "");
       }
-    },
+    }),
     formatter: async (markdown) => markdown
   });
 
@@ -4244,7 +4280,7 @@ test("translateMarkdownArticle adds numbered bold-heading guidance for colon-qua
 
   const executor = new PromptAwareExecutor();
   await translateMarkdownArticle(source, {
-    executor: {
+    executor: createP2CompatibleExecutor({
       async execute(prompt, options) {
         executor.prompts.push(prompt);
 
@@ -4273,7 +4309,7 @@ test("translateMarkdownArticle adds numbered bold-heading guidance for colon-qua
         const sourceSection = extractPromptSection(prompt, "【英文原文】");
         return createExecResult(sourceSection ?? "");
       }
-    },
+    }),
     formatter: async (markdown) => markdown
   });
 
@@ -4305,7 +4341,7 @@ test("translateMarkdownArticle restores a structured heading-like anchor after r
 
   let auditCount = 0;
   const result = await translateMarkdownArticle(source, {
-    executor: {
+    executor: createP2CompatibleExecutor({
       async execute(prompt, options) {
         if (options.outputSchema && prompt.includes("【分段审校输入】")) {
           auditCount += 1;
@@ -4347,7 +4383,7 @@ test("translateMarkdownArticle restores a structured heading-like anchor after r
           ].join("\n")
         );
       }
-    },
+    }),
     formatter: async (markdown) => markdown
   });
 
@@ -4366,7 +4402,7 @@ test("translateMarkdownArticle restores a heading-like anchor with a single trai
 
   let auditCount = 0;
   const result = await translateMarkdownArticle(source, {
-    executor: {
+    executor: createP2CompatibleExecutor({
       async execute(prompt, options) {
         if (options.outputSchema && prompt.includes("【分段审校输入】")) {
           auditCount += 1;
@@ -4406,7 +4442,7 @@ test("translateMarkdownArticle restores a heading-like anchor with a single trai
           ].join("\n")
         );
       }
-    },
+    }),
     formatter: async (markdown) => markdown
   });
 
@@ -4424,7 +4460,7 @@ test("translateMarkdownArticle strips full english back-reference from operation
   ].join("\n");
 
   const result = await translateMarkdownArticle(source, {
-    executor: {
+    executor: createP2CompatibleExecutor({
       async execute(prompt, options) {
         if (options.outputSchema && prompt.includes("【分段审校输入】")) {
           return createExecResult(wrapPerSegmentAudits(prompt, [{ segment_index: 1, audit: createAudit(true) }]));
@@ -4450,7 +4486,7 @@ test("translateMarkdownArticle strips full english back-reference from operation
           ].join("\n")
         );
       }
-    },
+    }),
     formatter: async (markdown) => markdown
   });
 
@@ -4468,7 +4504,7 @@ test("translateMarkdownArticle skips duplicate child anchors inside a composite 
   ].join("\n");
 
   const result = await translateMarkdownArticle(source, {
-    executor: {
+    executor: createP2CompatibleExecutor({
       async execute(prompt, options) {
         if (options.outputSchema && prompt.includes("【分段审校输入】")) {
           return createExecResult(wrapPerSegmentAudits(prompt, [{ segment_index: 1, audit: createAudit(true) }]));
@@ -4494,7 +4530,7 @@ test("translateMarkdownArticle skips duplicate child anchors inside a composite 
           ].join("\n")
         );
       }
-    },
+    }),
     formatter: async (markdown) => markdown
   });
 
@@ -4514,7 +4550,7 @@ test("translateMarkdownArticle restores an ATX heading anchor after repair when 
 
   let auditCount = 0;
   const result = await translateMarkdownArticle(source, {
-    executor: {
+    executor: createP2CompatibleExecutor({
       async execute(prompt, options) {
         if (options.outputSchema && prompt.includes("【分段审校输入】")) {
           auditCount += 1;
@@ -4545,7 +4581,7 @@ test("translateMarkdownArticle restores an ATX heading anchor after repair when 
 
         return createExecResult(["# Title", "", "### 凭证窃取", "", "尝试访问：", ""].join("\n"));
       }
-    },
+    }),
     formatter: async (markdown) => markdown
   });
 
@@ -4564,7 +4600,7 @@ test("translateMarkdownArticle restores the canonical bilingual display for an e
 
   let auditCount = 0;
   const result = await translateMarkdownArticle(source, {
-    executor: {
+    executor: createP2CompatibleExecutor({
       async execute(prompt, options) {
         if (isDocumentAnalysisPrompt(prompt)) {
           return createExecResult(
@@ -4607,7 +4643,7 @@ test("translateMarkdownArticle restores the canonical bilingual display for an e
 
         return createExecResult(["# Title", "", "### 误删破坏（Accidental Destructive Operations）", "", "正文。", ""].join("\n"));
       }
-    },
+    }),
     formatter: async (markdown) => markdown
   });
 
@@ -4626,7 +4662,7 @@ test("translateMarkdownArticle restores missing source heading qualifiers inside
 
   let auditCount = 0;
   const result = await translateMarkdownArticle(source, {
-    executor: {
+    executor: createP2CompatibleExecutor({
       async execute(prompt, options) {
         if (options.outputSchema && prompt.includes("【分段审校输入】")) {
           auditCount += 1;
@@ -4657,7 +4693,7 @@ test("translateMarkdownArticle restores missing source heading qualifiers inside
 
         return createExecResult(["# Title", "", "### 第 2 类：提示式（Prompted）", "", "正文。", ""].join("\n"));
       }
-    },
+    }),
     formatter: async (markdown) => markdown
   });
 
@@ -4676,7 +4712,7 @@ test("translateMarkdownArticle restores a named anchor inside an ATX heading aft
 
   let auditCount = 0;
   const result = await translateMarkdownArticle(source, {
-    executor: {
+    executor: createP2CompatibleExecutor({
       async execute(prompt, options) {
         if (isDocumentAnalysisPrompt(prompt)) {
           return createExecResult(
@@ -4719,7 +4755,7 @@ test("translateMarkdownArticle restores a named anchor inside an ATX heading aft
 
         return createExecResult(["# Title", "", "## 沙箱模式如何改变自主编码", "", "正文。", ""].join("\n"));
       }
-    },
+    }),
     formatter: async (markdown) => markdown
   });
 
@@ -4738,7 +4774,7 @@ test("translateMarkdownArticle keeps a source-shaped english-primary heading dur
 
   let auditCount = 0;
   const result = await translateMarkdownArticle(source, {
-    executor: {
+    executor: createP2CompatibleExecutor({
       async execute(prompt, options) {
         if (isDocumentAnalysisPrompt(prompt)) {
           return createExecResult(
@@ -4782,7 +4818,7 @@ test("translateMarkdownArticle keeps a source-shaped english-primary heading dur
 
         return createExecResult(["# Title", "", "**选项 2：cco Sandbox（cco Sandbox（cco 沙箱工具））**", "", "正文。", ""].join("\n"));
       }
-    },
+    }),
     formatter: async (markdown) => markdown
   });
 
@@ -4802,7 +4838,7 @@ test("translateMarkdownArticle restores concept english-primary headings to bili
 
   let auditCount = 0;
   const result = await translateMarkdownArticle(source, {
-    executor: {
+    executor: createP2CompatibleExecutor({
       async execute(prompt, options) {
         if (isDocumentAnalysisPrompt(prompt)) {
           return createExecResult(
@@ -4850,7 +4886,7 @@ test("translateMarkdownArticle restores concept english-primary headings to bili
 
         return createExecResult(["# Title", "", "**Network Isolation**", "", "正文。", ""].join("\n"));
       }
-    },
+    }),
     formatter: async (markdown) => markdown
   });
 
@@ -4869,7 +4905,7 @@ test("translateMarkdownArticle prefers explicit chinese canonical repair targets
 
   let auditCount = 0;
   const result = await translateMarkdownArticle(source, {
-    executor: {
+    executor: createP2CompatibleExecutor({
       async execute(prompt, options) {
         if (isDocumentAnalysisPrompt(prompt)) {
           return createExecResult(
@@ -4927,7 +4963,7 @@ test("translateMarkdownArticle prefers explicit chinese canonical repair targets
           )
         );
       }
-    },
+    }),
     formatter: async (markdown) => markdown
   });
 
@@ -4946,7 +4982,7 @@ test("translateMarkdownArticle does not treat title-cased product anchors as mat
   ].join("\n");
 
   const result = await translateMarkdownArticle(source, {
-    executor: {
+    executor: createP2CompatibleExecutor({
       async execute(prompt, options) {
         if (isDocumentAnalysisPrompt(prompt)) {
           return createExecResult(
@@ -4985,7 +5021,7 @@ test("translateMarkdownArticle does not treat title-cased product anchors as mat
           ["# Title", "", "## 沙盒模式如何改变自主编码", "", "Claude Code sandbox 会创建操作系统级限制。", ""].join("\n")
         );
       }
-    },
+    }),
     formatter: async (markdown) => markdown
   });
 
@@ -5003,7 +5039,7 @@ test("translateMarkdownArticle keeps sandbox family terms coherent across a mixe
   ].join("\n");
 
   const result = await translateMarkdownArticle(source, {
-    executor: {
+    executor: createP2CompatibleExecutor({
       async execute(prompt, options) {
         if (isDocumentAnalysisPrompt(prompt)) {
           return createExecResult(
@@ -5067,7 +5103,7 @@ test("translateMarkdownArticle keeps sandbox family terms coherent across a mixe
           ].join("\n")
         );
       }
-    },
+    }),
     formatter: async (markdown) => markdown
   });
 
@@ -5244,7 +5280,7 @@ test("translateMarkdownArticle suppresses a short-anchor must_fix when a longer 
 
   const executor = new PromptAwareExecutor();
   const result = await translateMarkdownArticle(source, {
-    executor: {
+    executor: createP2CompatibleExecutor({
       async execute(prompt, options) {
         executor.prompts.push(prompt);
 
@@ -5278,7 +5314,7 @@ test("translateMarkdownArticle suppresses a short-anchor must_fix when a longer 
         const currentTranslation = extractPromptSection(prompt, "【当前译文】");
         return createExecResult(currentTranslation ?? "");
       }
-    },
+    }),
     formatter: async (markdown) => markdown
   });
 
@@ -5384,7 +5420,7 @@ test("translateMarkdownArticle does not let explicit package-registry wording ov
   ].join("\n");
 
   const result = await translateMarkdownArticle(source, {
-    executor: {
+    executor: createP2CompatibleExecutor({
       async execute(prompt, options) {
         if (isDocumentAnalysisPrompt(prompt)) {
           return createExecResult(createEmptyAnchorCatalog());
@@ -5414,7 +5450,7 @@ test("translateMarkdownArticle does not let explicit package-registry wording ov
           ""
         ].join("\n"));
       }
-    },
+    }),
     formatter: async (markdown) => markdown
   });
 
@@ -5431,7 +5467,7 @@ test("translateMarkdownArticle does not let generic package-registry normalizati
   ].join("\n");
 
   const result = await translateMarkdownArticle(source, {
-    executor: {
+    executor: createP2CompatibleExecutor({
       async execute(prompt, options) {
         if (isDocumentAnalysisPrompt(prompt)) {
           return createExecResult(createEmptyAnchorCatalog());
@@ -5459,7 +5495,7 @@ test("translateMarkdownArticle does not let generic package-registry normalizati
           ""
         ].join("\n"));
       }
-    },
+    }),
     formatter: async (markdown) => markdown
   });
 
@@ -5476,7 +5512,7 @@ test("translateMarkdownArticle does not rewrite generic registry text outside pa
   ].join("\n");
 
   const result = await translateMarkdownArticle(source, {
-    executor: {
+    executor: createP2CompatibleExecutor({
       async execute(prompt, options) {
         if (isDocumentAnalysisPrompt(prompt)) {
           return createExecResult(createEmptyAnchorCatalog());
@@ -5504,7 +5540,7 @@ test("translateMarkdownArticle does not rewrite generic registry text outside pa
           ""
         ].join("\n"));
       }
-    },
+    }),
     formatter: async (markdown) => markdown
   });
 
@@ -5516,7 +5552,7 @@ test("translateMarkdownArticle does not let generic registry normalization overr
   const source = ["- Pre-approved destinations (npm registry, GitHub, your APIs)", ""].join("\n");
 
   const result = await translateMarkdownArticle(source, {
-    executor: {
+    executor: createP2CompatibleExecutor({
       async execute(prompt, options) {
         if (isDocumentAnalysisPrompt(prompt)) {
           return createExecResult(
@@ -5548,7 +5584,7 @@ test("translateMarkdownArticle does not let generic registry normalization overr
 
         return createExecResult(["- 预先批准的目标位置（npm 注册表（npm registry）、GitHub、你的 API）", ""].join("\n"));
       }
-    },
+    }),
     formatter: async (markdown) => markdown
   });
 
@@ -5592,7 +5628,7 @@ test("translateMarkdownArticle restores translatable strong emphasis from LLM em
   ].join("\n");
 
   const result = await translateMarkdownArticle(source, {
-    executor: {
+    executor: createP2CompatibleExecutor({
       async execute(prompt, options) {
         if (isDocumentAnalysisPrompt(prompt)) {
           return createExecResult(
@@ -5632,7 +5668,7 @@ test("translateMarkdownArticle restores translatable strong emphasis from LLM em
 
         return createExecResult(["# Title", "", "Claude Code 现在有了沙盒模式，改变了工作流。", ""].join("\n"));
       }
-    },
+    }),
     formatter: async (markdown) => markdown
   });
 
@@ -5650,7 +5686,7 @@ test("translateMarkdownArticle recovers missing emphasis plans before drafting",
   let analysisCalls = 0;
 
   const result = await translateMarkdownArticle(source, {
-    executor: {
+    executor: createP2CompatibleExecutor({
       async execute(prompt, options) {
         if (isDocumentAnalysisPrompt(prompt)) {
           analysisCalls += 1;
@@ -5692,7 +5728,7 @@ test("translateMarkdownArticle recovers missing emphasis plans before drafting",
 
         return createExecResult(["# Title", "", "Claude Code 现在有了沙盒模式，改变了工作流。", ""].join("\n"));
       }
-    },
+    }),
     formatter: async (markdown) => markdown
   });
 
@@ -5996,7 +6032,7 @@ test("translateMarkdownArticle does not duplicate an already satisfied structure
   let auditCount = 0;
 
   const output = await translateMarkdownArticle(source, {
-    executor: {
+    executor: createP2CompatibleExecutor({
       async execute(prompt, options) {
         if (isDocumentAnalysisPrompt(prompt)) {
           return createExecResult(createEmptyAnchorCatalog());
@@ -6047,7 +6083,7 @@ test("translateMarkdownArticle does not duplicate an already satisfied structure
 
         return createExecResult("- 预先批准的目标位置（npm registry、GitHub、你的 API）");
       }
-    },
+    }),
     formatter: async (markdown) => markdown
   });
 
@@ -6060,7 +6096,7 @@ test("translateMarkdownArticle synthesizes a local fallback anchor for an inline
   let auditCount = 0;
 
   const output = await translateMarkdownArticle(source, {
-    executor: {
+    executor: createP2CompatibleExecutor({
       async execute(prompt, options) {
         if (isDocumentAnalysisPrompt(prompt)) {
           return createExecResult(createAnchorCatalog([]));
@@ -6100,7 +6136,7 @@ test("translateMarkdownArticle synthesizes a local fallback anchor for an inline
 
         return createExecResult("> 这就造成了安全研究人员所说的“批准疲劳”效应。");
       }
-    },
+    }),
     formatter: async (markdown) => markdown
   });
 
@@ -6112,7 +6148,7 @@ test("translateMarkdownArticle infers an inline concept local fallback anchor fr
   let auditCount = 0;
 
   const output = await translateMarkdownArticle(source, {
-    executor: {
+    executor: createP2CompatibleExecutor({
       async execute(prompt, options) {
         if (isDocumentAnalysisPrompt(prompt)) {
           return createExecResult(createAnchorCatalog([]));
@@ -6152,7 +6188,7 @@ test("translateMarkdownArticle infers an inline concept local fallback anchor fr
 
         return createExecResult("> 这就造成了安全研究人员所说的“审批疲劳”……");
       }
-    },
+    }),
     formatter: async (markdown) => markdown
   });
 
@@ -6171,7 +6207,7 @@ test("translateMarkdownArticle rewrites an alias first mention to the canonical 
   let auditCount = 0;
 
   const output = await translateMarkdownArticle(source, {
-    executor: {
+    executor: createP2CompatibleExecutor({
       async execute(prompt, options) {
         if (isDocumentAnalysisPrompt(prompt)) {
           return createExecResult(
@@ -6229,7 +6265,7 @@ test("translateMarkdownArticle rewrites an alias first mention to the canonical 
           ""
         ].join("\n"));
       }
-    },
+    }),
     formatter: async (markdown) => markdown
   });
 
@@ -6249,7 +6285,7 @@ test("translateMarkdownArticle reifies a blockquote alias repair target from mus
   let auditCount = 0;
 
   const output = await translateMarkdownArticle(source, {
-    executor: {
+    executor: createP2CompatibleExecutor({
       async execute(prompt, options) {
         if (isDocumentAnalysisPrompt(prompt)) {
           return createExecResult(
@@ -6309,7 +6345,7 @@ test("translateMarkdownArticle reifies a blockquote alias repair target from mus
           ].join("\n")
         );
       }
-    },
+    }),
     formatter: async (markdown) => markdown
   });
 
@@ -6320,7 +6356,7 @@ test("translateMarkdownArticle avoids duplicating chinese suffixes when an alias
   const source = ["Sandbox mode addresses real attack vectors.", ""].join("\n");
 
   const output = await translateMarkdownArticle(source, {
-    executor: {
+    executor: createP2CompatibleExecutor({
       async execute(prompt, options) {
         if (isDocumentAnalysisPrompt(prompt)) {
           return createExecResult(
@@ -6356,7 +6392,7 @@ test("translateMarkdownArticle avoids duplicating chinese suffixes when an alias
 
         return createExecResult(["沙盒模式处理真实的攻击向量。", ""].join("\n"));
       }
-    },
+    }),
     formatter: async (markdown) => markdown
   });
 
@@ -6368,7 +6404,7 @@ test("translateMarkdownArticle applies alias plans during draft normalization wi
   const source = ["> The Sandbox works by separating these two cases.", ""].join("\n");
 
   const output = await translateMarkdownArticle(source, {
-    executor: {
+    executor: createP2CompatibleExecutor({
       async execute(prompt, options) {
         if (isDocumentAnalysisPrompt(prompt)) {
           return createExecResult(
@@ -6411,7 +6447,7 @@ test("translateMarkdownArticle applies alias plans during draft normalization wi
 
         return createExecResult(["> 沙盒的工作方式，就是把这两种情况区分开来。", ""].join("\n"));
       }
-    },
+    }),
     formatter: async (markdown) => markdown
   });
 
@@ -6422,7 +6458,7 @@ test("translateMarkdownArticle applies entity disambiguation plans before produc
   const source = ["This is not Claude code by default.", ""].join("\n");
 
   const output = await translateMarkdownArticle(source, {
-    executor: {
+    executor: createP2CompatibleExecutor({
       async execute(prompt, options) {
         if (isDocumentAnalysisPrompt(prompt)) {
           return createExecResult(
@@ -6459,7 +6495,7 @@ test("translateMarkdownArticle applies entity disambiguation plans before produc
 
         return createExecResult(["这默认不是 Claude Code（Anthropic 的命令行编码助手）。", ""].join("\n"));
       }
-    },
+    }),
     formatter: async (markdown) => markdown
   });
 
@@ -6481,7 +6517,7 @@ test("translateMarkdownArticle synthesizes heading-local fallback anchors for co
   let auditCount = 0;
 
   const result = await translateMarkdownArticle(source, {
-    executor: {
+    executor: createP2CompatibleExecutor({
       async execute(prompt, options) {
         if (isDocumentAnalysisPrompt(prompt)) {
           return createExecResult(createAnchorCatalog([]));
@@ -6533,7 +6569,7 @@ test("translateMarkdownArticle synthesizes heading-local fallback anchors for co
           ].join("\n")
         );
       }
-    },
+    }),
     formatter: async (markdown) => markdown
   });
 
@@ -6555,7 +6591,7 @@ test("translateMarkdownArticle synthesizes structured repair targets from explic
   let auditCount = 0;
 
   const result = await translateMarkdownArticle(source, {
-    executor: {
+    executor: createP2CompatibleExecutor({
       async execute(prompt, options) {
         if (isDocumentAnalysisPrompt(prompt)) {
           return createExecResult(createAnchorCatalog([]));
@@ -6606,7 +6642,7 @@ test("translateMarkdownArticle synthesizes structured repair targets from explic
           ].join("\n")
         );
       }
-    },
+    }),
     formatter: async (markdown) => markdown
   });
 
@@ -6629,7 +6665,7 @@ test("translateMarkdownArticle restores heading hints through planning before re
   let auditedTranslation = "";
 
   const result = await translateMarkdownArticle(source, {
-    executor: {
+    executor: createP2CompatibleExecutor({
       async execute(prompt, options) {
         if (isDocumentAnalysisPrompt(prompt)) {
           return createExecResult(createAnchorCatalog([]));
@@ -6660,7 +6696,7 @@ test("translateMarkdownArticle restores heading hints through planning before re
           ].join("\n")
         );
       }
-    },
+    }),
     formatter: async (markdown) => markdown
   });
 
@@ -6677,7 +6713,7 @@ test("translateMarkdownArticle prefers LLM heading plans over heuristic heading 
   let auditedTranslation = "";
 
   const result = await translateMarkdownArticle(source, {
-    executor: {
+    executor: createP2CompatibleExecutor({
       async execute(prompt, options) {
         if (isDocumentAnalysisPrompt(prompt)) {
           return createExecResult(
@@ -6722,7 +6758,7 @@ test("translateMarkdownArticle prefers LLM heading plans over heuristic heading 
 
         return createExecResult(["# Title", "", "**Glob 模式：**", "", "**示例：**", ""].join("\n"));
       }
-    },
+    }),
     formatter: async (markdown) => markdown
   });
 
@@ -6737,7 +6773,7 @@ test("translateMarkdownArticle executes LLM natural-heading plans directly", asy
   let auditedTranslation = "";
 
   const result = await translateMarkdownArticle(source, {
-    executor: {
+    executor: createP2CompatibleExecutor({
       async execute(prompt, options) {
         if (isDocumentAnalysisPrompt(prompt)) {
           return createExecResult(
@@ -6777,7 +6813,7 @@ test("translateMarkdownArticle executes LLM natural-heading plans directly", asy
 
         return createExecResult(["# Title", "", "## 权限问题", ""].join("\n"));
       }
-    },
+    }),
     formatter: async (markdown) => markdown
   });
 
@@ -6791,7 +6827,7 @@ test("translateMarkdownArticle falls back to a known global anchor when a headin
   let auditedTranslation = "";
 
   const result = await translateMarkdownArticle(source, {
-    executor: {
+    executor: createP2CompatibleExecutor({
       async execute(prompt, options) {
         if (isDocumentAnalysisPrompt(prompt)) {
           return createExecResult(
@@ -6820,7 +6856,7 @@ test("translateMarkdownArticle falls back to a known global anchor when a headin
 
         return createExecResult(["# Title", "", "### 提示注入攻击", ""].join("\n"));
       }
-    },
+    }),
     formatter: async (markdown) => markdown
   });
 
@@ -6833,7 +6869,7 @@ test("translateMarkdownArticle reconciles a conflicting heading plan with an exa
   let auditedTranslation = "";
 
   const result = await translateMarkdownArticle(source, {
-    executor: {
+    executor: createP2CompatibleExecutor({
       async execute(prompt, options) {
         if (isDocumentAnalysisPrompt(prompt)) {
           return createExecResult(
@@ -6888,7 +6924,7 @@ test("translateMarkdownArticle reconciles a conflicting heading plan with an exa
 
         return createExecResult(["# Title", "", "### 提示注入攻击", ""].join("\n"));
       }
-    },
+    }),
     formatter: async (markdown) => markdown
   });
 
@@ -6909,7 +6945,7 @@ test("translateMarkdownArticle applies block plan target text to prevent duplica
   ].join("\n");
 
   const result = await translateMarkdownArticle(source, {
-    executor: {
+    executor: createP2CompatibleExecutor({
       async execute(prompt, options) {
         if (isDocumentAnalysisPrompt(prompt)) {
           return createExecResult(
@@ -6954,7 +6990,7 @@ test("translateMarkdownArticle applies block plan target text to prevent duplica
           ].join("\n")
         );
       }
-    },
+    }),
     formatter: async (markdown) => markdown
   });
 
@@ -6970,7 +7006,7 @@ test("translateMarkdownArticle prefers the global canonical display over a confl
   let auditCount = 0;
 
   const result = await translateMarkdownArticle(source, {
-    executor: {
+    executor: createP2CompatibleExecutor({
       async execute(prompt, options) {
         if (isDocumentAnalysisPrompt(prompt)) {
           return createExecResult(
@@ -7032,7 +7068,7 @@ test("translateMarkdownArticle prefers the global canonical display over a confl
 
         return createExecResult(["# Title", "", "Claude Code 在此工作。", ""].join("\n"));
       }
-    },
+    }),
     formatter: async (markdown) => markdown
   });
 
@@ -7418,23 +7454,27 @@ test("translateMarkdownArticle fails fast when analysis quality collapses below 
     () =>
       translateMarkdownArticle(source, {
         executor: {
-          async execute(prompt, options) {
+          async execute(prompt: string, options: CodexExecOptions) {
             if (isDocumentAnalysisPrompt(prompt)) {
               return createExecResult(createEmptyAnchorCatalog());
             }
 
             nonAnalysisCalls += 1;
+            if (options.outputSchema && prompt.includes("### BLOCK")) {
+              const blockCount = (prompt.match(/^### BLOCK \d+ \([^)]+\)$/gm) ?? []).length || 1;
+              return createExecResult(JSON.stringify({ blocks: Array.from({ length: blockCount }, () => "中文占位译文") }));
+            }
             if (options.outputSchema || prompt.includes("只返回 JSON")) {
               return createExecResult(wrapAuditForSegments(prompt, createAudit(true)));
             }
 
-            return createExecResult(extractPromptSection(prompt, "【当前译文】") ?? extractPromptSection(prompt, "【英文原文】") ?? "");
+            return createExecResult(extractPromptSection(prompt, "【当前译文】") ?? "中文占位译文");
           }
         },
-        formatter: async (markdown) => markdown,
-        onProgress: (message) => progress.push(message)
+        formatter: async (markdown: string) => markdown,
+        onProgress: (message: string) => progress.push(message)
       }),
-    (error) =>
+    (error: unknown) =>
       error instanceof HardGateError &&
       /Analysis quality gate failed: heading plan coverage 0\/\d+/.test(error.message)
   );
