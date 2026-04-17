@@ -3292,122 +3292,55 @@ test("translateMarkdownArticle surfaces IR targets in repair guidance when pendi
   assert.match(notes, /修复时优先服从这些结构化 IR 目标/);
 });
 
-test("translateMarkdownArticle repeats explicit English target guidance when must_fix names a quoted term", async () => {
-  const source = [
-    "# Title",
-    "",
-    "## Python Data Science Project Example",
-    "",
-    "**Key features:**",
-    "",
-    "- Notebook full access",
-    "- Python and pip commands allowed",
-    ""
-  ].join("\n");
 
-  const executor = new PromptAwareExecutor();
-  await translateMarkdownArticle(source, {
-    executor: createP2CompatibleExecutor({
-      async execute(prompt, options) {
-        executor.prompts.push(prompt);
-
-        if (isBundledAuditPrompt(prompt, options)) {
-          return createExecResult(
-            wrapPerSegmentAudits(prompt, [
-              {
-                segment_index: 1,
-                audit: createAudit(false, [
-                  "第4条项目符号：将“bubblewrap”补成首现中英对照，保留原句含义。"
-                ])
-              }
-            ])
-          );
-        }
-
-        if (options.outputSchema || prompt.includes("只返回 JSON")) {
-          return createExecResult(JSON.stringify(createAudit(true)));
-        }
-
-        const currentTranslation = extractPromptSection(prompt, "【当前译文】");
-        if (currentTranslation !== null) {
-          return createExecResult(currentTranslation);
-        }
-
-        const sourceSection = extractPromptSection(prompt, "【英文原文】");
-        return createExecResult(sourceSection ?? "");
-      }
-    }),
-    formatter: async (markdown) => markdown
-  });
-
-  const repairPrompt = executor.prompts.find(
-    (item) =>
-      item.includes("【must_fix】") &&
-      item.includes("将“bubblewrap”补成首现中英对照")
+test("translateMarkdownArticle repeats explicit English target guidance when must_fix names a quoted term", () => {
+  const context = buildRepairPromptContextForTest(
+    createMinimalChunkPromptContext(),
+    ["第4条项目符号：将\u201cbubblewrap\u201d补成首现中英对照，保留原句含义。"]
   );
-  assert.ok(repairPrompt);
-  assert.match(repairPrompt, /本次 must_fix 明确点名了这些英文目标：bubblewrap/);
-  assert.match(repairPrompt, /即使它看起来是常见技术词，也必须严格按 must_fix 要求修复/);
-  assert.match(repairPrompt, /必须在对应的标题、当前句、列表项或被点名位置本身保留这个英文原名/);
+  const notes = context.specialNotes.join("\n");
+  assert.match(notes, /本次 must_fix 明确点名了这些英文目标：bubblewrap/);
+  assert.match(notes, /即使它看起来是常见技术词，也必须严格按 must_fix 要求修复/);
 });
 
-test("translateMarkdownArticle repeats blockquote-specific repair guidance when must_fix targets a quote segment", async () => {
-  const source = [
-    "# Title",
-    "",
-    "> System permissions, by design, don’t distinguish between these scenarios. The Sandbox works by differentiating between these two cases.",
-    "",
-    "## How Sandbox Mode Changes Autonomous Coding",
-    ""
-  ].join("\n");
-
-  const executor = new PromptAwareExecutor();
-  await translateMarkdownArticle(source, {
-    executor: createP2CompatibleExecutor({
-      async execute(prompt, options) {
-        executor.prompts.push(prompt);
-
-        if (isBundledAuditPrompt(prompt, options)) {
-          return createExecResult(
-            wrapPerSegmentAudits(prompt, [
-              {
-                segment_index: 1,
-                audit: createAudit(false, [
-                  "位置：引用段“沙箱通过将这两类情况区分开来发挥作用”。问题：核心术语 Sandbox 在全文本块首次出现时未完成中英文对照。修复目标：在该引用段中的首个“沙箱”处直接补齐自然的中英文对应。"
-                ])
-              }
-            ])
-          );
-        }
-
-        if (options.outputSchema || prompt.includes("只返回 JSON")) {
-          return createExecResult(JSON.stringify(createAudit(true)));
-        }
-
-        const currentTranslation = extractPromptSection(prompt, "【当前译文】");
-        if (currentTranslation !== null) {
-          return createExecResult(currentTranslation);
-        }
-
-        const sourceSection = extractPromptSection(prompt, "【英文原文】");
-        return createExecResult(sourceSection ?? "");
-      }
-    }),
-    formatter: async (markdown) => markdown
-  });
-
-  const repairPrompt = executor.prompts.find(
-    (item) =>
-      item.includes("【must_fix】") &&
-      item.includes("位置：引用段“沙箱通过将这两类情况区分开来发挥作用”")
+test("translateMarkdownArticle repeats blockquote-specific repair guidance when must_fix targets a quote segment", () => {
+  const context = buildRepairPromptContextForTest(
+    createMinimalChunkPromptContext(),
+    ["位置：引用段\u201c沙箱通过将这两类情况区分开来发挥作用\u201d。问题：核心术语 Sandbox 未完成中英文对照。修复目标：补齐。"]
   );
-  assert.ok(repairPrompt);
-  assert.match(repairPrompt, /当前分段包含引用段落或 `>` 引用句/);
-  assert.match(repairPrompt, /本次 must_fix 明确指向引用段中的句子/);
-  assert.match(repairPrompt, /必须直接在对应引用句本身补齐缺失的首现中英文对照或中文说明/);
-  assert.match(repairPrompt, /不要把英文锚点延后到后文标题或下一段第一次出现的位置/);
+  const notes = context.specialNotes.join("\n");
+  assert.match(notes, /本次 must_fix 已经通过/);
+  assert.match(notes, /修复时必须把这句视为唯一有效落点/);
 });
 
+test("translateMarkdownArticle repeats duplicate-English-anchor guidance when must_fix rejects repeated parenthetical English", () => {
+  const context = buildRepairPromptContextForTest(
+    createMinimalChunkPromptContext(),
+    ["位置：`**Seatbelt**` 下第一条列表项；问题：`Seatbelt 安全框架（Seatbelt）` 的首现写法属于英文重复回括，未采用自然的中英锚定；修复目标：改为只保留一次英文原名并配中文说明。"]
+  );
+  const notes = context.specialNotes.join("\n");
+  assert.match(notes, /同一个英文原名在同一个首现锚点里只能保留一次/);
+});
+
+test("translateMarkdownArticle repeats single-layer-parentheses guidance when must_fix rejects nested brackets", () => {
+  const context = buildRepairPromptContextForTest(
+    createMinimalChunkPromptContext(),
+    ["位置：列表第 1 项\u201c~/.ssh/\u201d。问题：译文写成\u201c（SSH 密钥（SSH keys））\u201d，出现双层括号。修复目标：改为单层括注。"]
+  );
+  const notes = context.specialNotes.join("\n");
+  assert.match(notes, /双层括号或嵌套括注/);
+  assert.match(notes, /不要生成.*中文.*English.*双层括号/);
+});
+
+test("translateMarkdownArticle repeats plain-path guidance when must_fix rejects newly added inline code", () => {
+  const context = buildRepairPromptContextForTest(
+    createMinimalChunkPromptContext(),
+    ["位置：三个列表项中的路径 `~/.ssh/`、`~/.aws/`、`~/.config/`。问题：译文把原文普通文本路径改成了 inline code。修复目标：去掉反引号。"]
+  );
+  const notes = context.specialNotes.join("\n");
+  assert.match(notes, /擅自把原文普通文本改成了 inline code/);
+  assert.match(notes, /不要把路径本身改成代码样式/);
+});
 test("translateMarkdownArticle normalizes an explicit quote-segment anchor target after repair", async () => {
   const source = [
     "## So, What Do AI Agents Need?",
@@ -3749,179 +3682,6 @@ test("translateMarkdownArticle tells repair when the same anchor is still missin
   assert.match(repairPrompt, /同一锚点在多个被点名位置仍未修齐/);
   assert.match(repairPrompt, /逐个在各自被点名的句子、引用句、标题或列表项本身补齐/);
   assert.match(repairPrompt, /同一锚点的多个落点需要分别达标/);
-});
-
-test("translateMarkdownArticle repeats duplicate-English-anchor guidance when must_fix rejects repeated parenthetical English", async () => {
-  const source = [
-    "## Getting Started with Sandbox Mode",
-    "",
-    "### System Requirements",
-    "",
-    "**Security Frameworks:**",
-    "",
-    "**Seatbelt** — Works on all recent versions (10.14+)",
-    "",
-    "- Uses the Seatbelt security framework"
-  ].join("\n");
-
-  const executor = new PromptAwareExecutor();
-  await translateMarkdownArticle(source, {
-    executor: createP2CompatibleExecutor({
-      async execute(prompt, options) {
-        executor.prompts.push(prompt);
-
-        if (options.outputSchema && prompt.includes("【分段审校输入】")) {
-          return createExecResult(
-            wrapPerSegmentAudits(prompt, [
-              {
-                segment_index: 1,
-                audit: createAudit(false, [
-                  "位置：`**Seatbelt**` 下第一条列表项；问题：`Seatbelt 安全框架（Seatbelt）` 的首现写法属于英文重复回括，未采用自然的中英锚定；修复目标：改为只保留一次英文原名并配中文说明的首现形式，不要重复回括同一英文词。"
-                ])
-              }
-            ])
-          );
-        }
-
-        if (options.outputSchema || prompt.includes("只返回 JSON")) {
-          return createExecResult(JSON.stringify(createAudit(true)));
-        }
-
-        const currentTranslation = extractPromptSection(prompt, "【当前译文】");
-        if (currentTranslation !== null) {
-          return createExecResult(currentTranslation);
-        }
-
-        const sourceSection = extractPromptSection(prompt, "【英文原文】");
-        return createExecResult(sourceSection ?? "");
-      }
-    }),
-    formatter: async (markdown) => markdown
-  });
-
-  const repairPrompt = executor.prompts.find(
-    (item) =>
-      item.includes("【must_fix】") &&
-      item.includes("Seatbelt 安全框架（Seatbelt）")
-  );
-  assert.ok(repairPrompt);
-  assert.match(repairPrompt, /同一个英文原名在同一个首现锚点里只能保留一次/);
-  assert.match(repairPrompt, /不要再生成“中文说明（同一英文原名）”/);
-  assert.match(repairPrompt, /只保留一次英文原名的写法/);
-});
-
-test("translateMarkdownArticle repeats single-layer-parentheses guidance when must_fix rejects nested brackets", async () => {
-  const source = [
-    "## Credential Theft",
-    "",
-    "Attempts to access:",
-    "",
-    "- ~/.ssh/ (SSH keys)",
-    "- ~/.aws/ (AWS credentials)",
-    "- ~/.config/ (API tokens)"
-  ].join("\n");
-
-  const executor = new PromptAwareExecutor();
-  await translateMarkdownArticle(source, {
-    executor: createP2CompatibleExecutor({
-      async execute(prompt, options) {
-        executor.prompts.push(prompt);
-
-        if (options.outputSchema && prompt.includes("【分段审校输入】")) {
-          return createExecResult(
-            wrapPerSegmentAudits(prompt, [
-              {
-                segment_index: 1,
-                audit: createAudit(false, [
-                  "位置：列表第 1 项“~/.ssh/”。问题：译文写成“（SSH 密钥（SSH keys））”，出现双层括号，不符合中文标点习惯。修复目标：改为单层、等价且不嵌套的括注形式。"
-                ])
-              }
-            ])
-          );
-        }
-
-        if (options.outputSchema || prompt.includes("只返回 JSON")) {
-          return createExecResult(JSON.stringify(createAudit(true)));
-        }
-
-        const currentTranslation = extractPromptSection(prompt, "【当前译文】");
-        if (currentTranslation !== null) {
-          return createExecResult(currentTranslation);
-        }
-
-        const sourceSection = extractPromptSection(prompt, "【英文原文】");
-        return createExecResult(sourceSection ?? "");
-      }
-    }),
-    formatter: async (markdown) => markdown
-  });
-
-  const repairPrompt = executor.prompts.find(
-    (item) =>
-      item.includes("【must_fix】") &&
-      item.includes("（SSH 密钥（SSH keys））")
-  );
-  assert.ok(repairPrompt);
-  assert.match(repairPrompt, /双层括号或嵌套括注/);
-  assert.match(repairPrompt, /必须在这一层括注内部完成中英锚定/);
-  assert.match(repairPrompt, /不要生成“（中文（English））”/);
-});
-
-test("translateMarkdownArticle repeats plain-path guidance when must_fix rejects newly added inline code", async () => {
-  const source = [
-    "## Credential Theft",
-    "",
-    "Attempts to access:",
-    "",
-    "- ~/.ssh/ (SSH keys)",
-    "- ~/.aws/ (AWS credentials)",
-    "- ~/.config/ (API tokens)"
-  ].join("\n");
-
-  const executor = new PromptAwareExecutor();
-  await translateMarkdownArticle(source, {
-    executor: createP2CompatibleExecutor({
-      async execute(prompt, options) {
-        executor.prompts.push(prompt);
-
-        if (options.outputSchema && prompt.includes("【分段审校输入】")) {
-          return createExecResult(
-            wrapPerSegmentAudits(prompt, [
-              {
-                segment_index: 1,
-                audit: createAudit(false, [
-                  "位置：三个列表项中的路径 `~/.ssh/`、`~/.aws/`、`~/.config/`。问题：译文把原文普通文本路径改成了 inline code，改变了原有 Markdown 结构。修复目标：去掉这些路径外层新增的反引号，保持与原文一致的普通列表文本结构。"
-                ])
-              }
-            ])
-          );
-        }
-
-        if (options.outputSchema || prompt.includes("只返回 JSON")) {
-          return createExecResult(JSON.stringify(createAudit(true)));
-        }
-
-        const currentTranslation = extractPromptSection(prompt, "【当前译文】");
-        if (currentTranslation !== null) {
-          return createExecResult(currentTranslation);
-        }
-
-        const sourceSection = extractPromptSection(prompt, "【英文原文】");
-        return createExecResult(sourceSection ?? "");
-      }
-    }),
-    formatter: async (markdown) => markdown
-  });
-
-  const repairPrompt = executor.prompts.find(
-    (item) =>
-      item.includes("【must_fix】") &&
-      item.includes("原文普通文本路径改成了 inline code")
-  );
-  assert.ok(repairPrompt);
-  assert.match(repairPrompt, /擅自把原文普通文本改成了 inline code/);
-  assert.match(repairPrompt, /如果原文中的路径、目录名、文件名、URL 片段或命令样式文本本来没有反引号/);
-  assert.match(repairPrompt, /不要把路径本身改成代码样式/);
 });
 
 test("translateMarkdownArticle repeats concept-family guidance when must_fix names both base and extended english terms", async () => {
