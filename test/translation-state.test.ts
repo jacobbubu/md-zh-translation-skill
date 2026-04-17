@@ -1282,7 +1282,7 @@ test("translation state reconciles conflicting heading and block plans with an e
       blockIndex: 1,
       blockKind: "heading",
       sourceText: "### Prompt Injection Attacks",
-      targetText: "### 提示注入攻击（Prompt Injection Attacks）"
+      targetText: "### 提示注入攻击（prompt injection attacks）（Prompt Injection Attacks）"
     }
   ]);
   assert.equal(slice.requiredAnchors.some((anchor) => anchor.english === "prompt injection attacks"), true);
