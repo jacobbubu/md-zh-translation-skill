@@ -5804,6 +5804,7 @@ async function translateProtectedSegment(
       : null;
   let lastDraftViolation: string | null = null;
   if (structuralSegmentDraft?.mode === "json-blocks" && structuralSegmentDraft.blockCount) {
+    try {
     const jsonDraftResult = await executeJsonBlockDraft(
       withJsonBlockDraftChunkContext(structuralSegmentDraft.value, chunkPromptContext),
       structuralSegmentDraft.blockCount
@@ -5841,6 +5842,12 @@ async function translateProtectedSegment(
           `Chunk ${chunkPromptContext.chunkIndex}/${plan.chunks.length}${chunkLabel}: ${strictJsonViolation}; falling back to strict text rescue after JSON-block retries.`
         );
       }
+    }
+    } catch (jsonBlockError) {
+      // JSON blocks lane failed (e.g. mock returned non-JSON, or block count
+      // mismatch). Fall through to the text draft prompts below.
+      draftResult = null;
+      lastDraftViolation = jsonBlockError instanceof Error ? jsonBlockError.message : String(jsonBlockError);
     }
   }
   if (!draftResult || lastDraftViolation) {
