@@ -1225,3 +1225,105 @@ test("normalizeHeadingLikeAnchorText restores missing qualifiers inside category
 
   assert.match(result, /文件系统权限（Filesystem Permissions）/);
 });
+
+test("normalizeExplicitRepairAnchorText restores structured heading anchor when model leaves title unchanged (#48)", () => {
+  const source = "**Test 2: System File Access**";
+  const translated = "**测试 2：系统文件访问**";
+  const slice = createSlice({
+    pendingRepairs: [
+      {
+        repairId: "repair-1",
+        anchorId: null,
+        failureType: "missing_anchor",
+        locationLabel: "分段标题",
+        instruction: "位置：分段标题。问题：首次出现的关键术语 System File Access 缺少中英文对照。修复目标：在标题补齐英文锚定。",
+        structuredTarget: {
+          location: "分段标题",
+          kind: "heading",
+          currentText: "系统文件访问",
+          targetText: "系统文件访问（System File Access）",
+          english: "System File Access",
+          chineseHint: "系统文件访问"
+        }
+      }
+    ],
+    headingHints: ["Test 2: System File Access"]
+  });
+
+  const result = normalizeExplicitRepairAnchorText(source, translated, slice);
+
+  assert.match(result, /系统文件访问（System File Access）/);
+});
+
+test("normalizeExplicitRepairAnchorText restores named anchor inside ATX heading (#48)", () => {
+  const source = "## How Sandbox Mode Changes Autonomous Coding";
+  const translated = "## 沙箱模式如何改变自主编码";
+  const slice = createSlice({
+    pendingRepairs: [
+      {
+        repairId: "repair-1",
+        anchorId: "anchor-1",
+        failureType: "missing_anchor",
+        locationLabel: "标题",
+        instruction: "标题缺少 Sandbox Mode 中英对照。",
+        structuredTarget: {
+          location: "标题",
+          kind: "heading",
+          currentText: "沙箱模式",
+          targetText: "沙箱模式（Sandbox Mode）",
+          english: "Sandbox Mode",
+          chineseHint: "沙箱模式"
+        }
+      }
+    ],
+    headingHints: ["How Sandbox Mode Changes Autonomous Coding"]
+  });
+
+  const result = normalizeExplicitRepairAnchorText(source, translated, slice);
+
+  assert.match(result, /沙箱模式（Sandbox Mode）/);
+});
+
+test("normalizeExplicitRepairAnchorText restores canonical bilingual display for exact ATX heading (#48)", () => {
+  const source = "### Accidental Destructive Operations";
+  const translated = "### 意外的破坏性操作";
+  const slice = createSlice({
+    pendingRepairs: [
+      {
+        repairId: "repair-1",
+        anchorId: "anchor-1",
+        failureType: "missing_anchor",
+        locationLabel: "标题",
+        instruction: "标题首现 Accidental Destructive Operations 缺少中英对照。",
+        structuredTarget: {
+          location: "标题",
+          kind: "heading",
+          currentText: "意外的破坏性操作",
+          targetText: "意外的破坏性操作（Accidental Destructive Operations）",
+          english: "Accidental Destructive Operations",
+          chineseHint: "意外的破坏性操作"
+        }
+      }
+    ],
+    headingHints: ["Accidental Destructive Operations"]
+  });
+
+  const result = normalizeExplicitRepairAnchorText(source, translated, slice);
+
+  assert.match(result, /意外的破坏性操作（Accidental Destructive Operations）/);
+});
+
+test("normalizeHeadingLikeAnchorText strips full english back-reference from operational headings (#48)", () => {
+  const source = "**Edit Config:**";
+  const translated = "**编辑配置（Edit Config）：**";
+  const slice = createSlice({
+    requiredAnchors: [
+      createAnchor("anchor-1", "Edit Config", "编辑配置", "edit-config", "chinese-primary")
+    ],
+    headingHints: ["Edit Config:"]
+  });
+
+  const result = normalizeHeadingLikeAnchorText(source, translated, slice);
+
+  assert.match(result, /编辑配置：/);
+});
