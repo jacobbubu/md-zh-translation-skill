@@ -706,7 +706,7 @@ test("translateMarkdownArticle splits a standalone intro blockquote away from fo
   ].join("\n");
 
   const prompts: string[] = [];
-  const executor: CodexExecutor = {
+  const executor: CodexExecutor = createP2CompatibleExecutor({
     async execute(prompt: string, options: CodexExecOptions): Promise<CodexExecResult> {
       prompts.push(prompt);
       if (isDocumentAnalysisPrompt(prompt)) {
@@ -730,7 +730,7 @@ test("translateMarkdownArticle splits a standalone intro blockquote away from fo
       const sourceSection = extractPromptSection(prompt, "【英文原文】");
       return createExecResult(sourceSection ?? "");
     }
-  };
+  });
   await translateMarkdownArticle(source, {
     executor,
     formatter: async (markdown) => markdown
@@ -935,7 +935,7 @@ test("translateMarkdownArticle splits a heading-like block away from a following
   ].join("\n");
 
   const prompts: string[] = [];
-  const executor: CodexExecutor = {
+  const executor: CodexExecutor = createP2CompatibleExecutor({
     async execute(prompt: string, options: CodexExecOptions): Promise<CodexExecResult> {
       prompts.push(prompt);
       if (isDocumentAnalysisPrompt(prompt)) {
@@ -955,7 +955,7 @@ test("translateMarkdownArticle splits a heading-like block away from a following
       const sourceSection = extractPromptSection(prompt, "【英文原文】");
       return createExecResult(sourceSection ?? "");
     }
-  };
+  });
 
   await translateMarkdownArticle(source, {
     executor,
@@ -995,7 +995,7 @@ test("translateMarkdownArticle splits before a heading when pending content alre
   ].join("\n");
 
   const prompts: string[] = [];
-  const executor: CodexExecutor = {
+  const executor: CodexExecutor = createP2CompatibleExecutor({
     async execute(prompt: string, options: CodexExecOptions): Promise<CodexExecResult> {
       prompts.push(prompt);
       if (isDocumentAnalysisPrompt(prompt)) {
@@ -1015,7 +1015,7 @@ test("translateMarkdownArticle splits before a heading when pending content alre
       const sourceSection = extractPromptSection(prompt, "【英文原文】");
       return createExecResult(sourceSection ?? "");
     }
-  };
+  });
 
   await translateMarkdownArticle(source, {
     executor,
@@ -1054,7 +1054,7 @@ test("translateMarkdownArticle splits a blockquote away from a preceding list be
   ].join("\n");
 
   const prompts: string[] = [];
-  const executor: CodexExecutor = {
+  const executor: CodexExecutor = createP2CompatibleExecutor({
     async execute(prompt: string, options: CodexExecOptions): Promise<CodexExecResult> {
       prompts.push(prompt);
       if (isDocumentAnalysisPrompt(prompt)) {
@@ -1074,7 +1074,7 @@ test("translateMarkdownArticle splits a blockquote away from a preceding list be
       const sourceSection = extractPromptSection(prompt, "【英文原文】");
       return createExecResult(sourceSection ?? "");
     }
-  };
+  });
 
   await translateMarkdownArticle(source, {
     executor,
@@ -1821,7 +1821,7 @@ test("translateMarkdownArticle allocates unique local markdown-link placeholders
   ].join("\n");
 
   const draftPrompts: string[] = [];
-  const executor: CodexExecutor = {
+  const executor: CodexExecutor = createP2CompatibleExecutor({
     async execute(prompt, options) {
       if (!options.outputSchema && !prompt.includes("【must_fix】") && !prompt.includes("只做“风格与可读性润色”")) {
         draftPrompts.push(prompt);
@@ -1839,7 +1839,7 @@ test("translateMarkdownArticle allocates unique local markdown-link placeholders
       const sourceSection = extractPromptSection(prompt, "【英文原文】");
       return createExecResult(sourceSection ?? "");
     }
-  };
+  });
 
   await translateMarkdownArticle(source, {
     executor,
@@ -2228,7 +2228,7 @@ test("translateMarkdownArticle reuses a Codex thread within a segment", async ()
     createExecResult("# 标题（Title）\n\n正文")
   ];
 
-  const executor: CodexExecutor = {
+  const executor: CodexExecutor = createP2CompatibleExecutor({
     async execute(prompt, options) {
       if (isDocumentAnalysisPrompt(prompt)) {
         return createExecResult(createEmptyAnchorCatalog(), "analysis-thread");
@@ -2238,7 +2238,7 @@ test("translateMarkdownArticle reuses a Codex thread within a segment", async ()
       assert.ok(next, "Unexpected extra Codex call");
       return next;
     }
-  };
+  });
 
   await translateMarkdownArticle(source, {
     executor,
@@ -2266,7 +2266,7 @@ test("translateMarkdownArticle routes post-draft stages to the configured post-d
   process.env.POST_DRAFT_REASONING_EFFORT = "medium";
 
   try {
-    const executor: CodexExecutor = {
+    const executor: CodexExecutor = createP2CompatibleExecutor({
       async execute(prompt, options) {
         calls.push({ prompt, options });
 
@@ -2290,7 +2290,7 @@ test("translateMarkdownArticle routes post-draft stages to the configured post-d
 
         return createExecResult("# 标题\n\n正文");
       }
-    };
+    });
 
     await translateMarkdownArticle(source, {
       executor,
@@ -2342,7 +2342,7 @@ test("translateMarkdownArticle routes post-draft stages to the configured post-d
 test("translateMarkdownArticle runs chunk-level audit with structured output", async () => {
   const source = "# Title\n\nBody";
   const calls: Array<{ prompt: string; options: CodexExecOptions }> = [];
-  const executor: CodexExecutor = {
+  const executor: CodexExecutor = createP2CompatibleExecutor({
     async execute(prompt, options) {
       if (isDocumentAnalysisPrompt(prompt)) {
         return createExecResult(createEmptyAnchorCatalog(), "analysis-thread");
@@ -2358,7 +2358,7 @@ test("translateMarkdownArticle runs chunk-level audit with structured output", a
 
       return createExecResult("# 标题\n\n正文", "draft-thread");
     }
-  };
+  });
 
   const result = await translateMarkdownArticle(source, {
     executor,
@@ -2409,7 +2409,7 @@ test("translateMarkdownArticle falls back to per-segment audit when bundled audi
 
   let bundledAuditSeen = false;
   let singleAuditCount = 0;
-  const executor: CodexExecutor = {
+  const executor: CodexExecutor = createP2CompatibleExecutor({
     async execute(prompt, options) {
       if (options.outputSchema && prompt.includes("【分段审校输入】")) {
         bundledAuditSeen = true;
@@ -2438,7 +2438,7 @@ test("translateMarkdownArticle falls back to per-segment audit when bundled audi
       const sourceSection = extractPromptSection(prompt, "【英文原文】");
       return createExecResult(sourceSection ?? "");
     }
-  };
+  });
 
   const result = await translateMarkdownArticle(source, {
     executor,
@@ -2477,7 +2477,7 @@ test("translateMarkdownArticle skips bundled audit for large multi-segment chunk
   ].join("\n");
 
   const prompts: string[] = [];
-  const executor: CodexExecutor = {
+  const executor: CodexExecutor = createP2CompatibleExecutor({
     async execute(prompt: string, options: CodexExecOptions): Promise<CodexExecResult> {
       prompts.push(prompt);
       if (isDocumentAnalysisPrompt(prompt)) {
@@ -2505,7 +2505,7 @@ test("translateMarkdownArticle skips bundled audit for large multi-segment chunk
       // exercise the echoed-source repair path.
       return createExecResult(sourceSection ? "中文占位译文" : "");
     }
-  };
+  });
 
   await translateMarkdownArticle(source, {
     executor,
@@ -2532,7 +2532,7 @@ test("translateMarkdownArticle falls back to per-segment audit when bundled audi
 
   let bundledAuditSeen = false;
   let singleAuditCount = 0;
-  const executor: CodexExecutor = {
+  const executor: CodexExecutor = createP2CompatibleExecutor({
     async execute(prompt, options) {
       if (options.outputSchema && prompt.includes("【分段审校输入】")) {
         bundledAuditSeen = true;
@@ -2552,7 +2552,7 @@ test("translateMarkdownArticle falls back to per-segment audit when bundled audi
       const sourceSection = extractPromptSection(prompt, "【英文原文】");
       return createExecResult(sourceSection ?? "");
     }
-  };
+  });
 
   const result = await translateMarkdownArticle(source, {
     executor,
@@ -2584,7 +2584,7 @@ test("translateMarkdownArticle switches to per-segment audits after a repair cyc
   let bundledAuditAfterRepair = false;
   let sawRepair = false;
 
-  const executor: CodexExecutor = {
+  const executor: CodexExecutor = createP2CompatibleExecutor({
     async execute(prompt, options) {
       if (isDocumentAnalysisPrompt(prompt)) {
         return createExecResult(createEmptyAnchorCatalog());
@@ -2630,7 +2630,7 @@ test("translateMarkdownArticle switches to per-segment audits after a repair cyc
       const sourceSection = extractPromptSection(prompt, "【英文原文】");
       return createExecResult(sourceSection ?? "");
     }
-  };
+  });
 
   await translateMarkdownArticle(source, {
     executor,
@@ -2668,7 +2668,7 @@ test("translateMarkdownArticle does not re-audit unchanged segments after later 
   let fallbackAuditCount = 0;
   let secondFallbackSawSegmentOne = false;
 
-  const executor: CodexExecutor = {
+  const executor: CodexExecutor = createP2CompatibleExecutor({
     async execute(prompt, options) {
       if (isDocumentAnalysisPrompt(prompt)) {
         return createExecResult(createEmptyAnchorCatalog());
@@ -2725,7 +2725,7 @@ test("translateMarkdownArticle does not re-audit unchanged segments after later 
       const sourceSection = extractPromptSection(prompt, "【英文原文】");
       return createExecResult(sourceSection ?? "");
     }
-  };
+  });
 
   const result = await translateMarkdownArticle(source, {
     executor,
@@ -3931,7 +3931,7 @@ test("translateMarkdownArticle repairs multiple must_fix items one at a time", a
   const repairMustFixSections: string[] = [];
   let auditCallCount = 0;
 
-  const executor: CodexExecutor = {
+  const executor: CodexExecutor = createP2CompatibleExecutor({
     async execute(prompt, options) {
       if (prompt.includes("【must_fix】")) {
         const mustFixSection = extractPromptSection(prompt, "【must_fix】") ?? "";
@@ -3959,7 +3959,7 @@ test("translateMarkdownArticle repairs multiple must_fix items one at a time", a
 
       return createExecResult("# 标题\n\n正文");
     }
-  };
+  });
 
   await translateMarkdownArticle(source, {
     executor,
@@ -3986,7 +3986,7 @@ test("translateMarkdownArticle batches mixed-location repairs in the same segmen
   const repairMustFixSections: string[] = [];
   let auditCallCount = 0;
 
-  const executor: CodexExecutor = {
+  const executor: CodexExecutor = createP2CompatibleExecutor({
     async execute(prompt, options) {
       if (prompt.includes("【must_fix】")) {
         const mustFixSection = extractPromptSection(prompt, "【must_fix】") ?? "";
@@ -4017,7 +4017,7 @@ test("translateMarkdownArticle batches mixed-location repairs in the same segmen
 
       return createExecResult(source);
     }
-  };
+  });
 
   await translateMarkdownArticle(source, {
     executor,
@@ -4222,7 +4222,7 @@ test("translateMarkdownArticle splits a short lead-in sentence before a bold con
   ].join("\n");
 
   const prompts: string[] = [];
-  const executor: CodexExecutor = {
+  const executor: CodexExecutor = createP2CompatibleExecutor({
     async execute(prompt: string, options: CodexExecOptions): Promise<CodexExecResult> {
       prompts.push(prompt);
       if (isDocumentAnalysisPrompt(prompt)) {
@@ -4246,7 +4246,7 @@ test("translateMarkdownArticle splits a short lead-in sentence before a bold con
       const sourceSection = extractPromptSection(prompt, "【英文原文】");
       return createExecResult(sourceSection ?? "");
     }
-  };
+  });
 
   await translateMarkdownArticle(source, {
     executor,
@@ -5814,7 +5814,7 @@ test("translateMarkdownArticle injects structured anchor state into draft prompt
   const source = "Prompt injection attacks can be blocked.\n";
   const prompts: string[] = [];
 
-  const executor: CodexExecutor = {
+  const executor: CodexExecutor = createP2CompatibleExecutor({
     async execute(prompt, options) {
       prompts.push(prompt);
 
@@ -5849,7 +5849,7 @@ test("translateMarkdownArticle injects structured anchor state into draft prompt
       const currentSource = extractPromptSection(prompt, "【英文原文】");
       return createExecResult(currentSource ?? "");
     }
-  };
+  });
 
   await translateMarkdownArticle(source, {
     executor,
@@ -7088,7 +7088,7 @@ test("translateMarkdownArticle does not inject required anchors into command phr
   );
   let auditedTranslation = "";
 
-  const executor: CodexExecutor = {
+  const executor: CodexExecutor = createP2CompatibleExecutor({
     async execute(prompt, options) {
       if (isDocumentAnalysisPrompt(prompt)) {
         return createExecResult(
@@ -7119,7 +7119,7 @@ test("translateMarkdownArticle does not inject required anchors into command phr
 
       return createExecResult(["**命令（Commands）：**", "", "- git status、git log、git diff", "- python script.py（在项目中运行代码）"].join("\n"));
     }
-  };
+  });
 
   const output = await translateMarkdownArticle(source, {
     executor,
@@ -7564,7 +7564,7 @@ test("translateMarkdownArticle shards document analysis and carries priorAccepte
     ""
   ].join("\n");
 
-  const executor: CodexExecutor = {
+  const executor: CodexExecutor = createP2CompatibleExecutor({
     async execute(prompt, options) {
       if (isDocumentAnalysisPrompt(prompt)) {
         analysisPrompts.push(prompt);
@@ -7610,7 +7610,7 @@ test("translateMarkdownArticle shards document analysis and carries priorAccepte
       const sourceSection = extractPromptSection(prompt, "【英文原文】");
       return createExecResult(sourceSection ?? "");
     }
-  };
+  });
 
   try {
     await translateMarkdownArticle(source, {
@@ -7669,7 +7669,7 @@ test("translateMarkdownArticle retries a timed-out analysis shard before splitti
   ].join("\n");
 
   let fullShardAttempts = 0;
-  const executor: CodexExecutor = {
+  const executor: CodexExecutor = createP2CompatibleExecutor({
     async execute(prompt, options) {
       if (isDocumentAnalysisPrompt(prompt)) {
         analysisPrompts.push(prompt);
@@ -7733,7 +7733,7 @@ test("translateMarkdownArticle retries a timed-out analysis shard before splitti
       const sourceSection = extractPromptSection(prompt, "【英文原文】");
       return createExecResult(sourceSection ?? "");
     }
-  };
+  });
 
   try {
     await translateMarkdownArticle(source, {
@@ -7824,7 +7824,7 @@ test("translateMarkdownArticle analyzes fallback shards with bounded concurrency
   let fullShardAttempts = 0;
   let inFlightChildAnalyses = 0;
   let maxConcurrentChildAnalyses = 0;
-  const executor: CodexExecutor = {
+  const executor: CodexExecutor = createP2CompatibleExecutor({
     async execute(prompt, options) {
       if (isDocumentAnalysisPrompt(prompt)) {
         const isFullShard =
@@ -7891,7 +7891,7 @@ test("translateMarkdownArticle analyzes fallback shards with bounded concurrency
       const sourceSection = extractPromptSection(prompt, "【英文原文】");
       return createExecResult(sourceSection ?? "");
     }
-  };
+  });
 
   try {
     await translateMarkdownArticle(source, {
