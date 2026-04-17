@@ -303,17 +303,7 @@ function createP2CompatibleExecutor(inner: CodexExecutor): CodexExecutor {
           JSON.stringify({ blocks: Array.from({ length: blockCount }, () => "中文占位译文") })
         );
       }
-      const result = await inner.execute(prompt, options);
-      if (!result.text.trim()) {
-        return { ...result, text: "中文占位译文" };
-      }
-      if (!/[\u4e00-\u9fff]/u.test(result.text) && result.text.trim().length >= 15) {
-        const srcMatch = prompt.match(/【英文原文】\n([\s\S]*?)(?:\n\n【|$)/);
-        if (srcMatch && result.text.trim() === srcMatch[1]?.trim()) {
-          return { ...result, text: "中文占位译文" };
-        }
-      }
-      return result;
+      return inner.execute(prompt, options);
     }
   };
 }
