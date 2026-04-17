@@ -243,6 +243,24 @@ class StubExecutor implements CodexExecutor {
       const blockCount = (prompt.match(/^### BLOCK \d+ \([^)]+\)$/gm) ?? []).length || 1;
       return createExecResult(JSON.stringify({ blocks: Array.from({ length: blockCount }, () => "中文占位译文") }));
     }
+    // Handle bundled/per-segment audit when no queued response matches
+    if (options.outputSchema || prompt.includes('"hard_checks"') || prompt.includes("只返回 JSON")) {
+      // Check if next queued response is a valid audit; if so use it
+      const peeked = this.responses[0];
+      if (peeked) {
+        try {
+          const parsed = JSON.parse(peeked.text) as Record<string, unknown>;
+          if (parsed.hard_checks || parsed.segments) {
+            this.responses.shift();
+            if (parsed.hard_checks && !parsed.segments) {
+              return { ...peeked, text: wrapAuditForSegments(prompt, parsed as GateAudit) };
+            }
+            return peeked;
+          }
+        } catch { /* not JSON audit, fall through to default audit */ }
+      }
+      return createExecResult(wrapAuditForSegments(prompt, createAudit(true)));
+    }
     const next = this.responses.shift();
     assert.ok(next, "Unexpected extra Codex call");
     if (prompt.includes("【segment ")) {
@@ -381,6 +399,10 @@ class WrappedInlineCodeExecutor implements CodexExecutor {
   readonly prompts: string[] = [];
 
   async execute(prompt: string, options: CodexExecOptions): Promise<CodexExecResult> {
+      if (options.outputSchema && prompt.includes("### BLOCK")) {
+        const bc = (prompt.match(/^### BLOCK \d+ \([^)]+\)$/gm) ?? []).length || 1;
+        return createExecResult(JSON.stringify({ blocks: Array.from({ length: bc }, () => "中文占位译文") }));
+      }
     this.prompts.push(prompt);
 
     if (isDocumentAnalysisPrompt(prompt)) {
@@ -1460,6 +1482,10 @@ test("translateMarkdownArticle strips added inline code from plain path list ite
 
   class PlainPathExecutor implements CodexExecutor {
     async execute(prompt: string, options: CodexExecOptions): Promise<CodexExecResult> {
+      if (options.outputSchema && prompt.includes("### BLOCK")) {
+        const bc = (prompt.match(/^### BLOCK \d+ \([^)]+\)$/gm) ?? []).length || 1;
+        return createExecResult(JSON.stringify({ blocks: Array.from({ length: bc }, () => "中文占位译文") }));
+      }
       if (options.outputSchema || prompt.includes('"hard_checks"') || prompt.includes("只返回 JSON")) {
         return createExecResult(wrapAuditForSegments(prompt, createAudit(true)));
       }
@@ -1604,6 +1630,10 @@ test("translateMarkdownArticle restores inline code only at source locations whe
 
   class MixedFlagExecutor implements CodexExecutor {
     async execute(prompt: string, options: CodexExecOptions): Promise<CodexExecResult> {
+      if (options.outputSchema && prompt.includes("### BLOCK")) {
+        const bc = (prompt.match(/^### BLOCK \d+ \([^)]+\)$/gm) ?? []).length || 1;
+        return createExecResult(JSON.stringify({ blocks: Array.from({ length: bc }, () => "中文占位译文") }));
+      }
       if (isDocumentAnalysisPrompt(prompt)) {
         return createExecResult(createEmptyAnchorCatalog());
       }
@@ -1647,6 +1677,10 @@ test("translateMarkdownArticle canonicalizes inline code fence shape back to the
 
   class DoubleBacktickExecutor implements CodexExecutor {
     async execute(prompt: string, options: CodexExecOptions): Promise<CodexExecResult> {
+      if (options.outputSchema && prompt.includes("### BLOCK")) {
+        const bc = (prompt.match(/^### BLOCK \d+ \([^)]+\)$/gm) ?? []).length || 1;
+        return createExecResult(JSON.stringify({ blocks: Array.from({ length: bc }, () => "中文占位译文") }));
+      }
       if (isDocumentAnalysisPrompt(prompt)) {
         return createExecResult(createEmptyAnchorCatalog());
       }
@@ -1904,6 +1938,10 @@ test("translateMarkdownArticle canonicalizes expanded URL spans before final sty
     private draftCallCount = 0;
 
     async execute(prompt: string, options: CodexExecOptions): Promise<CodexExecResult> {
+      if (options.outputSchema && prompt.includes("### BLOCK")) {
+        const bc = (prompt.match(/^### BLOCK \d+ \([^)]+\)$/gm) ?? []).length || 1;
+        return createExecResult(JSON.stringify({ blocks: Array.from({ length: bc }, () => "中文占位译文") }));
+      }
       this.prompts.push(prompt);
 
       if (options.outputSchema || prompt.includes('"hard_checks"') || prompt.includes("只返回 JSON")) {
