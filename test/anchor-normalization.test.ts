@@ -1396,3 +1396,57 @@ test("splitProtectedChunkSegments keeps standalone code blocks as fixed segments
   assert.ok(allSegments.some((s) => s.kind === "fixed"));
   assert.ok(allSegments.some((s) => s.kind === "translatable" && s.source.includes("Intro")));
 });
+
+// --- Session A: registry + inline-code tests migrated (#48) ---
+
+import {
+  normalizePackageRegistryTerminology,
+  restoreInlineCodeFromSourceShape,
+  restoreCodeLikeSourceShape,
+  restoreSourceShapeExampleTokens
+} from "../src/translate.js";
+
+test("normalizePackageRegistryTerminology does not rewrite generic registry outside package context (#48)", () => {
+  const source = "The Windows registry stores system configuration values.";
+  const translated = "Windows 注册表存储系统配置值。";
+  const result = normalizePackageRegistryTerminology(source, translated, null);
+  assert.match(result, /Windows 注册表/);
+  assert.doesNotMatch(result, /包注册源/);
+});
+
+test("normalizePackageRegistryTerminology does not override established semantic anchor (#48)", () => {
+  const source = "- Pre-approved destinations (npm registry, GitHub)";
+  const translated = "- 预先批准的目标（npm 注册表（npm registry）、GitHub）";
+  const slice = createSlice({
+    requiredAnchors: [
+      createAnchor("anchor-1", "npm registry", "npm 注册表", "npm-registry", "chinese-primary")
+    ]
+  });
+  const result = normalizePackageRegistryTerminology(source, translated, slice);
+  assert.match(result, /npm 注册表（npm registry）/);
+  assert.doesNotMatch(result, /包注册源/);
+});
+
+test("restoreInlineCodeFromSourceShape canonicalizes inline code fence shape back to source (#48)", () => {
+  const source = "The `--dangerously-skip-permissions` flag exists.";
+  const translated = "``--dangerously-skip-permissions`` 标志存在。";
+  const result = restoreInlineCodeFromSourceShape(source, translated);
+  assert.match(result, /`--dangerously-skip-permissions`/);
+  assert.doesNotMatch(result, /``--dangerously-skip-permissions``/);
+});
+
+test("restoreCodeLikeSourceShape restores wildcard tokens back to source shape (#48)", () => {
+  const source = "- Wildcards: ./src/**/*.js";
+  const translated = "- 通配符：./src/\\*_/_.js";
+  const result = restoreCodeLikeSourceShape(source, translated);
+  assert.match(result, /\.\/src\/\*\*\/\*\.js/);
+});
+
+test("restoreSourceShapeExampleTokens restores tokens inside markdown lists (#48)", () => {
+  const source = "- * - matches any\n- ** - recursive\n- ? - single char";
+  const translated = "- \\* - 匹配任意\n- \\*\\* - 递归\n- \\? - 单字符";
+  const result = restoreSourceShapeExampleTokens(source, translated);
+  assert.match(result, /^- \* - /m);
+  assert.match(result, /^- \*\* - /m);
+  assert.match(result, /^- \? - /m);
+});

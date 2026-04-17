@@ -5118,7 +5118,7 @@ function looksLikeMetaTaskResponse(text: string): boolean {
   return patterns.some((pattern) => pattern.test(trimmed));
 }
 
-function stripAddedInlineCodeFromPlainPaths(source: string, translated: string): string {
+export function stripAddedInlineCodeFromPlainPaths(source: string, translated: string): string {
   const sourceInlineCodeTokens = new Set<string>();
   for (const match of source.matchAll(/`([^`\n]+)`/g)) {
     const token = match[1]?.trim();
@@ -5161,7 +5161,7 @@ function stripAddedInlineCodeFromPlainPaths(source: string, translated: string):
   return normalized;
 }
 
-function restoreInlineCodeFromSourceShape(source: string, translated: string): string {
+export function restoreInlineCodeFromSourceShape(source: string, translated: string): string {
   const sourceLines = source.split(/\r?\n/);
   const translatedLines = translated.split(/\r?\n/);
   let changed = false;
@@ -5200,7 +5200,7 @@ function restoreInlineCodeFromSourceShape(source: string, translated: string): s
   return changed ? translatedLines.join("\n") : translated;
 }
 
-function restoreCodeLikeSourceShape(source: string, translated: string): string {
+export function restoreCodeLikeSourceShape(source: string, translated: string): string {
   const sourceLines = source.split(/\r?\n/);
   const translatedLines = translated.split(/\r?\n/);
   let changed = false;
@@ -5229,7 +5229,7 @@ function restoreCodeLikeSourceShape(source: string, translated: string): string 
   return changed ? translatedLines.join("\n") : translated;
 }
 
-function restoreSourceShapeExampleTokens(source: string, translated: string): string {
+export function restoreSourceShapeExampleTokens(source: string, translated: string): string {
   const sourceLines = source.split(/\r?\n/);
   const translatedLines = translated.split(/\r?\n/);
   let changed = false;
@@ -5427,7 +5427,7 @@ function replaceFirst(text: string, needle: string, replacement: string): string
   return text.slice(0, index) + replacement + text.slice(index + needle.length);
 }
 
-function normalizePackageRegistryTerminology(source: string, translated: string, slice: PromptSlice | null): string {
+export function normalizePackageRegistryTerminology(source: string, translated: string, slice: PromptSlice | null): string {
   if (!/\bregistr(?:y|ies)\b/i.test(source)) {
     return translated;
   }
