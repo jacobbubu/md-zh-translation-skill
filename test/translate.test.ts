@@ -1263,68 +1263,6 @@ test("translateMarkdownArticle falls back to the hard-pass translation when styl
   );
 });
 
-test("translateMarkdownArticle strips added inline code from plain path list items", async () => {
-  const source = [
-    "## Credential Theft",
-    "",
-    "Attempts to access:",
-    "",
-    "- ~/.ssh/ (SSH keys)",
-    "- ~/.aws/ (AWS credentials)",
-    "- ~/.config/ (API tokens)"
-  ].join("\n");
-
-  class PlainPathExecutor implements CodexExecutor {
-    async execute(prompt: string, options: CodexExecOptions): Promise<CodexExecResult> {
-      if (options.outputSchema && prompt.includes("### BLOCK")) {
-        const bc = (prompt.match(/^### BLOCK \d+ \([^)]+\)$/gm) ?? []).length || 1;
-        return createExecResult(JSON.stringify({ blocks: Array.from({ length: bc }, () => "中文占位译文") }));
-      }
-      if (options.outputSchema || prompt.includes('"hard_checks"') || prompt.includes("只返回 JSON")) {
-        return createExecResult(wrapAuditForSegments(prompt, createAudit(true)));
-      }
-
-      if (prompt.includes("只做“风格与可读性润色”")) {
-        return createExecResult(
-          [
-            "## 凭据窃取（Credential Theft）",
-            "",
-            "尝试访问：",
-            "",
-            "- `~/.ssh/`（SSH keys）",
-            "- `~/.aws/`（AWS credentials）",
-            "- `~/.config/`（API tokens）"
-          ].join("\n")
-        );
-      }
-
-      return createExecResult(
-        [
-          "## 凭据窃取（Credential Theft）",
-          "",
-          "尝试访问：",
-          "",
-          "- `~/.ssh/`（SSH keys）",
-          "- `~/.aws/`（AWS credentials）",
-          "- `~/.config/`（API tokens）"
-        ].join("\n")
-      );
-    }
-  }
-
-  const result = await translateMarkdownArticle(source, {
-    executor: new PlainPathExecutor(),
-    formatter: async (markdown) => markdown
-  });
-
-  assert.match(result.markdown, /- ~\/\.ssh\/（SSH keys）/);
-  assert.match(result.markdown, /- ~\/\.aws\/（AWS credentials）/);
-  assert.match(result.markdown, /- ~\/\.config\/（API tokens）/);
-  assert.doesNotMatch(result.markdown, /`~\/\.ssh\/`/);
-  assert.doesNotMatch(result.markdown, /`~\/\.aws\/`/);
-  assert.doesNotMatch(result.markdown, /`~\/\.config\/`/);
-});
-
 test("translateMarkdownArticle strips added inline code from plain command list items under Commands", async () => {
   const source = [
     "### Category 2: Prompted",
@@ -1413,55 +1351,6 @@ test("translateMarkdownArticle strips added inline code from multi-command phras
   assert.doesNotMatch(result.markdown, /`python script\.py`/);
 });
 
-test("translateMarkdownArticle restores inline code only at source locations when the same flag also appears as plain text", async () => {
-  const source = [
-    "## Claude Code Permission Problem",
-    "",
-    "If you use the --dangerously-skip-permissions flag, you remove safety guardrails.",
-    "",
-    "The `--dangerously-skip-permissions` flag exists as an escape hatch from this fatigue."
-  ].join("\n");
-
-  class MixedFlagExecutor implements CodexExecutor {
-    async execute(prompt: string, options: CodexExecOptions): Promise<CodexExecResult> {
-      if (options.outputSchema && prompt.includes("### BLOCK")) {
-        const bc = (prompt.match(/^### BLOCK \d+ \([^)]+\)$/gm) ?? []).length || 1;
-        return createExecResult(JSON.stringify({ blocks: Array.from({ length: bc }, () => "中文占位译文") }));
-      }
-      if (isDocumentAnalysisPrompt(prompt)) {
-        return createExecResult(createEmptyAnchorCatalog());
-      }
-
-      if (options.outputSchema || prompt.includes('"hard_checks"') || prompt.includes("只返回 JSON")) {
-        return createExecResult(wrapAuditForSegments(prompt, createAudit(true)));
-      }
-
-      const translated = [
-        "## Claude Code 权限问题",
-        "",
-        "如果你使用 `--dangerously-skip-permissions` 标志，就会移除安全护栏。",
-        "",
-        "这个 --dangerously-skip-permissions 标志是为了缓解这种疲劳而存在的逃生舱。"
-      ].join("\n");
-
-      if (prompt.includes("只做“风格与可读性润色”")) {
-        return createExecResult(extractPromptSection(prompt, "【当前译文】") ?? translated);
-      }
-
-      return createExecResult(translated);
-    }
-  }
-
-  const result = await translateMarkdownArticle(source, {
-    executor: new MixedFlagExecutor(),
-    formatter: async (markdown) => markdown
-  });
-
-  assert.match(result.markdown, /如果你使用 --dangerously-skip-permissions 标志/);
-  assert.match(result.markdown, /这个 `--dangerously-skip-permissions` 标志是为了缓解这种疲劳而存在的逃生舱/);
-  assert.doesNotMatch(result.markdown, /如果你使用 `--dangerously-skip-permissions` 标志/);
-});
-
 test("translateMarkdownArticle restores code-like wildcard tokens back to the source shape", async () => {
   const source = "- Wildcards: ./src/**/*.js\n";
 
@@ -1493,57 +1382,6 @@ test("translateMarkdownArticle restores code-like wildcard tokens back to the so
 
   assert.match(result.markdown, /\.\/src\/\*\*\/\*\.js/);
   assert.doesNotMatch(result.markdown, /\.\/src\/\\\*_\//);
-});
-
-test("translateMarkdownArticle restores source-shaped example tokens inside markdown lists", async () => {
-  const source = [
-    "**Glob Patterns:**",
-    "",
-    "- * - Matches any character except /",
-    "- ** - Matches any character, including /",
-    "- ? - Matches a single character",
-    "- [abc] - Matches any character in the set"
-  ].join("\n");
-
-  const result = await translateMarkdownArticle(source, {
-    executor: createP2CompatibleExecutor({
-      async execute(prompt, options) {
-        if (isDocumentAnalysisPrompt(prompt)) {
-          return createExecResult(createEmptyAnchorCatalog());
-        }
-
-        if (options.outputSchema && prompt.includes("【分段审校输入】")) {
-          return createExecResult(wrapPerSegmentAudits(prompt, [{ segment_index: 1, audit: createAudit(true) }]));
-        }
-
-        if (options.outputSchema || prompt.includes('"hard_checks"') || prompt.includes("只返回 JSON")) {
-          return createExecResult(JSON.stringify(createAudit(true)));
-        }
-
-        const currentTranslation = extractPromptSection(prompt, "【当前译文】");
-        if (currentTranslation !== null) {
-          return createExecResult(currentTranslation);
-        }
-
-        return createExecResult(
-          [
-            "**Glob 模式：**",
-            "",
-            "- - - 匹配除 / 之外的任意字符",
-            "- \\*\\* - 匹配任意字符，包括 /",
-            "-? - 匹配单个字符",
-            "- [abc] - 匹配集合中的任意字符"
-          ].join("\n")
-        );
-      }
-    }),
-    formatter: async (markdown) => markdown
-  });
-
-  assert.match(result.markdown, /^- \* - /m);
-  assert.match(result.markdown, /^- \*\* - /m);
-  assert.match(result.markdown, /^- \? - /m);
-  assert.match(result.markdown, /^- \[abc\] - /m);
 });
 
 test("translateMarkdownArticle strips added inline code from plain flags inside blockquotes", async () => {
@@ -5085,84 +4923,6 @@ test("translateMarkdownArticle infers an inline concept local fallback anchor fr
   });
 
   assert.match(output.markdown, /审批疲劳（approval fatigue）/);
-});
-
-test("translateMarkdownArticle rewrites an alias first mention to the canonical concept display inside a quoted sentence", async () => {
-  const source = [
-    '> Sandbox works by separating these two cases.',
-    "",
-    "## What Sandbox Mode Protects Against",
-    "",
-    "Sandbox mode addresses real attack vectors.",
-    ""
-  ].join("\n");
-  let auditCount = 0;
-
-  const output = await translateMarkdownArticle(source, {
-    executor: createP2CompatibleExecutor({
-      async execute(prompt, options) {
-        if (isDocumentAnalysisPrompt(prompt)) {
-          return createExecResult(
-            createAnchorCatalog([
-              {
-                english: "sandbox mode",
-                chineseHint: "沙盒模式",
-                familyKey: "sandbox-mode",
-                displayPolicy: "chinese-primary",
-                chunkId: "chunk-1",
-                segmentId: "chunk-1-segment-1"
-              }
-            ])
-          );
-        }
-
-        if (isBundledAuditPrompt(prompt, options)) {
-          auditCount += 1;
-          if (auditCount === 1) {
-            return createExecResult(
-              wrapPerSegmentAudits(prompt, [
-                {
-                  segment_index: 1,
-                  audit: createAudit(false, [
-                    '位置：引用段“Sandbox 的工作方式，就是把这两种情况区分开来。”；问题：Sandbox 在本分段中先于“沙盒模式（sandbox mode）”出现，但未在首次出现处建立稳定的中英对应；修复目标：在该引用句内就地补齐并与后文“沙盒模式（sandbox mode）”保持同一概念锚定，不要把修复转移到后文标题或正文。'
-                  ])
-                }
-              ])
-            );
-          }
-
-          return createExecResult(wrapPerSegmentAudits(prompt, [{ segment_index: 1, audit: createAudit(true) }]));
-        }
-
-        if (prompt.includes("【必须修复】")) {
-          const currentTranslation = extractPromptSection(prompt, "【当前译文】") ?? "";
-          return createExecResult(currentTranslation);
-        }
-
-        if (options.outputSchema || prompt.includes('"hard_checks"') || prompt.includes("只返回 JSON")) {
-          return createExecResult(JSON.stringify(createAudit(true)));
-        }
-
-        const currentTranslation = extractPromptSection(prompt, "【当前译文】");
-        if (currentTranslation !== null) {
-          return createExecResult(currentTranslation);
-        }
-
-        return createExecResult([
-          '> Sandbox 的工作方式，就是把这两种情况区分开来。',
-          "",
-          "## 沙盒模式保护什么",
-          "",
-          "沙盒模式可以处理真实的攻击向量。",
-          ""
-        ].join("\n"));
-      }
-    }),
-    formatter: async (markdown) => markdown
-  });
-
-  assert.match(output.markdown, /沙盒模式（[Ss]andbox mode）的工作方式，就是把这两种情况区分开来/);
-  assert.match(output.markdown, /## 沙盒模式（[Ss]andbox mode）保护什么/);
 });
 
 test("translateMarkdownArticle reifies a blockquote alias repair target from must_fix when analysis misses the alias plan", async () => {

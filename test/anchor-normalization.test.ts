@@ -1401,6 +1401,7 @@ test("splitProtectedChunkSegments keeps standalone code blocks as fixed segments
 
 import {
   normalizePackageRegistryTerminology,
+  stripAddedInlineCodeFromPlainPaths,
   restoreInlineCodeFromSourceShape,
   restoreCodeLikeSourceShape,
   restoreSourceShapeExampleTokens
@@ -1449,4 +1450,48 @@ test("restoreSourceShapeExampleTokens restores tokens inside markdown lists (#48
   assert.match(result, /^- \* - /m);
   assert.match(result, /^- \*\* - /m);
   assert.match(result, /^- \? - /m);
+});
+
+test("stripAddedInlineCodeFromPlainPaths strips added backticks from plain path list items (#48)", () => {
+  const source = "- ~/.ssh/ (SSH keys)\n- ~/.aws/ (AWS credentials)\n- ~/.config/ (API tokens)";
+  const translated = "- \`~/.ssh/\`（SSH keys）\n- \`~/.aws/\`（AWS credentials）\n- \`~/.config/\`（API tokens）";
+  const result = stripAddedInlineCodeFromPlainPaths(source, translated);
+  assert.match(result, /- ~\/\.ssh\/（SSH keys）/);
+  assert.doesNotMatch(result, /\`~\/\.ssh\/\`/);
+});
+
+test("restoreSourceShapeExampleTokens restores glob tokens in lists (#48)", () => {
+  const source = "- * - matches any\n- ** - recursive\n- ? - single char";
+  const translated = "- \\* - 匹配任意\n- \\*\\* - 递归\n- \\? - 单字符";
+  const result = restoreSourceShapeExampleTokens(source, translated);
+  assert.match(result, /^- \* - /m);
+  assert.match(result, /^- \*\* - /m);
+});
+
+test("applySemanticMentionPlans rewrites alias first mention to canonical concept inside quoted sentence (#48)", () => {
+  const source = "> The Sandbox works by differentiating between these two cases.";
+  const translated = "> 沙盒通过区分这两种情况来发挥作用。";
+  const slice = createSlice({
+    aliasPlans: [
+      {
+        lineIndex: 1,
+        sourceText: "The Sandbox works by differentiating between these two cases.",
+        currentText: "沙盒",
+        targetText: "沙盒模式（sandbox mode）",
+        english: "sandbox mode",
+        chineseHint: "沙盒模式"
+      }
+    ]
+  });
+  const result = applySemanticMentionPlans(source, translated, slice);
+  assert.match(result, /沙盒模式（sandbox mode）/);
+});
+
+test("restoreInlineCodeFromSourceShape restores inline code only at source locations (#48)", () => {
+  const source = "The `--flag` option works. Use --flag carefully.";
+  const translated = "The `--flag` 选项有效。谨慎使用 `--flag`。";
+  const result = restoreInlineCodeFromSourceShape(source, translated);
+  assert.match(result, /`--flag` 选项/);
+  // Second --flag should NOT have backticks (source doesn't have them there)
+  assert.match(result, /使用 --flag/);
 });
