@@ -6488,13 +6488,19 @@ async function repairDraftedSegment(
     let lastRepairViolation: string | null = null;
     for (const [attemptIndex, item] of repairPrompts.entries()) {
       if (item.mode === "json-blocks") {
-        const result = await executeJsonBlockRepair(item.prompt, sourceBlockCount);
-        repairResult = {
-          ...result,
-          text: stripControlPlaneContamination(
-            reconstructJsonBlockDraft(draftedSegment.protectedSource, result.text)
-          )
-        };
+        try {
+          const result = await executeJsonBlockRepair(item.prompt, sourceBlockCount);
+          repairResult = {
+            ...result,
+            text: stripControlPlaneContamination(
+              reconstructJsonBlockDraft(draftedSegment.protectedSource, result.text)
+            )
+          };
+        } catch {
+          // JSON block repair failed (e.g. non-JSON response). Skip to next
+          // repair prompt (text mode) which doesn't require structured output.
+          continue;
+        }
       } else {
         const rawRepairResult = await executeRepair(item.prompt, item.useThread);
         repairResult = {
