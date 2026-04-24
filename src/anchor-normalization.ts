@@ -92,15 +92,54 @@ export function normalizeSegmentAnchorText(text: string, slice: PromptSlice | nu
 
   normalized = flipReversedBilingualForChinesePrimary(normalized, anchors);
   const afterLocalHints = normalizeRepeatedEnglishParenthesesWithLocalHints(normalized);
+  const afterSameLatinHead = stripSameLatinHeadAnchorParenthetical(afterLocalHints, anchors);
   // Always run list-item English+Chinese paren merge on every line at the
   // end. This was previously only reached via injectAnchorIntoLine's internal
   // normalizeExplicitRepairReplacementSpacing, but LLM draft sometimes
   // produces `（English）（Chinese）` directly on list items without any
   // anchor injection firing, leaving the two adjacent parens unmerged.
-  return afterLocalHints
+  return afterSameLatinHead
     .split(/\r?\n/)
     .map((line) => mergeEnglishAnchorWithAdjacentChineseParenInLine(line))
     .join("\n");
+}
+
+// Rewrite `X（X <中文>）` → `X <中文>` when X is a known anchor's english
+// surface. This is a safety net for a draft/repair failure mode where
+// analysis labeled a compound like `Neo4j clusters` as a bilingual anchor
+// with chineseHint `Neo4j 集群`: the draft then rendered the anchor template
+// as `Neo4j（Neo4j 集群）`, a same-language parenthetical that the
+// first_mention_bilingual audit rejects. Collapsing to `Neo4j 集群` lets the
+// audit pass without demanding a new bilingual form.
+function stripSameLatinHeadAnchorParenthetical(
+  text: string,
+  anchors: readonly PromptAnchor[]
+): string {
+  let result = text;
+  const seen = new Set<string>();
+  for (const anchor of anchors) {
+    const english = anchor.english.trim();
+    if (!english || seen.has(english)) {
+      continue;
+    }
+    seen.add(english);
+    if (!/^[A-Za-z0-9][A-Za-z0-9.+/_\-]*$/.test(english)) {
+      // Only apply when the anchor head is a single Latin token. Multi-token
+      // anchors are handled by other normalizers and don't exhibit this
+      // degenerate pattern.
+      continue;
+    }
+    const escapedEnglish = escapeRegExp(english);
+    const pattern = new RegExp(
+      `${escapedEnglish}（${escapedEnglish}\\s*([\\u4e00-\\u9fff][\\u4e00-\\u9fff\\s]*)）`,
+      "g"
+    );
+    result = result.replace(pattern, (_match, chineseTail: string) => {
+      const tail = chineseTail.trim();
+      return tail ? `${english} ${tail}` : english;
+    });
+  }
+  return result;
 }
 
 // Fix the case where LLM draft emits `English（chineseHint）` (English first)
