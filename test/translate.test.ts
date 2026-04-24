@@ -1733,6 +1733,48 @@ test("getDraftContractViolation preserves raw bold markers when the source alrea
   assert.equal(violation, null);
 });
 
+test("buildRepairPromptContext injects first_mention_bilingual cut-piece guidance when must_fix quotes an English target (#71)", () => {
+  const context = buildRepairPromptContextForTest(
+    createMinimalChunkPromptContext(),
+    [
+      "第 2 个列表项中\"Boeing 747\"首次出现未按要求补中英文对照，需在该处直接补齐。"
+    ]
+  );
+
+  const notes = context.specialNotes.join("\n");
+  assert.match(notes, /first_mention_bilingual 硬失败/);
+  assert.match(notes, /Boeing 747/);
+  assert.match(notes, /切片 A——译文里已经有该概念的中文译名/);
+  assert.match(notes, /切片 B——译文完全漏掉该概念/);
+  assert.match(notes, /相邻重复括注/);
+});
+
+test("buildRepairPromptContext catches first_mention_bilingual signals phrased as 首现/双语 (#71)", () => {
+  const context = buildRepairPromptContextForTest(
+    createMinimalChunkPromptContext(),
+    [
+      "在当前引用句中，\"Entity-Relationship\" 首现位置缺少双语锚定，需要补齐。"
+    ]
+  );
+
+  const notes = context.specialNotes.join("\n");
+  assert.match(notes, /first_mention_bilingual 硬失败/);
+  assert.match(notes, /Entity-Relationship/);
+});
+
+test("buildRepairPromptContext does not emit first_mention_bilingual guidance for unrelated must_fix items (#71)", () => {
+  const context = buildRepairPromptContextForTest(
+    createMinimalChunkPromptContext(),
+    [
+      "硬性检查 paragraph_match 未通过：标题译文只覆盖了原句前半部分。"
+    ]
+  );
+
+  const notes = context.specialNotes.join("\n");
+  assert.doesNotMatch(notes, /first_mention_bilingual 硬失败/);
+  assert.doesNotMatch(notes, /切片 A——译文里已经有该概念的中文译名/);
+});
+
 test("translateMarkdownArticle surfaces IR targets in repair guidance when pending repairs are already bound", () => {
   const context = buildRepairPromptContextForTest(
     createMinimalChunkPromptContext({
