@@ -9,6 +9,7 @@ import { planMarkdownChunks } from "../src/markdown-chunks.js";
 import { extractFrontmatter, protectMarkdownSpans } from "../src/markdown-protection.js";
 import {
   buildRepairPromptContextForTest,
+  getDraftContractViolationForTest,
   parseGateAudit,
   translateMarkdownArticle,
   type ChunkPromptContext,
@@ -1696,6 +1697,40 @@ test("buildRepairPromptContext does not emit paragraph_match guidance for unrela
   const notes = context.specialNotes.join("\n");
   assert.doesNotMatch(notes, /paragraph_match 硬失败的本质是“内容缺失”/);
   assert.doesNotMatch(notes, /当前段落或标题块漏翻了以下原文片段/);
+});
+
+test("getDraftContractViolation rejects adjacent duplicate English parenthetical annotations (#69)", () => {
+  const violation = getDraftContractViolationForTest(
+    "@@MDZH_STRONG_EMPHASIS_0001@@",
+    "小语言模型（Small Language Models (SLMs)）（SLMs）"
+  );
+  assert.ok(violation, "expected a violation string, got null");
+  assert.match(violation!, /stacked duplicate English parenthetical/);
+});
+
+test("getDraftContractViolation allows a single English parenthetical annotation (#69)", () => {
+  const violation = getDraftContractViolationForTest(
+    "@@MDZH_STRONG_EMPHASIS_0001@@",
+    "小语言模型（Small Language Models (SLMs)）"
+  );
+  assert.equal(violation, null);
+});
+
+test("getDraftContractViolation rejects raw bold markers when protected source had none (#69)", () => {
+  const violation = getDraftContractViolationForTest(
+    "@@MDZH_STRONG_EMPHASIS_0001@@",
+    "**小语言模型**和**"
+  );
+  assert.ok(violation, "expected a violation string, got null");
+  assert.match(violation!, /introduced raw bold markers/);
+});
+
+test("getDraftContractViolation preserves raw bold markers when the source already contained them (#69)", () => {
+  const violation = getDraftContractViolationForTest(
+    "这是**原文本身**带有的加粗片段",
+    "这是**译文**保留的加粗片段"
+  );
+  assert.equal(violation, null);
 });
 
 test("translateMarkdownArticle surfaces IR targets in repair guidance when pending repairs are already bound", () => {

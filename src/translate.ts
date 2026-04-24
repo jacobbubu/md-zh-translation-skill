@@ -6288,6 +6288,18 @@ function getDraftContractViolation(source: string, text: string): string | null 
     return source.trim() ? "draft returned empty content" : null;
   }
 
+  // Issue #69 (B): reject repair output that emits raw `**` markers when the
+  // protected source had zero raw `**` (all bold spans are placeholder-tokenized
+  // as `@@MDZH_STRONG_EMPHASIS_NNNN@@`). Raw `**` leaking through means the LLM
+  // invented bold markup, which corrupts span boundaries downstream. Runs
+  // before block-kind checks because a single-line `**X**` otherwise triggers
+  // the heading misclassification branch first and hides the root cause.
+  const sourceBoldCount = (source.match(/\*\*/g) ?? []).length;
+  const draftBoldCount = (trimmed.match(/\*\*/g) ?? []).length;
+  if (sourceBoldCount === 0 && draftBoldCount > 0) {
+    return `draft introduced raw bold markers (** x ${draftBoldCount}) not present in the protected source`;
+  }
+
   const trimmedSource = source.trim();
   if (trimmed === trimmedSource) {
     const strippedSource = trimmedSource
@@ -6373,6 +6385,41 @@ function getDraftContractViolation(source: string, text: string): string | null 
 
   if (source.length > 0 && trimmed.length > source.length * 2.8) {
     return "draft expanded far beyond the source segment length";
+  }
+
+  // Issue #69 (A): reject repair output that stacks the same English term in
+  // two adjacent parenthetical annotations, e.g.
+  // `（Small Language Models (SLMs)）（SLMs）` or `（SLMs）（SLMs）`. This pattern
+  // emerges when repair over-fixes a first_mention_bilingual audit hint inside
+  // a protected bold span; the downstream collapse helper only catches 3+
+  // adjacent duplicates, so two-window stacks leak through to audit.
+  const parenWindowPattern = /（\s*([A-Za-z][A-Za-z0-9 .+/_\-()]*?)\s*）/gu;
+  const parenWindows: { start: number; end: number; innerKey: string }[] = [];
+  for (const match of trimmed.matchAll(parenWindowPattern)) {
+    const inner = match[1]!.toLowerCase().replace(/[^a-z0-9]/g, "");
+    if (inner.length === 0) {
+      continue;
+    }
+    parenWindows.push({
+      start: match.index!,
+      end: match.index! + match[0].length,
+      innerKey: inner
+    });
+  }
+  for (let i = 1; i < parenWindows.length; i += 1) {
+    const prev = parenWindows[i - 1]!;
+    const curr = parenWindows[i]!;
+    const between = trimmed.slice(prev.end, curr.start);
+    if (!/^[\s*]*$/.test(between)) {
+      continue;
+    }
+    const a = prev.innerKey;
+    const b = curr.innerKey;
+    if (a === b || a.includes(b) || b.includes(a)) {
+      const snippetStart = Math.max(0, prev.start - 10);
+      const snippetEnd = Math.min(trimmed.length, curr.end + 10);
+      return `draft stacked duplicate English parenthetical annotation near: ${trimmed.slice(snippetStart, snippetEnd)}`;
+    }
   }
 
   return null;
@@ -7145,6 +7192,10 @@ export function buildRepairPromptContextForTest(
   mustFix: readonly string[]
 ): ChunkPromptContext {
   return buildRepairPromptContext(promptContext, mustFix);
+}
+
+export function getDraftContractViolationForTest(source: string, text: string): string | null {
+  return getDraftContractViolation(source, text);
 }
 
 function collectDuplicatePendingAnchorGroups(promptContext: ChunkPromptContext): string[][] {
