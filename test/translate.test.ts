@@ -1668,6 +1668,36 @@ test("translateMarkdownArticle repeats in-sentence repair guidance when must_fix
   assert.match(notes, /不要把修复转移到同一分段的前一句、后一句、标题、列表项或总结句里/);
 });
 
+test("buildRepairPromptContext injects paragraph_match missing-source guidance when audit quotes an unfixed sentence (#67)", () => {
+  const context = buildRepairPromptContextForTest(
+    createMinimalChunkPromptContext(),
+    [
+      "第 1 个标题块的译文缺少原文后半句\"because they look great on both the mobile app and desktop, and they won't get messed up by the publication's formatting rules.\"，需补全整句含义并保持标题结构。",
+      "硬性检查 paragraph_match 未通过：标题译文只覆盖了原句前半部分，缺少后半句内容，和原文不严格对应。"
+    ]
+  );
+
+  const notes = context.specialNotes.join("\n");
+  assert.match(notes, /当前段落或标题块漏翻了以下原文片段/);
+  assert.match(notes, /because they look great on both the mobile app and desktop/);
+  assert.match(notes, /paragraph_match 硬失败的本质是“内容缺失”而非排版问题/);
+  assert.match(notes, /整段仍保持为单一标题节点/);
+  assert.match(notes, /输出的修订译文相对当前译文必须明显变长/);
+});
+
+test("buildRepairPromptContext does not emit paragraph_match guidance for unrelated must_fix items (#67)", () => {
+  const context = buildRepairPromptContextForTest(
+    createMinimalChunkPromptContext(),
+    [
+      "当前句“But you need to understand what kind of access your Claude Code AI agents need.”中，首次出现的“sandboxes”未补中英对照。"
+    ]
+  );
+
+  const notes = context.specialNotes.join("\n");
+  assert.doesNotMatch(notes, /paragraph_match 硬失败的本质是“内容缺失”/);
+  assert.doesNotMatch(notes, /当前段落或标题块漏翻了以下原文片段/);
+});
+
 test("translateMarkdownArticle surfaces IR targets in repair guidance when pending repairs are already bound", () => {
   const context = buildRepairPromptContextForTest(
     createMinimalChunkPromptContext({
