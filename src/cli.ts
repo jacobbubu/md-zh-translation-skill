@@ -31,6 +31,7 @@ type ParsedArgs = {
   outputPath?: string;
   installTarget?: InstallTarget;
   installPath?: string;
+  strictGate: boolean;
   showHelp: boolean;
   showVersion: boolean;
 };
@@ -53,6 +54,9 @@ Options:
   --input <path>   Read the source Markdown from a file. When provided, stdin is ignored.
   --output <path>  Write the final translated Markdown to a file. When omitted, output goes to stdout.
   --path <path>    Override the install destination for a single install target.
+  --strict-gate    Fail hard (exit 4) when the repair loop cannot clear any hard-check, instead
+                   of the default soft-gate behavior (emit degraded output, exit 0). Use in CI or
+                   strict quality pipelines. MDZH_SOFT_GATE=false has the same effect.
   --help           Show this help text.
   --version        Show the CLI version.
 
@@ -66,10 +70,11 @@ Standard streams:
   - stderr reports progress, diagnostics, and failures.
 
 Exit codes:
-  0  Success.
+  0  Success (may include soft-gate degraded output; see stderr for warnings).
   2  Invalid arguments or missing input.
   3  Codex CLI execution failed.
-  4  The hidden hard gate still failed after the repair loop.
+  4  The hidden hard gate still failed after the repair loop (with --strict-gate, or when a
+     structural hard-check such as protected_span_integrity or paragraph_match fails).
   5  Markdown beautification failed.
 
 Defaults:
@@ -91,6 +96,7 @@ MCP:
 function parseArgs(argv: readonly string[]): ParsedArgs {
   const parsed: ParsedArgs = {
     mode: "translate",
+    strictGate: false,
     showHelp: false,
     showVersion: false
   };
@@ -141,6 +147,9 @@ function parseArgs(argv: readonly string[]): ParsedArgs {
         }
         parsed.installPath = argv[index + 1]!;
         index += 1;
+        break;
+      case "--strict-gate":
+        parsed.strictGate = true;
         break;
       default:
         throw new InputError(`Unknown argument: ${current}`);
@@ -195,6 +204,19 @@ function normalizeProgressMessage(message: string): string | null {
   return `[md-zh-translate] ${trimmed}\n`;
 }
 
+export function resolveSoftGate(
+  args: { strictGate: boolean },
+  env: NodeJS.ProcessEnv = process.env
+): boolean {
+  if (args.strictGate) {
+    return false;
+  }
+  if (env.MDZH_SOFT_GATE === "false") {
+    return false;
+  }
+  return true;
+}
+
 export async function runCli(
   argv: readonly string[],
   io: CliIo = createDefaultIo(),
@@ -246,7 +268,7 @@ export async function runCli(
     const result = await dependencies.translate(source, {
       cwd: dependencies.cwd,
       sourcePathHint: args.inputPath ?? "stdin.md",
-      softGate: process.env.MDZH_SOFT_GATE === "true",
+      softGate: resolveSoftGate(args, process.env),
       onProgress: (message) => {
         const normalized = normalizeProgressMessage(message);
         if (normalized) {
