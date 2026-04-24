@@ -115,6 +115,63 @@ test("normalizeSegmentAnchorText strips freshness prefixes from chinese-primary 
   );
 });
 
+test("normalizeSegmentAnchorText strips same-latin-head parenthetical into bare chinese tail", () => {
+  const slice = createSlice({
+    requiredAnchors: [createAnchor("anchor-1", "Neo4j", "Neo4j")]
+  });
+
+  const normalized = normalizeSegmentAnchorText(
+    "复杂的 Neo4j（Neo4j 集群）击穿了性能预算。",
+    slice
+  );
+
+  assert.equal(normalized, "复杂的 Neo4j 集群击穿了性能预算。");
+});
+
+test("normalizeSegmentAnchorText strips same-latin-head parenthetical across multiple anchors", () => {
+  const slice = createSlice({
+    requiredAnchors: [
+      createAnchor("anchor-1", "Kubernetes", "Kubernetes"),
+      createAnchor("anchor-2", "OpenAI", "OpenAI")
+    ]
+  });
+
+  const normalized = normalizeSegmentAnchorText(
+    "Kubernetes（Kubernetes 集群）与 OpenAI（OpenAI 模型）是常见组合。",
+    slice
+  );
+
+  assert.equal(normalized, "Kubernetes 集群与 OpenAI 模型是常见组合。");
+});
+
+test("normalizeSegmentAnchorText leaves non-matching parentheses intact for same-latin-head stripper", () => {
+  const slice = createSlice({
+    requiredAnchors: [createAnchor("anchor-1", "Neo4j", "Neo4j")]
+  });
+
+  // English paren content (not matching the `X（X 中文）` shape) should be preserved.
+  const normalized = normalizeSegmentAnchorText("Neo4j（graph database）广受欢迎。", slice);
+
+  assert.equal(normalized, "Neo4j（graph database）广受欢迎。");
+});
+
+test("normalizeSegmentAnchorText does not strip same-latin-head parenthetical when head is multi-token", () => {
+  const slice = createSlice({
+    requiredAnchors: [createAnchor("anchor-1", "Small Language Models", "小语言模型")]
+  });
+
+  // Multi-token anchor head must not be touched by the single-token stripper.
+  const normalized = normalizeSegmentAnchorText(
+    "Small Language Models（Small Language Models 方案）正在流行。",
+    slice
+  );
+
+  assert.equal(
+    normalized,
+    "Small Language Models（Small Language Models 方案）正在流行。"
+  );
+});
+
 test("normalizeHeadingLikeAnchorText treats targetHeading as terminal for governed titles", () => {
   const slice = createSlice({
     headingPlans: [
