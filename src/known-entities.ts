@@ -638,7 +638,60 @@ function classifyDiscoveredAnchorRejection(anchor: AnalysisAnchor): string | nul
     return "code-like surface form should not be promoted into anchor catalog";
   }
 
+  if (looksLikeLatinHeadGenericTailCompound(anchor)) {
+    return "latin-head + lowercase english tail compound should not be promoted as bilingual anchor";
+  }
+
   return null;
+}
+
+// Reject compound anchors of the form "<Latin proper-noun head> <lowercase
+// english tail>" whose chineseHint is the head passed through plus a Chinese
+// tail — e.g. `Neo4j clusters` + `Neo4j 集群`. These force the draft to render
+// `Head（Head <中文>）`, a same-language parenthetical that the
+// first_mention_bilingual audit rejects without any repair path.
+//
+// The rule is deliberately narrow so it does NOT match:
+//   - Title Case compound tails (`Claude Code`, `Knowledge Graphs`, `Small Language Models`)
+//   - chineseHints that don't start with the head (legitimately translated terms)
+function looksLikeLatinHeadGenericTailCompound(anchor: AnalysisAnchor): boolean {
+  const english = anchor.english.trim();
+  const chineseHint = anchor.chineseHint?.trim() ?? "";
+  if (!english || !chineseHint) {
+    return false;
+  }
+
+  const tokens = english.split(/\s+/).filter((token) => token.length > 0);
+  if (tokens.length < 2) {
+    return false;
+  }
+
+  const head = tokens[0];
+  const tail = tokens.slice(1);
+  if (!head) {
+    return false;
+  }
+
+  if (!/^[A-Za-z0-9][A-Za-z0-9.+/_-]*$/.test(head) || !/[A-Z]/.test(head)) {
+    return false;
+  }
+
+  if (!tail.every((token) => /^[a-z]+s?$/.test(token))) {
+    return false;
+  }
+
+  const lowerHint = chineseHint.toLowerCase();
+  const lowerHead = head.toLowerCase();
+  if (!lowerHint.startsWith(lowerHead)) {
+    return false;
+  }
+
+  const remainder = chineseHint.slice(head.length).trim();
+  if (!remainder) {
+    return false;
+  }
+
+  return /^[\u4e00-\u9fff][\u4e00-\u9fff\s]*$/.test(remainder);
 }
 
 function looksLikeCliFlagSurface(value: string): boolean {
