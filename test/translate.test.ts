@@ -1775,6 +1775,51 @@ test("buildRepairPromptContext does not emit first_mention_bilingual guidance fo
   assert.doesNotMatch(notes, /切片 A——译文里已经有该概念的中文译名/);
 });
 
+test("translateMarkdownArticle ships first_mention_bilingual cut-piece guidance to the live repair prompt (#71 constructive smoke)", async () => {
+  const source = "# Boeing Test\n\nThe Boeing 747 is a large aircraft.\n";
+  const capturedPrompts: string[] = [];
+  const failingAudit = createAudit(
+    false,
+    ["第 1 段中\"Boeing 747\"首次出现未按要求补中英文对照，需在该处直接补齐。"],
+    {
+      paragraph_match: { pass: true, problem: "" },
+      first_mention_bilingual: { pass: false, problem: "Boeing 747 missing bilingual anchor" },
+      numbers_units_logic: { pass: true, problem: "" },
+      chinese_punctuation: { pass: true, problem: "" },
+      unit_conversion_boundary: { pass: true, problem: "" },
+      protected_span_integrity: { pass: true, problem: "" }
+    }
+  );
+
+  await translateMarkdownArticle(source, {
+    executor: createP2CompatibleExecutor({
+      async execute(prompt: string, options: CodexExecOptions): Promise<CodexExecResult> {
+        capturedPrompts.push(prompt);
+        if (isDocumentAnalysisPrompt(prompt)) return createExecResult(createEmptyAnchorCatalog());
+        if (options.outputSchema || prompt.includes("只返回 JSON"))
+          return createExecResult(wrapAuditForSegments(prompt, failingAudit));
+        const current = extractPromptSection(prompt, "【当前译文】");
+        return createExecResult(current ?? "波音 747 是一种大型飞机。");
+      }
+    }),
+    formatter: async (markdown) => markdown,
+    softGate: true
+  });
+
+  const repairPrompts = capturedPrompts.filter((prompt) => prompt.includes("【当前译文】"));
+  assert.ok(repairPrompts.length > 0, "expected at least one repair prompt");
+  const hitPrompt = repairPrompts.find(
+    (prompt) =>
+      prompt.includes("first_mention_bilingual 硬失败") &&
+      prompt.includes("切片 A——译文里已经有该概念的中文译名") &&
+      prompt.includes("Boeing 747")
+  );
+  assert.ok(
+    hitPrompt,
+    "expected a repair prompt carrying the #71 cut-piece guidance + the quoted English target"
+  );
+});
+
 test("translateMarkdownArticle surfaces IR targets in repair guidance when pending repairs are already bound", () => {
   const context = buildRepairPromptContextForTest(
     createMinimalChunkPromptContext({
