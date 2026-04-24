@@ -6828,6 +6828,32 @@ function belongToSameConceptFamily(left: string, right: string): boolean {
   );
 }
 
+function extractParagraphMatchMissingSources(mustFix: readonly string[]): string[] {
+  const missing = new Set<string>();
+  for (const raw of mustFix) {
+    const item = raw ?? "";
+    const mentionsParagraphMatch =
+      /paragraph_match/i.test(item) ||
+      item.includes("段落对应") ||
+      item.includes("段落数") ||
+      item.includes("段落不对齐") ||
+      item.includes("缺少原文") ||
+      /漏[翻译]/.test(item);
+    if (!mentionsParagraphMatch) {
+      continue;
+    }
+    const quotePattern = /["“]([^"”\n]{8,})["”]/g;
+    let match: RegExpExecArray | null;
+    while ((match = quotePattern.exec(item)) != null) {
+      const text = match[1]?.trim();
+      if (text && text.length >= 8) {
+        missing.add(text);
+      }
+    }
+  }
+  return [...missing];
+}
+
 function buildRepairPromptContext(
   promptContext: ChunkPromptContext,
   mustFix: readonly string[]
@@ -7094,6 +7120,17 @@ function buildRepairPromptContext(
     extraNotes.push(
       "本次 must_fix 明确指出当前译文擅自把原文普通文本改成了 inline code。修复时如果原文中的路径、目录名、文件名、URL 片段或命令样式文本本来没有反引号，就必须保持普通文本结构，不要新增反引号或把它们包成 inline code。",
       "对列表项里的 `~/.ssh/`、`~/.aws/`、`~/.config/` 这类路径，如果原文只是普通列表文本加括注说明，修复时应继续保持普通列表文本，只调整双语说明或中文解释；不要把路径本身改成代码样式。"
+    );
+  }
+
+  const paragraphMatchMissingSources = extractParagraphMatchMissingSources(mustFix);
+  if (paragraphMatchMissingSources.length > 0) {
+    const quoted = paragraphMatchMissingSources.map((text) => `"${text}"`).join(" | ");
+    extraNotes.push(
+      `本次 must_fix 明确指出当前段落或标题块漏翻了以下原文片段：${quoted}。`,
+      "paragraph_match 硬失败的本质是“内容缺失”而非排版问题：修复时必须把这些原文片段完整译成中文并接回当前段落，不得以“保持标题风格”“局部补丁”“已检查”“与原文一致”为理由省略、压缩或只润色旧译文。",
+      "如果当前段落是 Markdown 标题或加粗标题，把新译文接在标题现有文本之后，必要时用逗号、句号、破折号或括号串联，整段仍保持为单一标题节点（不得拆行、不得新增独立段落）。",
+      "输出的修订译文相对当前译文必须明显变长，且新增内容要与上述原文逐句对应；严禁只重新排版或返回几乎相同的句子。"
     );
   }
 
