@@ -6901,6 +6901,38 @@ function extractParagraphMatchMissingSources(mustFix: readonly string[]): string
   return [...missing];
 }
 
+function extractFirstMentionBilingualTargets(mustFix: readonly string[]): string[] {
+  const targets = new Set<string>();
+  for (const raw of mustFix) {
+    const item = raw ?? "";
+    const mentionsFirstMention =
+      /first_mention_bilingual/i.test(item) ||
+      ((item.includes("首次出现") || item.includes("首现")) &&
+        (item.includes("中英") ||
+          item.includes("双语") ||
+          item.includes("对照") ||
+          item.includes("英文原名")));
+    if (!mentionsFirstMention) {
+      continue;
+    }
+    for (const match of item.matchAll(/[“"`']([A-Za-z][A-Za-z0-9./+&:_ -]{0,79})[”"`']/g)) {
+      const candidate = match[1]?.trim();
+      if (candidate && /[A-Za-z]/.test(candidate)) {
+        targets.add(candidate);
+      }
+    }
+    for (const match of item.matchAll(
+      /(?:核心术语|术语|英文目标|英文词|英文原名|产品名|工具名|项目名|模型名|CLI 名称|命令名|框架名|平台名|机制名|概念|首次出现的|首现的)\s+([A-Za-z][A-Za-z0-9./+&:_ -]{0,79}?)(?=\s*(?:首次|首现|在|需|应|未|缺少|没有|作为|并|，|。|；|：|$))/g
+    )) {
+      const candidate = match[1]?.trim();
+      if (candidate && /[A-Za-z]/.test(candidate)) {
+        targets.add(candidate);
+      }
+    }
+  }
+  return [...targets];
+}
+
 function buildRepairPromptContext(
   promptContext: ChunkPromptContext,
   mustFix: readonly string[]
@@ -7178,6 +7210,19 @@ function buildRepairPromptContext(
       "paragraph_match 硬失败的本质是“内容缺失”而非排版问题：修复时必须把这些原文片段完整译成中文并接回当前段落，不得以“保持标题风格”“局部补丁”“已检查”“与原文一致”为理由省略、压缩或只润色旧译文。",
       "如果当前段落是 Markdown 标题或加粗标题，把新译文接在标题现有文本之后，必要时用逗号、句号、破折号或括号串联，整段仍保持为单一标题节点（不得拆行、不得新增独立段落）。",
       "输出的修订译文相对当前译文必须明显变长，且新增内容要与上述原文逐句对应；严禁只重新排版或返回几乎相同的句子。"
+    );
+  }
+
+  const firstMentionBilingualTargets = extractFirstMentionBilingualTargets(mustFix);
+  if (firstMentionBilingualTargets.length > 0) {
+    const joined = firstMentionBilingualTargets.join(" / ");
+    extraNotes.push(
+      `本次 must_fix 指向 first_mention_bilingual 硬失败：以下英文专名或术语在首现位置缺少中英双语锚定：${joined}。`,
+      "修复流程分两步：(1) 先检查当前译文里该英文词对应的中文译名是否已经出现；(2) 按下面的切片变换在对应首现位置就地补齐。不要另起一段、另开列表项，也不要把锚点挪到标题或总结句里。",
+      "切片 A——译文里已经有该概念的中文译名（例如“波音 747”“实体-关系”），直接在该中文译名之后紧跟一层括注写成“中文译名（English）”，例如“波音 747（Boeing 747）”；不要在同一段其他位置再重复这个英文原名。",
+      "切片 B——译文完全漏掉该概念，就在最自然的首现位置补“中文译名（English）”整串，保持单层括注；不要写成“English（中文译名）”倒装形式，也不要只补英文原名。",
+      "严禁以下回避写法：(a) 同一英文原名在同段生成相邻重复括注，例如“（Boeing 747）（Boeing 747）”；(b) 双层括号如“（中文（English））”；(c) 把该英文原名改成 inline code 或加粗；(d) 用“英文原名直接当作中文”的等价省略写法。",
+      "如果 must_fix 同时点名多个英文目标，必须在各自的首现位置分别补齐；不要因为其中一个已经补过，就认为整段已经达标。"
     );
   }
 
