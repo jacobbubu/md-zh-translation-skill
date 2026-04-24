@@ -638,7 +638,74 @@ function classifyDiscoveredAnchorRejection(anchor: AnalysisAnchor): string | nul
     return "code-like surface form should not be promoted into anchor catalog";
   }
 
+  if (looksLikeTransposedBilingualHint(anchor)) {
+    return "chineseHint sandwiches an english subtoken of the anchor, which breaks bold / bilingual rendering";
+  }
+
   return null;
+}
+
+// Reject anchors whose chineseHint sandwiches an English subtoken of the
+// anchor's own `english` between Chinese characters — e.g.
+// `Schema-First Extraction` + `先 Schema 抽取`. The canonical renders as
+// `先 Schema 抽取（Schema-First Extraction）`, which forces the draft to emit a
+// Chinese-English-Chinese sandwich inside `**...**` bold spans; the LLM then
+// breaks the bold markers and repeats the leading Chinese character, causing
+// a protected_span_integrity failure with no repair path.
+//
+// The rule is narrow:
+//   - only fires when the English in chineseHint is a non-trivial (>=3 chars)
+//     subtoken of the anchor's own english (case-insensitive), so unrelated
+//     English like `OSS` inside a Chinese explanation is left alone;
+//   - requires Chinese on BOTH sides of the English subtoken inside the hint,
+//     so clean prefixes (`Claude 代码`) and suffixes (`概念 Context`) that
+//     existing strippers already handle cleanly are not rejected.
+function looksLikeTransposedBilingualHint(anchor: AnalysisAnchor): boolean {
+  const english = anchor.english.trim();
+  const chineseHint = anchor.chineseHint?.trim() ?? "";
+  if (!english || !chineseHint) {
+    return false;
+  }
+
+  const hasChinese = /[\u4e00-\u9fff]/u.test(chineseHint);
+  const hasEnglish = /[A-Za-z]/.test(chineseHint);
+  if (!hasChinese || !hasEnglish) {
+    return false;
+  }
+
+  const englishRuns = chineseHint.match(/[A-Za-z][A-Za-z0-9]*/g) ?? [];
+  if (englishRuns.length === 0) {
+    return false;
+  }
+
+  const englishSubtokens = new Set(
+    english
+      .split(/[\s.\-_/+]+/u)
+      .map((token) => token.trim().toLowerCase())
+      .filter((token) => token.length >= 3)
+  );
+  if (englishSubtokens.size === 0) {
+    return false;
+  }
+
+  for (const run of englishRuns) {
+    if (!englishSubtokens.has(run.toLowerCase())) {
+      continue;
+    }
+
+    const runIndex = chineseHint.indexOf(run);
+    if (runIndex < 0) {
+      continue;
+    }
+
+    const before = chineseHint.slice(0, runIndex);
+    const after = chineseHint.slice(runIndex + run.length);
+    if (/[\u4e00-\u9fff]/u.test(before) && /[\u4e00-\u9fff]/u.test(after)) {
+      return true;
+    }
+  }
+
+  return false;
 }
 
 function looksLikeCliFlagSurface(value: string): boolean {
