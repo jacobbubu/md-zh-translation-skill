@@ -589,7 +589,8 @@ test("translateMarkdownArticle reifies chunk failures into executable repair tas
       () =>
         translateMarkdownArticle(source, {
           executor: new ChunkFailureReifyExecutor(),
-          formatter: async (markdown) => markdown
+          formatter: async (markdown) => markdown,
+          softGate: false
         }),
       (error: unknown) => error instanceof HardGateError
     );
@@ -2870,7 +2871,81 @@ test("translateMarkdownArticle fails after two repair cycles when the gate never
           return createExecResult(current ?? "中文占位译文");
         }
       }),
-      formatter: async (markdown) => markdown
+      formatter: async (markdown) => markdown,
+      softGate: false
+    }),
+    (error: unknown) => {
+      assert.ok(error instanceof HardGateError);
+      assert.match(error.message, /failed after 2 repair cycle/);
+      return true;
+    }
+  );
+});
+
+test("translateMarkdownArticle under soft-gate emits degraded body and banner when only semantic hard-checks fail", async () => {
+  const source = "# Title\n\nBody\n";
+  const progress: string[] = [];
+  const semanticFailingAudit = createAudit(false, ["正文首现术语缺少中英对照"], {
+    paragraph_match: { pass: true, problem: "" },
+    first_mention_bilingual: { pass: false, problem: "missing bilingual term" },
+    numbers_units_logic: { pass: true, problem: "" },
+    chinese_punctuation: { pass: true, problem: "" },
+    unit_conversion_boundary: { pass: true, problem: "" },
+    protected_span_integrity: { pass: true, problem: "" }
+  });
+
+  const result = await translateMarkdownArticle(source, {
+    executor: createP2CompatibleExecutor({
+      async execute(prompt: string, options: CodexExecOptions): Promise<CodexExecResult> {
+        if (isDocumentAnalysisPrompt(prompt)) return createExecResult(createEmptyAnchorCatalog());
+        if (options.outputSchema || prompt.includes("只返回 JSON"))
+          return createExecResult(wrapAuditForSegments(prompt, semanticFailingAudit));
+        const current = extractPromptSection(prompt, "【当前译文】");
+        return createExecResult(current ?? "中文占位译文");
+      }
+    }),
+    formatter: async (markdown) => markdown,
+    softGate: true,
+    onProgress: (message) => progress.push(message)
+  });
+
+  assert.ok(result.markdown.length > 0, "soft-gate should emit a non-empty degraded body");
+  assert.ok(
+    progress.some((message) =>
+      /soft-gate enabled \(semantic failures only\)/.test(message)
+    ),
+    "expected per-chunk soft-gate log line"
+  );
+  assert.ok(
+    progress.some((message) => /Soft-gate fallback applied to \d+ chunk/.test(message)),
+    "expected final aggregate banner"
+  );
+});
+
+test("translateMarkdownArticle under soft-gate still throws HardGateError when a structural hard-check fails", async () => {
+  const source = "# Title\n\nBody\n";
+  const structuralFailingAudit = createAudit(false, ["段落数对不上"], {
+    paragraph_match: { pass: false, problem: "source has 2 paragraphs, draft has 3" },
+    first_mention_bilingual: { pass: true, problem: "" },
+    numbers_units_logic: { pass: true, problem: "" },
+    chinese_punctuation: { pass: true, problem: "" },
+    unit_conversion_boundary: { pass: true, problem: "" },
+    protected_span_integrity: { pass: true, problem: "" }
+  });
+
+  await assert.rejects(
+    () => translateMarkdownArticle(source, {
+      executor: createP2CompatibleExecutor({
+        async execute(prompt: string, options: CodexExecOptions): Promise<CodexExecResult> {
+          if (isDocumentAnalysisPrompt(prompt)) return createExecResult(createEmptyAnchorCatalog());
+          if (options.outputSchema || prompt.includes("只返回 JSON"))
+            return createExecResult(wrapAuditForSegments(prompt, structuralFailingAudit));
+          const current = extractPromptSection(prompt, "【当前译文】");
+          return createExecResult(current ?? "中文占位译文");
+        }
+      }),
+      formatter: async (markdown) => markdown,
+      softGate: true
     }),
     (error: unknown) => {
       assert.ok(error instanceof HardGateError);

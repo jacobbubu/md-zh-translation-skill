@@ -1137,10 +1137,38 @@ function isBundledHardPass(audit: BundledGateAudit): boolean {
   return audit.segments.every((segment) => isHardPass(segment));
 }
 
+const STRUCTURAL_HARD_CHECKS: readonly AuditCheckKey[] = [
+  "protected_span_integrity",
+  "paragraph_match"
+];
+
+export function hasStructuralHardCheckFailure(audit: GateAudit): boolean {
+  return STRUCTURAL_HARD_CHECKS.some((key) => !audit.hard_checks[key]?.pass);
+}
+
+const STRUCTURAL_HARD_GATE_MARKER = Symbol.for("mdzh.structuralHardGate");
+
+function markStructuralHardGateError<E extends HardGateError>(error: E): E {
+  Object.defineProperty(error, STRUCTURAL_HARD_GATE_MARKER, {
+    value: true,
+    enumerable: false,
+    configurable: false,
+    writable: false
+  });
+  return error;
+}
+
+function isStructuralHardGateError(error: unknown): boolean {
+  return (
+    error instanceof HardGateError &&
+    (error as { [STRUCTURAL_HARD_GATE_MARKER]?: boolean })[STRUCTURAL_HARD_GATE_MARKER] === true
+  );
+}
+
 function validateStructuralGateChecks(audit: GateAudit): void {
   if (!audit.hard_checks.protected_span_integrity.pass) {
     const detail = audit.hard_checks.protected_span_integrity.problem || "Protected span integrity failed.";
-    throw new HardGateError(`Protected span integrity failed: ${detail}`);
+    throw markStructuralHardGateError(new HardGateError(`Protected span integrity failed: ${detail}`));
   }
 }
 
@@ -2597,7 +2625,7 @@ export async function translateMarkdownArticle(source: string, options: Translat
         // protected source for this chunk so the final output.md has a
         // structurally complete document, just with the failed chunk left in
         // its English / partial form. Quality checker will surface this.
-        if (!options.softGate) {
+        if (!options.softGate || isStructuralHardGateError(error)) {
           throw error;
         }
         const message = error instanceof Error ? error.message : String(error);
@@ -2668,6 +2696,16 @@ export async function translateMarkdownArticle(source: string, options: Translat
     formattedBody = normalizeMalformedInlineEnglishEmphasis(formattedBody);
     const markdown = reconstructMarkdown(frontmatter, formattedBody);
     await writeDebugStateIfRequested(state);
+    if (options.softGate) {
+      const softGatedChunks = gateAudits.filter((audit) => !isHardPass(audit)).length;
+      if (softGatedChunks > 0) {
+        report(
+          options,
+          "audit",
+          `⚠ Soft-gate fallback applied to ${softGatedChunks} chunk(s). Output is degraded. Re-run with --strict-gate to fail fast instead.`
+        );
+      }
+    }
     return {
       markdown,
       model: draftModel,
@@ -4835,11 +4873,12 @@ async function translateProtectedChunk(
       "audit",
       `Chunk ${chunkPromptContext.chunkIndex}/${plan.chunks.length}${chunkLabel} failed after ${repairCyclesUsed} repair cycle(s): ${remaining}`
     );
-    if (context.options.softGate) {
+    const structuralFailure = bundledAudit.segments.some(hasStructuralHardCheckFailure);
+    if (context.options.softGate && !structuralFailure) {
       report(
         context.options,
         "audit",
-        `Chunk ${chunkPromptContext.chunkIndex}/${plan.chunks.length}${chunkLabel}: soft-gate enabled, keeping best-effort body and continuing.`
+        `Chunk ${chunkPromptContext.chunkIndex}/${plan.chunks.length}${chunkLabel}: soft-gate enabled (semantic failures only), keeping best-effort body and continuing.`
       );
       const bestEffortBody = rebuildChunkFromSegmentStates(segments, draftedSegments, "restoredBody");
       markChunkPhase(context.state, context.chunkId, "completed");
@@ -4850,9 +4889,20 @@ async function translateProtectedChunk(
         nextLocalSpanIndex
       };
     }
-    throw new HardGateError(
+    if (context.options.softGate && structuralFailure) {
+      report(
+        context.options,
+        "audit",
+        `Chunk ${chunkPromptContext.chunkIndex}/${plan.chunks.length}${chunkLabel}: soft-gate cannot rescue structural hard-check failure; failing hard.`
+      );
+    }
+    const failureError = new HardGateError(
       `Chunk ${chunkPromptContext.chunkIndex}/${plan.chunks.length}${chunkLabel} failed after ${repairCyclesUsed} repair cycle(s): ${remaining}`
     );
+    if (structuralFailure) {
+      throw markStructuralHardGateError(failureError);
+    }
+    throw failureError;
   }
 
   const hardPassBody = rebuildChunkFromSegmentStates(segments, draftedSegments, "restoredBody");
