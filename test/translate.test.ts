@@ -1820,6 +1820,37 @@ test("translateMarkdownArticle ships first_mention_bilingual cut-piece guidance 
   );
 });
 
+test("buildRepairPromptContext appends product-noun exemption and category-word blacklist guidance (#74)", () => {
+  const context = buildRepairPromptContextForTest(
+    createMinimalChunkPromptContext(),
+    [
+      "第 1 段中\"Mac Studio M3 Ultra\"首次出现未按要求补中英文对照，需在该处直接补齐。"
+    ]
+  );
+
+  const notes = context.specialNotes.join("\n");
+  assert.match(notes, /first_mention_bilingual 硬失败/);
+  assert.match(notes, /产品专名豁免（#74）/);
+  assert.match(notes, /Mac Studio、DGX Spark、CUDA、RTX/);
+  assert.match(notes, /类目词黑名单/);
+  assert.match(notes, /机型、工作站、桌面机/);
+  assert.match(notes, /Mac Studio M3 Ultra/);
+  assert.match(notes, /protected_span_integrity 硬失败/);
+});
+
+test("buildRepairPromptContext does not emit product-noun exemption when no first_mention_bilingual signal fires (#74)", () => {
+  const context = buildRepairPromptContextForTest(
+    createMinimalChunkPromptContext(),
+    [
+      "硬性检查 paragraph_match 未通过：标题译文只覆盖了原句前半部分。"
+    ]
+  );
+
+  const notes = context.specialNotes.join("\n");
+  assert.doesNotMatch(notes, /产品专名豁免（#74）/);
+  assert.doesNotMatch(notes, /类目词黑名单/);
+});
+
 test("translateMarkdownArticle surfaces IR targets in repair guidance when pending repairs are already bound", () => {
   const context = buildRepairPromptContextForTest(
     createMinimalChunkPromptContext({
