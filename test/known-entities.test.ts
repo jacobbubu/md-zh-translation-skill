@@ -689,6 +689,146 @@ test("normalizeDiscoveredAnchorCatalog keeps anchors whose hint english is unrel
   assert.deepEqual(normalized.ignoredTerms, []);
 });
 
+test("normalizeDiscoveredAnchorCatalog strips emphasisPlan targetText that sandwiches english subtokens in chinese", () => {
+  const state = createTranslationRunState({
+    sourcePathHint: "sample.md",
+    documentTitle: "Sample",
+    frontmatterPresent: false,
+    protectedSpans: [],
+    chunks: [
+      {
+        source: "Instead, we use a **Schema-First Extraction** method.\n",
+        separatorAfter: "",
+        headingPath: ["Sample"],
+        segments: [
+          {
+            kind: "translatable",
+            source: "Instead, we use a **Schema-First Extraction** method.\n",
+            separatorAfter: "",
+            spanIds: [],
+            headingHints: [],
+            specialNotes: []
+          }
+        ]
+      }
+    ]
+  });
+
+  const normalized = normalizeDiscoveredAnchorCatalog(state, {
+    anchors: [],
+    ignoredTerms: [],
+    emphasisPlans: [
+      {
+        chunkId: "chunk-1",
+        segmentId: "chunk-1-segment-1",
+        sourceText: "Schema-First Extraction",
+        strategy: "preserve-strong",
+        emphasisIndex: 1,
+        lineIndex: 1,
+        targetText: "Schema-First Extraction（先 Schema 提取）",
+        governedTerms: ["Schema-First Extraction"]
+      }
+    ]
+  });
+
+  assert.equal(normalized.emphasisPlans?.length, 1);
+  const plan = normalized.emphasisPlans?.[0];
+  assert.equal(plan?.sourceText, "Schema-First Extraction");
+  assert.equal(plan?.targetText, undefined);
+});
+
+test("normalizeDiscoveredAnchorCatalog keeps emphasisPlan targetText that is a pure chinese parenthetical", () => {
+  const state = createTranslationRunState({
+    sourcePathHint: "sample.md",
+    documentTitle: "Sample",
+    frontmatterPresent: false,
+    protectedSpans: [],
+    chunks: [
+      {
+        source: "We rely on **GraphRAG** today.\n",
+        separatorAfter: "",
+        headingPath: ["Sample"],
+        segments: [
+          {
+            kind: "translatable",
+            source: "We rely on **GraphRAG** today.\n",
+            separatorAfter: "",
+            spanIds: [],
+            headingHints: [],
+            specialNotes: []
+          }
+        ]
+      }
+    ]
+  });
+
+  const normalized = normalizeDiscoveredAnchorCatalog(state, {
+    anchors: [],
+    ignoredTerms: [],
+    emphasisPlans: [
+      {
+        chunkId: "chunk-1",
+        segmentId: "chunk-1-segment-1",
+        sourceText: "GraphRAG",
+        strategy: "preserve-strong",
+        emphasisIndex: 1,
+        lineIndex: 1,
+        targetText: "GraphRAG（图谱增强检索）",
+        governedTerms: ["GraphRAG"]
+      }
+    ]
+  });
+
+  assert.equal(normalized.emphasisPlans?.length, 1);
+  assert.equal(normalized.emphasisPlans?.[0]?.targetText, "GraphRAG（图谱增强检索）");
+});
+
+test("normalizeDiscoveredAnchorCatalog passes through emphasisPlans with no targetText unchanged", () => {
+  const state = createTranslationRunState({
+    sourcePathHint: "sample.md",
+    documentTitle: "Sample",
+    frontmatterPresent: false,
+    protectedSpans: [],
+    chunks: [
+      {
+        source: "Run **Ollama** locally.\n",
+        separatorAfter: "",
+        headingPath: ["Sample"],
+        segments: [
+          {
+            kind: "translatable",
+            source: "Run **Ollama** locally.\n",
+            separatorAfter: "",
+            spanIds: [],
+            headingHints: [],
+            specialNotes: []
+          }
+        ]
+      }
+    ]
+  });
+
+  const normalized = normalizeDiscoveredAnchorCatalog(state, {
+    anchors: [],
+    ignoredTerms: [],
+    emphasisPlans: [
+      {
+        chunkId: "chunk-1",
+        segmentId: "chunk-1-segment-1",
+        sourceText: "Ollama",
+        strategy: "preserve-strong",
+        emphasisIndex: 1,
+        lineIndex: 1,
+        governedTerms: ["Ollama"]
+      }
+    ]
+  });
+
+  assert.equal(normalized.emphasisPlans?.length, 1);
+  assert.equal(normalized.emphasisPlans?.[0]?.sourceText, "Ollama");
+  assert.equal(normalized.emphasisPlans?.[0]?.targetText, undefined);
+});
+
 test("writeKnownEntityCandidatesIfRequested persists unknown anchors into a candidate file", async () => {
   const tempDir = await mkdtemp(path.join(os.tmpdir(), "mdzh-known-entities-"));
   const outputPath = path.join(tempDir, "known_entities_candidates.json");

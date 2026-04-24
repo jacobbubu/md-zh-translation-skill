@@ -238,13 +238,21 @@ function normalizeDiscoveredEmphasisPlans(
       }
       return extractSegmentStrongEmphasisSourceTexts(segment.source).includes(plan.sourceText.trim().toLowerCase());
     })
-    .map((plan) => ({
-      ...plan,
-      sourceText: plan.sourceText.trim(),
-      ...(typeof plan.emphasisIndex === "number" ? { emphasisIndex: plan.emphasisIndex } : {}),
-      ...(typeof plan.lineIndex === "number" ? { lineIndex: plan.lineIndex } : {}),
-      ...(plan.targetText?.trim() ? { targetText: plan.targetText.trim() } : {})
-    }));
+    .map((plan) => {
+      const trimmedSource = plan.sourceText.trim();
+      const trimmedTarget = plan.targetText?.trim() ?? "";
+      const keepTarget =
+        trimmedTarget.length > 0 && !hasTransposedBilingualSandwich(trimmedSource, trimmedTarget);
+      const { targetText: _omitTarget, ...rest } = plan;
+      void _omitTarget;
+      return {
+        ...rest,
+        sourceText: trimmedSource,
+        ...(typeof plan.emphasisIndex === "number" ? { emphasisIndex: plan.emphasisIndex } : {}),
+        ...(typeof plan.lineIndex === "number" ? { lineIndex: plan.lineIndex } : {}),
+        ...(keepTarget ? { targetText: trimmedTarget } : {})
+      };
+    });
 }
 
 function mergeBlockPlans(formalPlans: AnchorCatalog["blockPlans"], discoveredPlans: AnchorCatalog["blockPlans"]) {
@@ -661,25 +669,33 @@ function classifyDiscoveredAnchorRejection(anchor: AnalysisAnchor): string | nul
 //     so clean prefixes (`Claude 代码`) and suffixes (`概念 Context`) that
 //     existing strippers already handle cleanly are not rejected.
 function looksLikeTransposedBilingualHint(anchor: AnalysisAnchor): boolean {
-  const english = anchor.english.trim();
-  const chineseHint = anchor.chineseHint?.trim() ?? "";
-  if (!english || !chineseHint) {
+  return hasTransposedBilingualSandwich(anchor.english, anchor.chineseHint ?? "");
+}
+
+// Detects the "transposed bilingual sandwich" pattern: the Chinese-bearing body
+// contains an English subtoken of the source anchor, and Chinese characters sit
+// on BOTH sides of that English run. Used both for rejecting bad discovered
+// anchors (chineseHint) and for stripping bad emphasis-plan targetText values.
+export function hasTransposedBilingualSandwich(english: string, body: string): boolean {
+  const head = english.trim();
+  const text = body.trim();
+  if (!head || !text) {
     return false;
   }
 
-  const hasChinese = /[\u4e00-\u9fff]/u.test(chineseHint);
-  const hasEnglish = /[A-Za-z]/.test(chineseHint);
+  const hasChinese = /[\u4e00-\u9fff]/u.test(text);
+  const hasEnglish = /[A-Za-z]/.test(text);
   if (!hasChinese || !hasEnglish) {
     return false;
   }
 
-  const englishRuns = chineseHint.match(/[A-Za-z][A-Za-z0-9]*/g) ?? [];
+  const englishRuns = text.match(/[A-Za-z][A-Za-z0-9]*/g) ?? [];
   if (englishRuns.length === 0) {
     return false;
   }
 
   const englishSubtokens = new Set(
-    english
+    head
       .split(/[\s.\-_/+]+/u)
       .map((token) => token.trim().toLowerCase())
       .filter((token) => token.length >= 3)
@@ -693,15 +709,20 @@ function looksLikeTransposedBilingualHint(anchor: AnalysisAnchor): boolean {
       continue;
     }
 
-    const runIndex = chineseHint.indexOf(run);
-    if (runIndex < 0) {
-      continue;
-    }
+    let searchFrom = 0;
+    while (searchFrom < text.length) {
+      const runIndex = text.indexOf(run, searchFrom);
+      if (runIndex < 0) {
+        break;
+      }
 
-    const before = chineseHint.slice(0, runIndex);
-    const after = chineseHint.slice(runIndex + run.length);
-    if (/[\u4e00-\u9fff]/u.test(before) && /[\u4e00-\u9fff]/u.test(after)) {
-      return true;
+      const before = text.slice(0, runIndex);
+      const after = text.slice(runIndex + run.length);
+      if (/[\u4e00-\u9fff]/u.test(before) && /[\u4e00-\u9fff]/u.test(after)) {
+        return true;
+      }
+
+      searchFrom = runIndex + run.length;
     }
   }
 
