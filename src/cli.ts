@@ -74,6 +74,14 @@ Telemetry:
     to that file. Path is resolved relative to the working directory. One line per
     event; useful for offline analysis of latency, token usage, and repair behavior.
 
+Performance knobs:
+  - MDZH_CHUNK_CONCURRENCY=<N> (default 1, max 8) runs up to N
+    translateProtectedChunk calls in parallel. Result push, state mutation and
+    checkpoint writes still happen in chunk-index order, so the final document
+    and resume semantics are unchanged.
+  - MDZH_REPAIR_PATCH_LANE=false disables the structured repair-target patch
+    lane and forces the historical full-segment LLM rewrite for every repair.
+
 Exit codes:
   0  Success (may include soft-gate degraded output; see stderr for warnings).
   2  Invalid arguments or missing input.

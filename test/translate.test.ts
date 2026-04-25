@@ -3573,3 +3573,140 @@ test("repair patch lane falls through to the LLM when MDZH_REPAIR_PATCH_LANE=fal
   assert.equal(repairCalls, 1, "with patch lane disabled, repair LLM must be called once");
 });
 
+test("MDZH_CHUNK_CONCURRENCY=2 preserves chunk order in the final document", async () => {
+  const source = [
+    "## Alpha",
+    "",
+    "Alpha body line.",
+    "",
+    "## Bravo",
+    "",
+    "Bravo body line.",
+    "",
+    "## Charlie",
+    "",
+    "Charlie body line.",
+    ""
+  ].join("\n");
+
+  const draftLatencyByMarker: Record<string, number> = {
+    Alpha: 80,
+    Bravo: 0,
+    Charlie: 40
+  };
+
+  const sink = createMemoryTelemetrySink();
+  const executor: CodexExecutor = {
+    async execute(prompt: string, options: CodexExecOptions): Promise<CodexExecResult> {
+      if (isDocumentAnalysisPrompt(prompt)) {
+        return createExecResult(createEmptyAnchorCatalog());
+      }
+      if (isBundledAuditPrompt(prompt, options) || (options.outputSchema && prompt.includes('"hard_checks"'))) {
+        return createExecResult(wrapAuditForSegments(prompt, createAudit(true)));
+      }
+      const sourceSection = extractPromptSection(prompt, "【英文原文】") ?? "";
+      const marker =
+        sourceSection.includes("Alpha") ? "Alpha"
+        : sourceSection.includes("Bravo") ? "Bravo"
+        : sourceSection.includes("Charlie") ? "Charlie"
+        : null;
+      if (marker) {
+        const wait = draftLatencyByMarker[marker] ?? 0;
+        await new Promise((resolve) => setTimeout(resolve, wait));
+        // Echo the source heading verbatim so the draft contract is satisfied;
+        // only translate the body line and inject the marker token so the test
+        // can detect chunk order in the final document.
+        const translated = sourceSection
+          .replace(`## ${marker}`, `## ${marker}`)
+          .replace(`${marker} body line.`, `译文 ${marker} 正文。`);
+        return createExecResult(translated);
+      }
+      return createExecResult(sourceSection);
+    }
+  };
+
+  const previous = process.env.MDZH_CHUNK_CONCURRENCY;
+  process.env.MDZH_CHUNK_CONCURRENCY = "2";
+  let result;
+  try {
+    result = await translateMarkdownArticle(source, {
+      executor,
+      formatter: async (markdown) => markdown,
+      telemetry: sink
+    });
+  } finally {
+    if (previous === undefined) {
+      delete process.env.MDZH_CHUNK_CONCURRENCY;
+    } else {
+      process.env.MDZH_CHUNK_CONCURRENCY = previous;
+    }
+  }
+
+  const alphaIdx = result.markdown.indexOf("译文 Alpha");
+  const bravoIdx = result.markdown.indexOf("译文 Bravo");
+  const charlieIdx = result.markdown.indexOf("译文 Charlie");
+  assert.ok(alphaIdx >= 0 && bravoIdx >= 0 && charlieIdx >= 0, "all chunks should appear");
+  assert.ok(alphaIdx < bravoIdx, "Alpha must come before Bravo");
+  assert.ok(bravoIdx < charlieIdx, "Bravo must come before Charlie");
+
+  const concurrencyEvent = [...sink.events].find((event) => event.type === "chunk.concurrency");
+  assert.ok(concurrencyEvent, "expected chunk.concurrency event");
+  assert.equal((concurrencyEvent!.meta as Record<string, unknown>).concurrency, 2);
+});
+
+test("default concurrency runs chunks strictly serial — chunk N+1 starts only after chunk N ends", async () => {
+  const source = ["## A", "", "Body A.", "", "## B", "", "Body B.", ""].join("\n");
+
+  const startTimestamps: Array<{ chunkId: string; ts: number }> = [];
+  const endTimestamps: Array<{ chunkId: string; ts: number }> = [];
+
+  const memory = createMemoryTelemetrySink();
+  const executor: CodexExecutor = {
+    async execute(prompt: string, options: CodexExecOptions): Promise<CodexExecResult> {
+      if (isDocumentAnalysisPrompt(prompt)) {
+        return createExecResult(createEmptyAnchorCatalog());
+      }
+      if (isBundledAuditPrompt(prompt, options) || (options.outputSchema && prompt.includes('"hard_checks"'))) {
+        return createExecResult(wrapAuditForSegments(prompt, createAudit(true)));
+      }
+      const sourceSection = extractPromptSection(prompt, "【英文原文】") ?? "";
+      return createExecResult(sourceSection);
+    }
+  };
+
+  await translateMarkdownArticle(source, {
+    executor,
+    formatter: async (markdown) => markdown,
+    telemetry: {
+      emit(event) {
+        memory.emit(event);
+        if (event.type === "chunk.start" && event.chunkId) {
+          startTimestamps.push({ chunkId: event.chunkId, ts: event.ts });
+        } else if (event.type === "chunk.end" && event.chunkId) {
+          endTimestamps.push({ chunkId: event.chunkId, ts: event.ts });
+        }
+      },
+      async close() {
+        await memory.close();
+      }
+    }
+  });
+
+  for (let index = 1; index < startTimestamps.length; index += 1) {
+    const previousEnd = endTimestamps[index - 1]?.ts;
+    const currentStart = startTimestamps[index]?.ts;
+    assert.ok(
+      typeof previousEnd === "number" && typeof currentStart === "number",
+      "chunk start/end events must carry timestamps"
+    );
+    assert.ok(
+      currentStart! >= previousEnd!,
+      `chunk ${startTimestamps[index]!.chunkId} started before previous chunk ended — concurrency leakage`
+    );
+  }
+
+  const concurrencyEvent = [...memory.events].find((event) => event.type === "chunk.concurrency");
+  assert.ok(concurrencyEvent, "expected chunk.concurrency event");
+  assert.equal((concurrencyEvent!.meta as Record<string, unknown>).concurrency, 1);
+});
+

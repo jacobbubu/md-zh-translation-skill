@@ -91,6 +91,25 @@ import {
 const DEFAULT_MODEL = "gpt-5.4-mini";
 const MAX_REPAIR_CYCLES = 2;
 
+function readChunkConcurrency(): number {
+  // Bounded chunk-level parallelism. Defaults to 1 (the historical serial
+  // pipeline). Set MDZH_CHUNK_CONCURRENCY=N (N≥1) to run up to N
+  // translateProtectedChunk calls in parallel; result push, state mutation
+  // and checkpoint writes still happen strictly in chunk-index order so
+  // resume semantics and final document order are preserved.
+  const raw = process.env.MDZH_CHUNK_CONCURRENCY?.trim();
+  if (!raw) {
+    return 1;
+  }
+  const parsed = Number.parseInt(raw, 10);
+  if (!Number.isFinite(parsed) || parsed < 1) {
+    return 1;
+  }
+  // Hard ceiling: too much parallelism mostly buys throttling on the LLM
+  // backend without meaningful speedup. 8 is a generous upper bound.
+  return Math.min(parsed, 8);
+}
+
 function isRepairPatchLaneEnabled(): boolean {
   // Default to enabled. Set MDZH_REPAIR_PATCH_LANE=false to fall back to the
   // historical "ask the LLM to rewrite the segment" path. Useful when bisecting
@@ -2765,12 +2784,38 @@ export async function translateMarkdownArticle(source: string, options: Translat
       }
     }
 
-    for (const chunk of chunkPlan.chunks) {
+    type ChunkOutcome = {
+      chunkResult: ChunkTranslationResult;
+      chunkId: string;
+      chunkStartedAt: number;
+    };
+
+    const concurrency = readChunkConcurrency();
+    telemetry.emit({
+      ts: Date.now(),
+      runId,
+      type: "chunk.concurrency",
+      meta: { concurrency, totalChunks: chunkPlan.chunks.length }
+    });
+
+    const chunkOutcomes: Array<ChunkOutcome | null> = new Array(chunkPlan.chunks.length).fill(
+      null
+    );
+    let nextChunkToFinalize = 0;
+    let cancelError: unknown = null;
+    const finalizationLock = { busy: false };
+
+    const runChunk = async (chunk: MarkdownChunk): Promise<void> => {
+      if (cancelError) {
+        return;
+      }
       const chunkId = `chunk-${chunk.index + 1}`;
       if (completedCheckpointChunks.some((entry) => entry.chunkId === chunkId)) {
         report(options, "draft", `Skipping ${chunkId}; restored from checkpoint.`);
-        continue;
+        chunkOutcomes[chunk.index] = null;
+        return;
       }
+
       const chunkStartedAt = Date.now();
       telemetry.emit({
         ts: chunkStartedAt,
@@ -2784,7 +2829,8 @@ export async function translateMarkdownArticle(source: string, options: Translat
           chunkChars: chunk.source.length
         }
       });
-      let chunkResult;
+
+      let chunkResult: ChunkTranslationResult;
       try {
         chunkResult = await translateProtectedChunk(chunk, chunkPlan, {
           state,
@@ -2819,7 +2865,13 @@ export async function translateMarkdownArticle(source: string, options: Translat
             error: errorMessage,
             meta: { recovered: false, structural: isStructuralHardGateError(error) }
           });
-          throw error;
+          // Save the first error so other in-flight chunks can short-circuit
+          // and the run rejects after the worker pool drains. Subsequent
+          // failures are dropped on the floor — we already have a reason.
+          if (!cancelError) {
+            cancelError = error;
+          }
+          return;
         }
         telemetry.emit({
           ts: Date.now(),
@@ -2861,25 +2913,79 @@ export async function translateMarkdownArticle(source: string, options: Translat
         }
       });
 
-      restoredChunks.push(chunkResult.body + chunk.separatorAfter);
-      gateAudits.push(chunkResult.gateAudit);
-      repairCyclesUsed += chunkResult.repairCyclesUsed;
-      nextLocalSpanIndex = chunkResult.nextLocalSpanIndex;
-      setChunkFinalBody(state, chunkId, chunkResult.body);
-      completedCheckpointChunks.push({
-        chunkId,
-        body: chunkResult.body,
-        gateAudit: chunkResult.gateAudit
-      });
-      if (checkpointDir && checkpointKey) {
-        const checkpointPath = await writeTranslationCheckpoint(checkpointDir, checkpointKey, {
-          state,
-          completedChunks: completedCheckpointChunks,
-          repairCyclesUsed,
-          nextLocalSpanIndex
-        });
-        report(options, "draft", `Updated translation checkpoint at ${checkpointPath}.`);
+      chunkOutcomes[chunk.index] = { chunkResult, chunkId, chunkStartedAt };
+
+      // Try to finalize as many in-order completed chunks as we can. Only one
+      // worker may be inside this loop at a time so the state mutations remain
+      // serial even when N workers hand outcomes off concurrently.
+      if (finalizationLock.busy) {
+        return;
       }
+      finalizationLock.busy = true;
+      try {
+        while (
+          nextChunkToFinalize < chunkOutcomes.length &&
+          (cancelError === null || cancelError === undefined) &&
+          (chunkOutcomes[nextChunkToFinalize] !== null ||
+            completedCheckpointChunks.some(
+              (entry) => entry.chunkId === `chunk-${nextChunkToFinalize + 1}`
+            ))
+        ) {
+          const outcome = chunkOutcomes[nextChunkToFinalize];
+          const finalizingChunk = chunkPlan.chunks[nextChunkToFinalize]!;
+          if (!outcome) {
+            // Already restored from checkpoint — nothing to do beyond skipping.
+            nextChunkToFinalize += 1;
+            continue;
+          }
+
+          restoredChunks.push(outcome.chunkResult.body + finalizingChunk.separatorAfter);
+          gateAudits.push(outcome.chunkResult.gateAudit);
+          repairCyclesUsed += outcome.chunkResult.repairCyclesUsed;
+          nextLocalSpanIndex = outcome.chunkResult.nextLocalSpanIndex;
+          setChunkFinalBody(state, outcome.chunkId, outcome.chunkResult.body);
+          completedCheckpointChunks.push({
+            chunkId: outcome.chunkId,
+            body: outcome.chunkResult.body,
+            gateAudit: outcome.chunkResult.gateAudit
+          });
+          if (checkpointDir && checkpointKey) {
+            const checkpointPath = await writeTranslationCheckpoint(checkpointDir, checkpointKey, {
+              state,
+              completedChunks: completedCheckpointChunks,
+              repairCyclesUsed,
+              nextLocalSpanIndex
+            });
+            report(options, "draft", `Updated translation checkpoint at ${checkpointPath}.`);
+          }
+          nextChunkToFinalize += 1;
+        }
+      } finally {
+        finalizationLock.busy = false;
+      }
+    };
+
+    // Worker pool: each worker pulls the next pending chunk off the queue
+    // until empty or until cancellation kicks in. With concurrency=1 this is
+    // exactly the historical sequential behaviour.
+    const queue = [...chunkPlan.chunks];
+    const worker = async () => {
+      while (true) {
+        if (cancelError) {
+          return;
+        }
+        const next = queue.shift();
+        if (!next) {
+          return;
+        }
+        await runChunk(next);
+      }
+    };
+    const workers = Array.from({ length: Math.max(1, concurrency) }, () => worker());
+    await Promise.all(workers);
+
+    if (cancelError) {
+      throw cancelError;
     }
 
     let translatedBody = restoredChunks.join("");
