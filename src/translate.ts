@@ -6288,16 +6288,17 @@ function getDraftContractViolation(source: string, text: string): string | null 
     return source.trim() ? "draft returned empty content" : null;
   }
 
-  // Issue #69 (B): reject repair output that emits raw `**` markers when the
-  // protected source had zero raw `**` (all bold spans are placeholder-tokenized
-  // as `@@MDZH_STRONG_EMPHASIS_NNNN@@`). Raw `**` leaking through means the LLM
-  // invented bold markup, which corrupts span boundaries downstream. Runs
-  // before block-kind checks because a single-line `**X**` otherwise triggers
-  // the heading misclassification branch first and hides the root cause.
+  // Issue #69/#77 (B): reject repair output whose raw `**` marker count
+  // exceeds the protected source's. Most bold spans are placeholder-tokenized
+  // as `@@MDZH_STRONG_EMPHASIS_NNNN@@`, so sourceBoldCount is usually 0; #77
+  // widened this from `source===0 && draft>0` to `draft>source` so cases
+  // where protectInlineStrongEmphasis left some `**` unprotected (standalone
+  // emphasis-only line escape, cross-line span, length over the 80-char cap)
+  // still trip when the LLM invents additional bold markup.
   const sourceBoldCount = (source.match(/\*\*/g) ?? []).length;
   const draftBoldCount = (trimmed.match(/\*\*/g) ?? []).length;
-  if (sourceBoldCount === 0 && draftBoldCount > 0) {
-    return `draft introduced raw bold markers (** x ${draftBoldCount}) not present in the protected source`;
+  if (draftBoldCount > sourceBoldCount) {
+    return `draft introduced raw bold markers (** x ${draftBoldCount} vs source ${sourceBoldCount}) beyond the protected source`;
   }
 
   const trimmedSource = source.trim();

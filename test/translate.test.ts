@@ -1733,6 +1733,15 @@ test("getDraftContractViolation preserves raw bold markers when the source alrea
   assert.equal(violation, null);
 });
 
+test("getDraftContractViolation rejects extra raw bold markers when the source already had some (#77)", () => {
+  const violation = getDraftContractViolationForTest(
+    "这是**原文本身**带有的加粗片段",
+    "这是**译文**保留的**额外**加粗片段"
+  );
+  assert.ok(violation, "expected a violation string, got null");
+  assert.match(violation!, /introduced raw bold markers/);
+});
+
 test("buildRepairPromptContext injects first_mention_bilingual cut-piece guidance when must_fix quotes an English target (#71)", () => {
   const context = buildRepairPromptContextForTest(
     createMinimalChunkPromptContext(),
