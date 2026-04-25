@@ -1747,6 +1747,56 @@ test("getDraftContractViolation rejects extra raw bold markers when the source a
   assert.match(violation!, /introduced raw bold markers/);
 });
 
+test("getDraftContractViolation rejects moving a protected-span placeholder onto a heading line (#77)", () => {
+  const source = [
+    "### Large models (30-70B): three paths",
+    "",
+    "Once models exceed consumer GPU VRAM (32 GB), three options remain.",
+    "",
+    "@@MDZH_STRONG_EMPHASIS_0001@@ The RTX Pro 6000 Blackwell runs a 70B Q4 model."
+  ].join("\n");
+  const draft = [
+    "### 大型模型（30-70B）：三种路径 @@MDZH_STRONG_EMPHASIS_0001@@",
+    "",
+    "一旦模型超过消费级 GPU 显存（32 GB），仅剩三种选项。",
+    "",
+    "RTX Pro 6000 Blackwell 可在单卡上运行 70B Q4 模型。"
+  ].join("\n");
+  const violation = getDraftContractViolationForTest(source, draft);
+  assert.ok(violation, "expected a violation string, got null");
+  assert.match(violation!, /moved protected-span placeholder .* onto a heading line/);
+});
+
+test("getDraftContractViolation allows a protected-span placeholder that stays on its non-heading line (#77)", () => {
+  const source = [
+    "### Large models (30-70B): three paths",
+    "",
+    "@@MDZH_STRONG_EMPHASIS_0001@@ The RTX Pro 6000 Blackwell runs a 70B Q4 model."
+  ].join("\n");
+  const draft = [
+    "### 大型模型（30-70B）：三种路径",
+    "",
+    "@@MDZH_STRONG_EMPHASIS_0001@@ RTX Pro 6000 Blackwell 可运行 70B Q4 模型。"
+  ].join("\n");
+  const violation = getDraftContractViolationForTest(source, draft);
+  assert.equal(violation, null);
+});
+
+test("getDraftContractViolation allows a placeholder that the source already puts on a heading line (#77)", () => {
+  const source = [
+    "### 关于 @@MDZH_INLINE_MARKDOWN_LINK_0001@@ 的说明",
+    "",
+    "段落内容。"
+  ].join("\n");
+  const draft = [
+    "### @@MDZH_INLINE_MARKDOWN_LINK_0001@@ 相关说明",
+    "",
+    "段落内容。"
+  ].join("\n");
+  const violation = getDraftContractViolationForTest(source, draft);
+  assert.equal(violation, null);
+});
+
 test("buildRepairPromptContext injects first_mention_bilingual cut-piece guidance when must_fix quotes an English target (#71)", () => {
   const context = buildRepairPromptContextForTest(
     createMinimalChunkPromptContext(),

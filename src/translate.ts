@@ -6360,6 +6360,40 @@ function getDraftContractViolation(source: string, text: string): string | null 
     }
   }
 
+  // Issue #77: reject drafts that move a protected-span placeholder onto a
+  // heading line while the source places it in prose. After restoreMarkdownSpans,
+  // the placeholder becomes `**xxx**`, so a heading misplacement surfaces as
+  // "首段标题处出现多余 **" in the protected_span_integrity audit — a structural
+  // hard check that soft-gate cannot save. Reject at the draft contract so
+  // repair retries get another swing before the structural gate throws.
+  const headingLinePattern = /^\s*#{1,6}\s/u;
+  const sourceHeadingPlaceholders = new Set<string>();
+  const sourceNonHeadingPlaceholders = new Set<string>();
+  for (const line of source.split(/\r?\n/)) {
+    const isHeading = headingLinePattern.test(line);
+    for (const match of line.matchAll(placeholderPattern)) {
+      if (isHeading) {
+        sourceHeadingPlaceholders.add(match[0]);
+      } else {
+        sourceNonHeadingPlaceholders.add(match[0]);
+      }
+    }
+  }
+  for (const line of trimmed.split(/\r?\n/)) {
+    if (!headingLinePattern.test(line)) {
+      continue;
+    }
+    for (const match of line.matchAll(placeholderPattern)) {
+      const token = match[0];
+      if (sourceHeadingPlaceholders.has(token)) {
+        continue;
+      }
+      if (sourceNonHeadingPlaceholders.has(token)) {
+        return `draft moved protected-span placeholder ${token} onto a heading line (source places it in prose)`;
+      }
+    }
+  }
+
   // Catch the "lazy LLM" pattern where a list item is replaced by ellipsis
   // ("- ……" or "- ...") but the source list item is real content. The audit
   // catches this too but repairing from a missing item is harder than rejecting
