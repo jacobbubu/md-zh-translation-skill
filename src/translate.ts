@@ -8864,8 +8864,22 @@ function withChunkContextAt(
     context.establishedAnchors.length > 0 ? context.establishedAnchors.join(" | ") : "无";
   const pendingRepairs = context.pendingRepairs.length > 0 ? context.pendingRepairs.join(" | ") : "无";
   const stateSliceJson = context.stateSlice ? JSON.stringify(context.stateSlice, null, 2) : "{}";
+  // Order matters for OpenAI's automatic prompt caching: the cache key is the
+  // prompt prefix, so any byte that varies across calls truncates the
+  // cacheable portion. Put truly-static instruction lines BEFORE any chunk-
+  // specific data so the cacheable prefix extends as far as possible.
   const contextLines = [
     "【全文上下文】",
+    "说明：当前输入只覆盖全文的一部分。请保持术语、专名、语气和上下文的一致性，不要补写未出现在当前分块中的段落。",
+    "requiredAnchors 表示：这些专名、产品名、项目名或关键术语必须在当前分段本身建立或保持合法的首现显示形式。",
+    "如果当前分段标题计划为某个标题给出了 targetHeading，则该标题的语义与最终目标文本由 headingPlan 决定；不要再让全局 anchor 对同一标题追加冲突的中英锚定要求。",
+    "如果 headingPlan 同时给出了 governedTerms，则这些术语在对应标题里的处理方式已经由该计划决定；审校时不要再按全局 anchor 对该标题单独追加强制格式。",
+    "标题场景下，headingPlan 的 targetHeading 优先于全局 anchor catalog；全局 anchor 只能为没有 targetHeading 的标题补充约束。",
+    "analysisPlanDraft 是当前分段的结构化 sidecar plan。若其中某条 PLAN 已给出 source、target、display 或 strategy，请优先按这份计划执行，不要再自由改写同一结构的语义目标。",
+    "如果 IR 中包含 kind=block 的 PLAN，它们定义了当前分段按 source 保持的块级顺序。不要把后面的标题、说明句、列表或代码块提前到前面，也不要交换这些块的相对顺序。",
+    "如果 requiredAnchors 给出了 canonicalDisplay 或 allowedDisplayForms，则这些形式就是当前分段可接受的合法锚定结果；像“Claude（Anthropic 的 AI 助手）”这类英文原名（中文说明）形式，或像“Claude”这类允许裸英文首现的形式，都视为已经完成首现锚定，不得再按“缺少英文对照”判错。",
+    "repeatAnchors 表示：这些项目已经在全文前文完成首现锚定，即使它们在当前分块标题、加粗标题、列表项标题或正文里是本块第一次出现，也不得再补首现中英文对照。",
+    "如果当前分段标题、加粗标题、列表项标题里包含冒号、括号限定语、枚举标签或英文补充说明，翻译时必须完整保留这些信息，不要只保留其中一部分。",
     `源文件提示：${context.sourcePathHint}`,
     `全文标题：${documentTitle}`,
     `当前分块：第 ${context.chunkIndex} / ${context.chunkCount} 块`,
@@ -8878,17 +8892,7 @@ function withChunkContextAt(
     context.analysisPlanDraft,
     `当前分段必须建立的首现锚点：${requiredAnchors}`,
     `当前分段里已在前文建立过、禁止重复补锚的项目：${repeatAnchors}`,
-    `全文已建立的锚点摘要：${establishedAnchors}`,
-    "说明：当前输入只覆盖全文的一部分。请保持术语、专名、语气和上下文的一致性，不要补写未出现在当前分块中的段落。",
-    "requiredAnchors 表示：这些专名、产品名、项目名或关键术语必须在当前分段本身建立或保持合法的首现显示形式。",
-    "如果当前分段标题计划为某个标题给出了 targetHeading，则该标题的语义与最终目标文本由 headingPlan 决定；不要再让全局 anchor 对同一标题追加冲突的中英锚定要求。",
-    "如果 headingPlan 同时给出了 governedTerms，则这些术语在对应标题里的处理方式已经由该计划决定；审校时不要再按全局 anchor 对该标题单独追加强制格式。",
-    "标题场景下，headingPlan 的 targetHeading 优先于全局 anchor catalog；全局 anchor 只能为没有 targetHeading 的标题补充约束。",
-    "analysisPlanDraft 是当前分段的结构化 sidecar plan。若其中某条 PLAN 已给出 source、target、display 或 strategy，请优先按这份计划执行，不要再自由改写同一结构的语义目标。",
-    "如果 IR 中包含 kind=block 的 PLAN，它们定义了当前分段按 source 保持的块级顺序。不要把后面的标题、说明句、列表或代码块提前到前面，也不要交换这些块的相对顺序。",
-    "如果 requiredAnchors 给出了 canonicalDisplay 或 allowedDisplayForms，则这些形式就是当前分段可接受的合法锚定结果；像“Claude（Anthropic 的 AI 助手）”这类英文原名（中文说明）形式，或像“Claude”这类允许裸英文首现的形式，都视为已经完成首现锚定，不得再按“缺少英文对照”判错。",
-    "repeatAnchors 表示：这些项目已经在全文前文完成首现锚定，即使它们在当前分块标题、加粗标题、列表项标题或正文里是本块第一次出现，也不得再补首现中英文对照。",
-    "如果当前分段标题、加粗标题、列表项标题里包含冒号、括号限定语、枚举标签或英文补充说明，翻译时必须完整保留这些信息，不要只保留其中一部分。"
+    `全文已建立的锚点摘要：${establishedAnchors}`
   ].join("\n");
   const pendingRepairsBlock = includePendingRepairs
     ? `\n当前分段待处理的结构化修复任务：${pendingRepairs}`
