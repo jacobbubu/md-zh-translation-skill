@@ -1797,6 +1797,60 @@ test("getDraftContractViolation allows a placeholder that the source already put
   assert.equal(violation, null);
 });
 
+test("getDraftContractViolation rejects drafts that drop a list item (#82)", () => {
+  const source = [
+    "Bandwidth and capacity narrow the field. Three correction factors determine the final choice.",
+    "",
+    "- Energy consumption.",
+    "A Mac Studio M3 Ultra draws 250–300W under sustained AI inference load.",
+    "- Form factor and noise.",
+    "A Mac Studio or Strix Halo mini-PC operates silently on a desk.",
+    "- Software ecosystem.",
+    "The inference framework significantly influences real-world performance."
+  ].join("\n");
+  const draft = [
+    "带宽与容量先做筛选，最终选型由三项修正因素决定。",
+    "",
+    "- 能耗。",
+    "Mac Studio M3 Ultra 在持续 AI 推理负载下功耗为 250–300W。",
+    "- 外形因素与噪声。",
+    "Mac Studio 或 Strix Halo 迷你 PC 可在桌面上静音运行。"
+  ].join("\n");
+  const violation = getDraftContractViolationForTest(source, draft);
+  assert.ok(violation, "expected a violation when draft drops a bullet");
+  assert.match(violation!, /dropped \d+ list item/);
+});
+
+test("getDraftContractViolation allows drafts that preserve every list item (#82)", () => {
+  const source = [
+    "- Add bandwidth to specifications",
+    "Memory bandwidth belongs as its own line item.",
+    "- Require bandwidth in RFPs",
+    "One line in the template suffices.",
+    "- Benchmark before buying",
+    "Before investments above $25,000, benchmark one representative."
+  ].join("\n");
+  const draft = [
+    "- 把带宽列入规格书。",
+    "内存带宽应作为独立条目列出。",
+    "- 在 RFP 中要求标注带宽。",
+    "模板里加一行即可。",
+    "- 采购前先基准测试。",
+    "超过 $25,000 的投资前，先对每类架构做一次基准测试。"
+  ].join("\n");
+  const violation = getDraftContractViolationForTest(source, draft);
+  assert.equal(violation, null);
+});
+
+test("getDraftContractViolation does not flag drafts with more list items than source (#82)", () => {
+  // A draft that accidentally adds a bullet is a different failure mode; #82
+  // targets the dropped-bullet case specifically.
+  const source = "- Alpha\n- Beta";
+  const draft = "- 甲\n- 乙\n- 丙";
+  const violation = getDraftContractViolationForTest(source, draft);
+  assert.equal(violation, null);
+});
+
 test("buildRepairPromptContext injects first_mention_bilingual cut-piece guidance when must_fix quotes an English target (#71)", () => {
   const context = buildRepairPromptContextForTest(
     createMinimalChunkPromptContext(),
