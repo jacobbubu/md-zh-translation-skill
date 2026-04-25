@@ -7226,7 +7226,8 @@ function buildRepairPromptContext(
       "如果 must_fix 同时点名多个英文目标，必须在各自的首现位置分别补齐；不要因为其中一个已经补过，就认为整段已经达标。",
       "产品专名豁免（#74）：如果被点名的英文是商品型号、硬件产品名、GPU/CPU/芯片/机型/工作站/主机/平台/SDK/框架/CLI 等产品或品牌专名——例如 Mac Studio、DGX Spark、CUDA、RTX、Mixtral、Llama、GeForce、Quadro、Tesla、EPYC、Threadripper、Ryzen、Xeon、Arc、Blackwell、Hopper、Ada、Grace、H100、A100、L40S 等——中文技术圈默认直接使用英文原名，不需要补中文锚定；此时在译文里保留原英文专名即视为已达标。",
       "类目词黑名单：即使 must_fix 坚持要为产品专名补中文，也绝不能用“类别词”去充当中文译名——以下词一律禁止作为括注内容：机型、工作站、桌面机、台式机、主机、平台、系统、芯片、显卡、GPU、CPU、处理器、加速器、服务器、框架、工具、软件、SDK、CLI、品牌、公司、制造商、厂商、产品、设备、机器。这类类目词只会让专名变成“产品名（类目）”的机械结构，侮辱读者智商。",
-      "产品专名如果确实有广泛流通的中文官方译名（例如 Nvidia→英伟达、Apple→苹果、Intel→英特尔、AMD→超威），才允许补“中文官方译名（English）”；没有官方译名就保留英文原名本身。严禁把整行专名（如“Mac Studio M3 Ultra”）的 protected token 切开插入括注——这会直接触发 protected_span_integrity 硬失败。"
+      "产品专名如果确实有广泛流通的中文官方译名（例如 Nvidia→英伟达、Apple→苹果、Intel→英特尔、AMD→超威），才允许补“中文官方译名（English）”；没有官方译名就保留英文原名本身。严禁把整行专名（如“Mac Studio M3 Ultra”）的 protected token 切开插入括注——这会直接触发 protected_span_integrity 硬失败。",
+      "反向白名单（#76，必须补中文锚定的通用技术/学术概念）：以下这类词不是产品专名，属于机器学习 / 大模型 / 软件工程的通用概念，即使含连字符、PascalCase 或缩写形态，也必须按切片 A/B 补“中文译名（English）”，不能套用产品专名豁免。参考映射：Mixture-of-Experts → 混合专家（Mixture-of-Experts）、Retrieval-Augmented Generation / RAG → 检索增强生成（Retrieval-Augmented Generation, RAG）、Chain-of-Thought / CoT → 思维链（Chain-of-Thought, CoT）、Attention → 注意力（Attention）、Transformer → Transformer（保留英文原名，中文圈默认不译）、Fine-tuning → 微调（Fine-tuning）、Embedding → 嵌入（Embedding）、Quantization → 量化（Quantization）、Inference → 推理（Inference）、Tokenizer → 分词器（Tokenizer）、Prompt → 提示词（Prompt）。判别标准：如果该词在学术论文或中文技术圈已有稳定译名，就属于这一类，产品豁免不适用。"
     );
   }
 

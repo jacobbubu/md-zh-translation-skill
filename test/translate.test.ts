@@ -1860,6 +1860,22 @@ test("buildRepairPromptContext does not emit product-noun exemption when no firs
   assert.doesNotMatch(notes, /类目词黑名单/);
 });
 
+test("buildRepairPromptContext emits reverse whitelist for non-product technical concepts (#76)", () => {
+  const context = buildRepairPromptContextForTest(
+    createMinimalChunkPromptContext(),
+    [
+      "第 7 个段落首次出现的 Mixture-of-Experts 需补齐中英对照，不能只写英文原名。"
+    ]
+  );
+
+  const notes = context.specialNotes.join("\n");
+  assert.match(notes, /反向白名单（#76/);
+  assert.match(notes, /Mixture-of-Experts → 混合专家/);
+  assert.match(notes, /Retrieval-Augmented Generation/);
+  assert.match(notes, /Chain-of-Thought/);
+  assert.match(notes, /产品豁免不适用/);
+});
+
 test("translateMarkdownArticle surfaces IR targets in repair guidance when pending repairs are already bound", () => {
   const context = buildRepairPromptContextForTest(
     createMinimalChunkPromptContext({
