@@ -29,6 +29,12 @@ import {
 } from "./anchor-normalization.js";
 import { CodexExecutionError, FormattingError, HardGateError } from "./errors.js";
 import { formatTranslatedBody, reconstructMarkdown } from "./format.js";
+import {
+  createJsonlTelemetrySink,
+  generateRunId,
+  noopTelemetry,
+  type TelemetrySink
+} from "./telemetry.js";
 import { planMarkdownChunks, type MarkdownChunk, type MarkdownChunkPlan } from "./markdown-chunks.js";
 import {
   extractTranslatableStrongEmphasisSpans,
@@ -200,6 +206,13 @@ export type TranslateOptions = {
    * that defer final acceptance to the independent quality checker.
    */
   softGate?: boolean;
+  /**
+   * Optional telemetry sink. When provided, the run emits structured events
+   * (`run.*`, `chunk.*`, `stage.*`, `repair.cycle`, `gate.result`) for
+   * downstream observability. Defaults to a no-op sink so callers that don't
+   * care pay nothing.
+   */
+  telemetry?: TelemetrySink;
 };
 
 export type TranslateResult = {
@@ -1201,6 +1214,10 @@ async function executeStageWithTimeout(
     timeoutMs: number;
     heartbeatLabel: string;
     onHeartbeat?: (message: string) => void;
+    telemetry?: TelemetrySink;
+    runId?: string;
+    chunkId?: string;
+    extra?: Record<string, unknown>;
   }
 ): Promise<CodexExecResult> {
   const heartbeatMs = getExecutionHeartbeatMs();
@@ -1214,12 +1231,56 @@ async function executeStageWithTimeout(
     report(meta.options, meta.stage, message);
   }, heartbeatMs);
 
+  const sink = meta.telemetry ?? meta.options.telemetry ?? noopTelemetry;
+  const runId = meta.runId ?? "run_anonymous";
+  const baseMeta: Record<string, unknown> = {
+    label: meta.heartbeatLabel,
+    model: execOptions.model,
+    promptChars: prompt.length,
+    ...meta.extra
+  };
+
+  const chunkIdField = meta.chunkId !== undefined ? { chunkId: meta.chunkId } : {};
+
+  sink.emit({
+    ts: startedAt,
+    runId,
+    type: "stage.start",
+    stage: meta.stage,
+    ...chunkIdField,
+    meta: baseMeta
+  });
+
   try {
-    return await executor.execute(prompt, {
+    const result = await executor.execute(prompt, {
       ...execOptions,
       timeoutMs: meta.timeoutMs
     });
+    sink.emit({
+      ts: Date.now(),
+      runId,
+      type: "stage.end",
+      stage: meta.stage,
+      ...chunkIdField,
+      durationMs: Date.now() - startedAt,
+      inputTokens: result.usage.inputTokens,
+      cachedInputTokens: result.usage.cachedInputTokens,
+      outputTokens: result.usage.outputTokens,
+      meta: baseMeta
+    });
+    return result;
   } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    sink.emit({
+      ts: Date.now(),
+      runId,
+      type: "stage.error",
+      stage: meta.stage,
+      ...chunkIdField,
+      durationMs: Date.now() - startedAt,
+      error: message,
+      meta: baseMeta
+    });
     if (error instanceof CodexExecutionError && /timed out after \d+ms\./i.test(error.message)) {
       throw new CodexExecutionError(`${meta.heartbeatLabel} timed out after ${meta.timeoutMs}ms.`);
     }
@@ -2104,7 +2165,7 @@ function isAnalysisShardTimeoutError(error: unknown): boolean {
 
 async function executeAnalysisShardAttempt(
   state: TranslationRunState,
-  context: Pick<ChunkTranslationContext, "executor" | "postDraftModel" | "cwd" | "options" | "postDraftReasoningEffort">,
+  context: Pick<ChunkTranslationContext, "executor" | "postDraftModel" | "cwd" | "options" | "postDraftReasoningEffort" | "runId" | "telemetry">,
   formalCatalog: AnchorCatalog,
   accumulatedCatalog: AnchorCatalog,
   shard: AnalysisShard,
@@ -2136,6 +2197,25 @@ async function executeAnalysisShardAttempt(
     );
   }, heartbeatMs);
 
+  const shardMeta = {
+    shardIndex: shard.index + 1,
+    shardCount,
+    attempt,
+    chunkCount: shard.chunkIds.length,
+    sourceChars: shard.sourceChars,
+    headingCount: shard.headingCount,
+    emphasisCount: shard.emphasisCount,
+    timeoutMs,
+    promptChars: prompt.length
+  };
+  context.telemetry.emit({
+    ts: shardStartedAt,
+    runId: context.runId,
+    type: "analysis.shard.start",
+    stage: "analyze",
+    meta: shardMeta
+  });
+
   try {
     const result = await context.executor.execute(prompt, {
       cwd: context.cwd,
@@ -2152,12 +2232,39 @@ async function executeAnalysisShardAttempt(
       }
     });
     const normalizedShardCatalog = normalizeDiscoveredAnchorCatalog(state, parseAnchorCatalog(result.text));
+    context.telemetry.emit({
+      ts: Date.now(),
+      runId: context.runId,
+      type: "analysis.shard.end",
+      stage: "analyze",
+      durationMs: Date.now() - shardStartedAt,
+      inputTokens: result.usage.inputTokens,
+      cachedInputTokens: result.usage.cachedInputTokens,
+      outputTokens: result.usage.outputTokens,
+      meta: {
+        ...shardMeta,
+        anchorCount: normalizedShardCatalog.anchors.length,
+        headingPlanCount: normalizedShardCatalog.headingPlans?.length ?? 0,
+        ignoredTermCount: normalizedShardCatalog.ignoredTerms.length
+      }
+    });
     report(
       context.options,
       "analyze",
       `Shard ${shard.index + 1}/${shardCount} attempt ${attempt} finished: ${normalizedShardCatalog.anchors.length} anchors, ${normalizedShardCatalog.headingPlans?.length ?? 0} heading plan(s), ${normalizedShardCatalog.ignoredTerms.length} ignored term(s).`
     );
     return normalizedShardCatalog;
+  } catch (error) {
+    context.telemetry.emit({
+      ts: Date.now(),
+      runId: context.runId,
+      type: "analysis.shard.end",
+      stage: "analyze",
+      durationMs: Date.now() - shardStartedAt,
+      error: error instanceof Error ? error.message : String(error),
+      meta: shardMeta
+    });
+    throw error;
   } finally {
     clearInterval(heartbeat);
   }
@@ -2165,7 +2272,7 @@ async function executeAnalysisShardAttempt(
 
 async function recoverHeadingPlansOnly(
   state: TranslationRunState,
-  context: Pick<ChunkTranslationContext, "executor" | "postDraftModel" | "cwd" | "options" | "postDraftReasoningEffort">,
+  context: Pick<ChunkTranslationContext, "executor" | "postDraftModel" | "cwd" | "options" | "postDraftReasoningEffort" | "runId" | "telemetry">,
   catalog: AnchorCatalog
 ): Promise<AnchorCatalog> {
   const prompt = buildHeadingRecoveryAnalysisPrompt(buildHeadingRecoveryInput(state, catalog));
@@ -2214,7 +2321,7 @@ async function recoverHeadingPlansOnly(
 
 async function recoverEmphasisPlansOnly(
   state: TranslationRunState,
-  context: Pick<ChunkTranslationContext, "executor" | "postDraftModel" | "cwd" | "options" | "postDraftReasoningEffort">,
+  context: Pick<ChunkTranslationContext, "executor" | "postDraftModel" | "cwd" | "options" | "postDraftReasoningEffort" | "runId" | "telemetry">,
   catalog: AnchorCatalog
 ): Promise<AnchorCatalog> {
   const prompt = buildEmphasisRecoveryAnalysisPrompt(buildEmphasisRecoveryInput(state, catalog));
@@ -2263,7 +2370,7 @@ async function recoverEmphasisPlansOnly(
 
 async function analyzeShardWithFallback(
   state: TranslationRunState,
-  context: Pick<ChunkTranslationContext, "executor" | "postDraftModel" | "cwd" | "options" | "postDraftReasoningEffort">,
+  context: Pick<ChunkTranslationContext, "executor" | "postDraftModel" | "cwd" | "options" | "postDraftReasoningEffort" | "runId" | "telemetry">,
   formalCatalog: AnchorCatalog,
   accumulatedCatalog: AnchorCatalog,
   shard: AnalysisShard,
@@ -2360,7 +2467,7 @@ async function analyzeShardWithFallback(
 
 async function analyzeDocumentForAnchors(
   state: TranslationRunState,
-  context: Pick<ChunkTranslationContext, "executor" | "postDraftModel" | "cwd" | "options" | "postDraftReasoningEffort">
+  context: Pick<ChunkTranslationContext, "executor" | "postDraftModel" | "cwd" | "options" | "postDraftReasoningEffort" | "runId" | "telemetry">
 ): Promise<AnchorCatalog> {
   report(context.options, "analyze", "Loading formal known_entities.");
   const knownEntities = loadKnownEntities();
@@ -2523,6 +2630,37 @@ export async function translateMarkdownArticle(source: string, options: Translat
     : undefined;
   const cwd = options.cwd ?? process.cwd();
   const sourcePathHint = options.sourcePathHint ?? "article.md";
+  // Sink resolution order:
+  // 1. options.telemetry (caller-owned; the caller closes it).
+  // 2. MDZH_TELEMETRY_PATH env var → JSONL sink the run owns and closes itself.
+  // 3. noop sink.
+  let ownedTelemetry: TelemetrySink | null = null;
+  let telemetry: TelemetrySink;
+  if (options.telemetry) {
+    telemetry = options.telemetry;
+  } else if (process.env.MDZH_TELEMETRY_PATH?.trim()) {
+    ownedTelemetry = createJsonlTelemetrySink(
+      path.resolve(cwd, process.env.MDZH_TELEMETRY_PATH.trim())
+    );
+    telemetry = ownedTelemetry;
+  } else {
+    telemetry = noopTelemetry;
+  }
+  const runId = generateRunId();
+  const runStartedAt = Date.now();
+  telemetry.emit({
+    ts: runStartedAt,
+    runId,
+    type: "run.start",
+    meta: {
+      sourcePathHint,
+      sourceChars: source.length,
+      draftModel,
+      postDraftModel,
+      styleMode,
+      softGate: Boolean(options.softGate)
+    }
+  });
   const { frontmatter, body } = extractFrontmatter(source);
   const { protectedBody, spans } = protectMarkdownSpans(body);
   const chunkPlan = planMarkdownChunks(protectedBody);
@@ -2557,7 +2695,9 @@ export async function translateMarkdownArticle(source: string, options: Translat
       postDraftModel,
       cwd,
       options,
-      postDraftReasoningEffort
+      postDraftReasoningEffort,
+      runId,
+      telemetry
     } as const;
     const analysisCacheDir = resolveAnalysisCacheDir(cwd, options);
     let anchorCatalog: AnchorCatalog | null = null;
@@ -2618,6 +2758,19 @@ export async function translateMarkdownArticle(source: string, options: Translat
         report(options, "draft", `Skipping ${chunkId}; restored from checkpoint.`);
         continue;
       }
+      const chunkStartedAt = Date.now();
+      telemetry.emit({
+        ts: chunkStartedAt,
+        runId,
+        type: "chunk.start",
+        chunkId,
+        meta: {
+          chunkIndex: chunk.index + 1,
+          chunkCount: chunkPlan.chunks.length,
+          headingPath: chunk.headingPath,
+          chunkChars: chunk.source.length
+        }
+      });
       let chunkResult;
       try {
         chunkResult = await translateProtectedChunk(chunk, chunkPlan, {
@@ -2632,7 +2785,9 @@ export async function translateMarkdownArticle(source: string, options: Translat
           spanIndex,
           nextLocalSpanIndex,
           draftReasoningEffort: DRAFT_REASONING_EFFORT as ReasoningEffort,
-          postDraftReasoningEffort
+          postDraftReasoningEffort,
+          runId,
+          telemetry
         });
       } catch (error) {
         // Soft-gate fallback for any chunk-level error (HardGateError from
@@ -2640,14 +2795,32 @@ export async function translateMarkdownArticle(source: string, options: Translat
         // protected source for this chunk so the final output.md has a
         // structurally complete document, just with the failed chunk left in
         // its English / partial form. Quality checker will surface this.
+        const errorMessage = error instanceof Error ? error.message : String(error);
         if (!options.softGate || isStructuralHardGateError(error)) {
+          telemetry.emit({
+            ts: Date.now(),
+            runId,
+            type: "chunk.error",
+            chunkId,
+            durationMs: Date.now() - chunkStartedAt,
+            error: errorMessage,
+            meta: { recovered: false, structural: isStructuralHardGateError(error) }
+          });
           throw error;
         }
-        const message = error instanceof Error ? error.message : String(error);
+        telemetry.emit({
+          ts: Date.now(),
+          runId,
+          type: "chunk.error",
+          chunkId,
+          durationMs: Date.now() - chunkStartedAt,
+          error: errorMessage,
+          meta: { recovered: true, structural: false }
+        });
         report(
           options,
           "audit",
-          `Chunk ${chunk.index + 1}/${chunkPlan.chunks.length} (${chunk.headingPath.join(" > ") || "untitled"}): soft-gate caught chunk failure (${message}); falling back to source content.`
+          `Chunk ${chunk.index + 1}/${chunkPlan.chunks.length} (${chunk.headingPath.join(" > ") || "untitled"}): soft-gate caught chunk failure (${errorMessage}); falling back to source content.`
         );
         // Pass only spans whose placeholder ID appears in this chunk's source
         // — restoreMarkdownSpans throws if asked to restore a span absent from
@@ -2658,10 +2831,22 @@ export async function translateMarkdownArticle(source: string, options: Translat
         chunkResult = {
           body: fallbackBody,
           repairCyclesUsed: 0,
-          gateAudit: createSyntheticChunkFailureAudit(message),
+          gateAudit: createSyntheticChunkFailureAudit(errorMessage),
           nextLocalSpanIndex
         };
       }
+
+      telemetry.emit({
+        ts: Date.now(),
+        runId,
+        type: "chunk.end",
+        chunkId,
+        durationMs: Date.now() - chunkStartedAt,
+        meta: {
+          repairCyclesUsed: chunkResult.repairCyclesUsed,
+          hardPass: isHardPass(chunkResult.gateAudit)
+        }
+      });
 
       restoredChunks.push(chunkResult.body + chunk.separatorAfter);
       gateAudits.push(chunkResult.gateAudit);
@@ -2692,7 +2877,9 @@ export async function translateMarkdownArticle(source: string, options: Translat
         model: postDraftModel,
         options,
         reasoningEffort: postDraftReasoningEffort,
-        sourceSpans: spans
+        sourceSpans: spans,
+        runId,
+        telemetry
       });
       translatedBody = finalStyleResult.body;
       styleApplied = finalStyleResult.styleApplied;
@@ -2721,7 +2908,7 @@ export async function translateMarkdownArticle(source: string, options: Translat
         );
       }
     }
-    return {
+    const result = {
       markdown,
       model: draftModel,
       repairCyclesUsed,
@@ -2729,8 +2916,36 @@ export async function translateMarkdownArticle(source: string, options: Translat
       gateAudit: mergeGateAudits(gateAudits),
       chunkCount: chunkPlan.chunks.length
     };
+    telemetry.emit({
+      ts: Date.now(),
+      runId,
+      type: "run.end",
+      durationMs: Date.now() - runStartedAt,
+      meta: {
+        chunkCount: result.chunkCount,
+        repairCyclesUsed,
+        styleApplied,
+        hardPass: isHardPass(result.gateAudit)
+      }
+    });
+    if (ownedTelemetry) {
+      await ownedTelemetry.close();
+    }
+    return result;
   } catch (error) {
     await writeDebugStateIfRequested(state);
+    const message = error instanceof Error ? error.message : String(error);
+    telemetry.emit({
+      ts: Date.now(),
+      runId,
+      type: "run.end",
+      durationMs: Date.now() - runStartedAt,
+      error: message,
+      meta: { failed: true }
+    });
+    if (ownedTelemetry) {
+      await ownedTelemetry.close();
+    }
     if (error instanceof HardGateError || error instanceof FormattingError) {
       throw error;
     }
@@ -2800,6 +3015,8 @@ type ChunkTranslationContext = {
   nextLocalSpanIndex: number;
   draftReasoningEffort: ReasoningEffort;
   postDraftReasoningEffort: ReasoningEffort | undefined;
+  runId: string;
+  telemetry: TelemetrySink;
 };
 
 type ChunkTranslationResult = {
@@ -4794,6 +5011,18 @@ async function translateProtectedChunk(
     chunkPromptContext,
     chunkLabel
   );
+  context.telemetry.emit({
+    ts: Date.now(),
+    runId: context.runId,
+    type: "gate.result",
+    chunkId: context.chunkId,
+    meta: {
+      stage: "initial",
+      hardPass: isBundledHardPass(bundledAudit),
+      failedSegments: bundledAudit.segments.filter((audit) => !isHardPass(audit)).length,
+      mustFixCount: bundledAudit.segments.reduce((sum, audit) => sum + audit.must_fix.length, 0)
+    }
+  });
 
   while (
     !isBundledHardPass(bundledAudit) &&
@@ -4802,6 +5031,18 @@ async function translateProtectedChunk(
   ) {
     repairCyclesUsed += 1;
     const failedSegmentCount = bundledAudit.segments.filter((audit) => !isHardPass(audit)).length;
+    context.telemetry.emit({
+      ts: Date.now(),
+      runId: context.runId,
+      type: "repair.cycle",
+      chunkId: context.chunkId,
+      cycle: repairCyclesUsed,
+      meta: {
+        maxCycles: MAX_REPAIR_CYCLES,
+        failedSegments: failedSegmentCount,
+        mustFixCount: bundledAudit.segments.reduce((sum, audit) => sum + audit.must_fix.length, 0)
+      }
+    });
     report(
       context.options,
       "repair",
@@ -4845,6 +5086,19 @@ async function translateProtectedChunk(
       chunkPromptContext,
       chunkLabel
     );
+    context.telemetry.emit({
+      ts: Date.now(),
+      runId: context.runId,
+      type: "gate.result",
+      chunkId: context.chunkId,
+      cycle: repairCyclesUsed,
+      meta: {
+        stage: "post-repair",
+        hardPass: isBundledHardPass(bundledAudit),
+        failedSegments: bundledAudit.segments.filter((audit) => !isHardPass(audit)).length,
+        mustFixCount: bundledAudit.segments.reduce((sum, audit) => sum + audit.must_fix.length, 0)
+      }
+    });
   }
 
   if (!isBundledHardPass(bundledAudit)) {
@@ -5086,6 +5340,8 @@ async function applyFinalStylePolish(
     options: TranslateOptions;
     reasoningEffort: ReasoningEffort | undefined;
     sourceSpans: readonly ProtectedSpan[];
+    runId: string;
+    telemetry: TelemetrySink;
   }
 ): Promise<{ body: string; styleApplied: boolean }> {
   const reprotectableSourceSpans = context.sourceSpans.filter((span) =>
@@ -5111,7 +5367,9 @@ async function applyFinalStylePolish(
         stage: "style",
         timeoutMs: getStyleTimeoutMs(),
         heartbeatLabel: "Final style polish",
-        onHeartbeat: (message) => report(context.options, "style", message)
+        onHeartbeat: (message) => report(context.options, "style", message),
+        telemetry: context.telemetry,
+        runId: context.runId
       }
     );
   } catch (error) {
@@ -5819,7 +6077,11 @@ async function translateProtectedSegment(
         timeoutMs: getDraftTimeoutMs(),
         heartbeatLabel: `Chunk ${chunkPromptContext.chunkIndex}/${plan.chunks.length}${chunkLabel}: draft`,
         onHeartbeat: (message) =>
-          report(context.options, "draft", message)
+          report(context.options, "draft", message),
+        telemetry: context.telemetry,
+        runId: context.runId,
+        chunkId: context.chunkId,
+        extra: { lane: "default" }
       }
     );
   const executeJsonBlockDraft = async (prompt: string, blockCount: number) =>
@@ -5841,7 +6103,11 @@ async function translateProtectedSegment(
         timeoutMs: getDraftTimeoutMs(),
         heartbeatLabel: `Chunk ${chunkPromptContext.chunkIndex}/${plan.chunks.length}${chunkLabel}: draft`,
         onHeartbeat: (message) =>
-          report(context.options, "draft", message)
+          report(context.options, "draft", message),
+        telemetry: context.telemetry,
+        runId: context.runId,
+        chunkId: context.chunkId,
+        extra: { lane: "json-blocks", blockCount }
       }
     );
 
@@ -6575,7 +6841,15 @@ async function repairDraftedSegment(
           stage: "repair",
           timeoutMs: getRepairTimeoutMs(),
           heartbeatLabel: `Chunk ${draftedSegment.promptContext.chunkIndex}/${plan.chunks.length}${chunkLabel}, segment ${draftedSegment.segment.index + 1}${batchSuffix}: repair`,
-          onHeartbeat: (message) => report(context.options, "repair", message)
+          onHeartbeat: (message) => report(context.options, "repair", message),
+          telemetry: context.telemetry,
+          runId: context.runId,
+          chunkId: context.chunkId,
+          extra: {
+            lane: "default",
+            segmentIndex: draftedSegment.segment.index + 1,
+            batch: `${batchIndex + 1}/${repairTaskBatches.length}`
+          }
         }
       );
     const executeJsonBlockRepair = async (prompt: string, blockCount: number) =>
@@ -6603,7 +6877,16 @@ async function repairDraftedSegment(
           stage: "repair",
           timeoutMs: getRepairTimeoutMs(),
           heartbeatLabel: `Chunk ${draftedSegment.promptContext.chunkIndex}/${plan.chunks.length}${chunkLabel}, segment ${draftedSegment.segment.index + 1}${batchSuffix}: repair`,
-          onHeartbeat: (message) => report(context.options, "repair", message)
+          onHeartbeat: (message) => report(context.options, "repair", message),
+          telemetry: context.telemetry,
+          runId: context.runId,
+          chunkId: context.chunkId,
+          extra: {
+            lane: "json-blocks",
+            blockCount,
+            segmentIndex: draftedSegment.segment.index + 1,
+            batch: `${batchIndex + 1}/${repairTaskBatches.length}`
+          }
         }
       );
 
@@ -7424,7 +7707,11 @@ async function runBundledGateAudit(
         stage: "audit",
         timeoutMs: getAuditTimeoutMs(),
         heartbeatLabel: `Chunk ${chunkPromptContext.chunkIndex}/${plan.chunks.length}${chunkLabel}: bundled audit`,
-        onHeartbeat: (message) => report(context.options, "audit", message)
+        onHeartbeat: (message) => report(context.options, "audit", message),
+        telemetry: context.telemetry,
+        runId: context.runId,
+        chunkId: context.chunkId,
+        extra: { lane: "bundled", segmentCount: segmentIndices.length }
       }
     );
   } catch (error) {
@@ -7579,7 +7866,14 @@ async function runFallbackSegmentAudits(
         stage: "audit",
         timeoutMs: getAuditTimeoutMs(),
         heartbeatLabel: `Chunk ${chunkPromptContext.chunkIndex}/${plan.chunks.length}${segmentLabel}: per-segment audit`,
-        onHeartbeat: (message) => report(context.options, "audit", message)
+        onHeartbeat: (message) => report(context.options, "audit", message),
+        telemetry: context.telemetry,
+        runId: context.runId,
+        chunkId: context.chunkId,
+        extra: {
+          lane: "per-segment",
+          segmentIndex: draftedSegment.segment.index + 1
+        }
       }
     );
 

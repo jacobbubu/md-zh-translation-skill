@@ -69,6 +69,11 @@ Standard streams:
   - stdout only contains the final translated Markdown, unless --help or --version is used.
   - stderr reports progress, diagnostics, and failures.
 
+Telemetry:
+  - Set MDZH_TELEMETRY_PATH=<path> to emit JSONL run/chunk/stage/repair/gate events
+    to that file. Path is resolved relative to the working directory. One line per
+    event; useful for offline analysis of latency, token usage, and repair behavior.
+
 Exit codes:
   0  Success (may include soft-gate degraded output; see stderr for warnings).
   2  Invalid arguments or missing input.
