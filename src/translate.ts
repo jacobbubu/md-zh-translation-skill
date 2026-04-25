@@ -1129,9 +1129,24 @@ function parseAnchorCatalog(text: string): AnchorCatalog {
   return { anchors, headingPlans, emphasisPlans, blockPlans, aliasPlans, entityDisambiguationPlans, ignoredTerms };
 }
 
+// Issue #80: first_mention_bilingual 是语义判断而非结构断言。audit 与 draft
+// 两个 LLM 对"首现中英对照是否已经建立"经常产生主观分歧，gpt-5.5 等更强模型
+// 反而让 audit 更严格，repair cycle 的 2 轮无法收敛。把它列为 soft check：
+// 仍保留在 audit schema 里作为诊断信号 + repair prompt 里作为线索，但不再
+// 让它单独决定 isHardPass —— 这样只要 first_mention_bilingual 单独失败就不
+// 再触发 repair loop、不再被计入 soft-gate 告警、不再走 fallback 路径。
+const SEMANTIC_SOFT_CHECKS: readonly AuditCheckKey[] = ["first_mention_bilingual"];
+
 function isHardPass(audit: GateAudit): boolean {
-  return Object.values(audit.hard_checks).every((item) => item.pass);
+  return (Object.keys(audit.hard_checks) as AuditCheckKey[]).every((key) => {
+    if (SEMANTIC_SOFT_CHECKS.includes(key)) {
+      return true;
+    }
+    return audit.hard_checks[key].pass;
+  });
 }
+
+export { isHardPass as __testOnlyIsHardPass };
 
 function isBundledHardPass(audit: BundledGateAudit): boolean {
   return audit.segments.every((segment) => isHardPass(segment));

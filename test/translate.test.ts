@@ -12,6 +12,7 @@ import {
   getDraftContractViolationForTest,
   parseGateAudit,
   translateMarkdownArticle,
+  __testOnlyIsHardPass,
   type ChunkPromptContext,
   type GateAudit
 } from "../src/translate.js";
@@ -552,7 +553,11 @@ test("translateMarkdownArticle reifies chunk failures into executable repair tas
             paragraph_match: { pass: true, problem: "" },
             first_mention_bilingual: { pass: false, problem: "第 1 个项目符号中的 npm registry 需补成 npm 注册表（npm registry）。" },
             numbers_units_logic: { pass: true, problem: "" },
-            chinese_punctuation: { pass: true, problem: "" },
+            // #80: first_mention_bilingual is a soft check and can't trigger
+            // the repair-task reification path on its own. Pair it with a
+            // non-structural hard failure so the reification + HardGateError
+            // path still exercises.
+            chinese_punctuation: { pass: false, problem: "第 1 个项目符号句末缺少中文标点。" },
             unit_conversion_boundary: { pass: true, problem: "" },
             protected_span_integrity: { pass: true, problem: "" }
           }),
@@ -1787,14 +1792,21 @@ test("buildRepairPromptContext does not emit first_mention_bilingual guidance fo
 test("translateMarkdownArticle ships first_mention_bilingual cut-piece guidance to the live repair prompt (#71 constructive smoke)", async () => {
   const source = "# Boeing Test\n\nThe Boeing 747 is a large aircraft.\n";
   const capturedPrompts: string[] = [];
+  // #80: first_mention_bilingual is now a soft check and can't trigger the
+  // repair loop by itself. Pair it with a non-structural hard failure
+  // (chinese_punctuation) so the repair loop still runs and we can verify
+  // first_mention_bilingual guidance is merged into the repair prompt.
   const failingAudit = createAudit(
     false,
-    ["第 1 段中\"Boeing 747\"首次出现未按要求补中英文对照，需在该处直接补齐。"],
+    [
+      "第 1 段中\"Boeing 747\"首次出现未按要求补中英文对照，需在该处直接补齐。",
+      "第 1 段句末中文标点缺失。"
+    ],
     {
       paragraph_match: { pass: true, problem: "" },
       first_mention_bilingual: { pass: false, problem: "Boeing 747 missing bilingual anchor" },
       numbers_units_logic: { pass: true, problem: "" },
-      chinese_punctuation: { pass: true, problem: "" },
+      chinese_punctuation: { pass: false, problem: "missing Chinese punctuation" },
       unit_conversion_boundary: { pass: true, problem: "" },
       protected_span_integrity: { pass: true, problem: "" }
     }
@@ -1874,6 +1886,36 @@ test("buildRepairPromptContext emits reverse whitelist for non-product technical
   assert.match(notes, /Retrieval-Augmented Generation/);
   assert.match(notes, /Chain-of-Thought/);
   assert.match(notes, /产品豁免不适用/);
+});
+
+test("isHardPass treats first_mention_bilingual as soft check and returns true when only it fails (#80)", () => {
+  const audit = createAudit(true);
+  audit.hard_checks.first_mention_bilingual = {
+    pass: false,
+    problem: "首段 Mixture-of-Experts 未建立中英对照。"
+  };
+  assert.equal(__testOnlyIsHardPass(audit), true);
+});
+
+test("isHardPass still returns false when a structural hard check fails alongside first_mention_bilingual (#80)", () => {
+  const audit = createAudit(true);
+  audit.hard_checks.first_mention_bilingual = { pass: false, problem: "缺首现对照" };
+  audit.hard_checks.paragraph_match = { pass: false, problem: "段落数量不一致" };
+  assert.equal(__testOnlyIsHardPass(audit), false);
+});
+
+test("isHardPass still returns false when a non-semantic hard check fails on its own (#80)", () => {
+  const audit = createAudit(true);
+  audit.hard_checks.protected_span_integrity = {
+    pass: false,
+    problem: "占位符 @@MDZH_STRONG_EMPHASIS_0001@@ 未恢复。"
+  };
+  assert.equal(__testOnlyIsHardPass(audit), false);
+});
+
+test("isHardPass returns true for all-pass audits regardless of semantic check bypass (#80)", () => {
+  const audit = createAudit(true);
+  assert.equal(__testOnlyIsHardPass(audit), true);
 });
 
 test("translateMarkdownArticle surfaces IR targets in repair guidance when pending repairs are already bound", () => {
@@ -3090,9 +3132,13 @@ test("translateMarkdownArticle fails after two repair cycles when the gate never
   );
 });
 
-test("translateMarkdownArticle under soft-gate emits degraded body and banner when only semantic hard-checks fail", async () => {
+test("translateMarkdownArticle under soft-gate treats first_mention_bilingual-only failures as a clean pass (#80)", async () => {
   const source = "# Title\n\nBody\n";
   const progress: string[] = [];
+  // #80: when only first_mention_bilingual fails (audit flags a judgment-call
+  // anchor miss but every structural/punctuation/unit check passes), the new
+  // contract is to treat this as a hard pass — no repair loop, no soft-gate
+  // fallback banner, no "Output is degraded" warning.
   const semanticFailingAudit = createAudit(false, ["正文首现术语缺少中英对照"], {
     paragraph_match: { pass: true, problem: "" },
     first_mention_bilingual: { pass: false, problem: "missing bilingual term" },
@@ -3117,16 +3163,18 @@ test("translateMarkdownArticle under soft-gate emits degraded body and banner wh
     onProgress: (message) => progress.push(message)
   });
 
-  assert.ok(result.markdown.length > 0, "soft-gate should emit a non-empty degraded body");
+  assert.ok(result.markdown.length > 0, "should emit a translated body");
   assert.ok(
-    progress.some((message) =>
-      /soft-gate enabled \(semantic failures only\)/.test(message)
-    ),
-    "expected per-chunk soft-gate log line"
+    !progress.some((message) => /soft-gate enabled \(semantic failures only\)/.test(message)),
+    "no per-chunk soft-gate log line should fire when only first_mention_bilingual fails"
   );
   assert.ok(
-    progress.some((message) => /Soft-gate fallback applied to \d+ chunk/.test(message)),
-    "expected final aggregate banner"
+    !progress.some((message) => /Soft-gate fallback applied to \d+ chunk/.test(message)),
+    "no aggregate degraded-output banner should fire under #80 contract"
+  );
+  assert.ok(
+    !progress.some((message) => /failed after \d+ repair cycle/.test(message)),
+    "first_mention_bilingual-only failures should not enter the repair loop"
   );
 });
 
