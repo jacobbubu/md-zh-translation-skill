@@ -3418,3 +3418,158 @@ test("translateMarkdownArticle emits stage.error when an LLM stage fails", async
   assert.equal((runEnd!.meta as Record<string, unknown>).failed, true);
 });
 
+test("repair patch lane short-circuits the LLM when structured targets fully cover the must_fix batch", async () => {
+  // Use a source that will NOT match any formal known_entities so the
+  // upstream `injectPlannedAnchorText` doesn't auto-apply the canonical form
+  // before the patch lane gets a chance.
+  const source = "- foobar widget\n";
+  const sink = createMemoryTelemetrySink();
+
+  let repairCalls = 0;
+  let auditPasses = 0;
+
+  const executor: CodexExecutor = {
+    async execute(prompt: string, options: CodexExecOptions): Promise<CodexExecResult> {
+      if (isDocumentAnalysisPrompt(prompt)) {
+        return createExecResult(createEmptyAnchorCatalog());
+      }
+
+      if (isBundledAuditPrompt(prompt, options) || prompt.includes("只返回 JSON") && prompt.includes("hard_checks")) {
+        if (auditPasses === 0) {
+          auditPasses += 1;
+          const failingAudit: GateAudit = {
+            hard_checks: {
+              paragraph_match: { pass: true, problem: "" },
+              first_mention_bilingual: { pass: true, problem: "" },
+              numbers_units_logic: { pass: false, problem: "需补 foobar 小工具的双语锚定。" },
+              chinese_punctuation: { pass: true, problem: "" },
+              unit_conversion_boundary: { pass: true, problem: "" },
+              protected_span_integrity: { pass: true, problem: "" }
+            },
+            must_fix: ["第 1 个项目符号需补 foobar 小工具（foobar widget）首现双语。"],
+            repair_targets: [
+              {
+                location: "第 1 个项目符号",
+                kind: "list_item",
+                currentText: "foobar 小工具",
+                targetText: "foobar 小工具（foobar widget）",
+                english: "foobar widget",
+                chineseHint: "foobar 小工具"
+              }
+            ]
+          };
+          return createExecResult(wrapAuditForSegments(prompt, failingAudit));
+        }
+        return createExecResult(wrapAuditForSegments(prompt, createAudit(true)));
+      }
+
+      if (options.outputSchema && prompt.includes("### BLOCK")) {
+        const blockCount = (prompt.match(/^### BLOCK \d+ \([^)]+\)$/gm) ?? []).length || 1;
+        return createExecResult(JSON.stringify({ blocks: Array.from({ length: blockCount }, () => "- foobar 小工具") }));
+      }
+
+      if (prompt.includes("【must_fix】")) {
+        repairCalls += 1;
+        return createExecResult("- foobar 小工具（foobar widget）。\n");
+      }
+
+      const current = extractPromptSection(prompt, "【当前译文】");
+      if (current !== null) {
+        return createExecResult(current);
+      }
+
+      return createExecResult("- foobar 小工具\n");
+    }
+  };
+
+  await translateMarkdownArticle(source, {
+    executor,
+    formatter: async (markdown) => markdown,
+    softGate: true,
+    telemetry: sink
+  });
+
+  const patchEvents = [...sink.events].filter((event) => event.type === "repair.patch");
+  assert.ok(patchEvents.length >= 1, "expected at least one repair.patch event");
+  const appliedTotal = patchEvents.reduce(
+    (sum, event) => sum + Number((event.meta as Record<string, unknown>).applied ?? 0),
+    0
+  );
+  assert.ok(appliedTotal >= 1, `expected at least one structured patch to apply, got ${appliedTotal}`);
+  assert.equal(repairCalls, 0, "patch lane should have skipped the LLM repair call");
+});
+
+test("repair patch lane falls through to the LLM when MDZH_REPAIR_PATCH_LANE=false", async () => {
+  const source = "- foobar widget\n";
+
+  let repairCalls = 0;
+  let auditPasses = 0;
+
+  const executor: CodexExecutor = {
+    async execute(prompt: string, options: CodexExecOptions): Promise<CodexExecResult> {
+      if (isDocumentAnalysisPrompt(prompt)) {
+        return createExecResult(createEmptyAnchorCatalog());
+      }
+      if (isBundledAuditPrompt(prompt, options) || prompt.includes("只返回 JSON") && prompt.includes("hard_checks")) {
+        if (auditPasses === 0) {
+          auditPasses += 1;
+          const failingAudit: GateAudit = {
+            hard_checks: {
+              paragraph_match: { pass: true, problem: "" },
+              first_mention_bilingual: { pass: true, problem: "" },
+              numbers_units_logic: { pass: false, problem: "需补 foobar 小工具双语。" },
+              chinese_punctuation: { pass: true, problem: "" },
+              unit_conversion_boundary: { pass: true, problem: "" },
+              protected_span_integrity: { pass: true, problem: "" }
+            },
+            must_fix: ["第 1 个项目符号需补首现双语。"],
+            repair_targets: [
+              {
+                location: "第 1 个项目符号",
+                kind: "list_item",
+                currentText: "foobar 小工具",
+                targetText: "foobar 小工具（foobar widget）",
+                english: "foobar widget",
+                chineseHint: "foobar 小工具"
+              }
+            ]
+          };
+          return createExecResult(wrapAuditForSegments(prompt, failingAudit));
+        }
+        return createExecResult(wrapAuditForSegments(prompt, createAudit(true)));
+      }
+      if (options.outputSchema && prompt.includes("### BLOCK")) {
+        const blockCount = (prompt.match(/^### BLOCK \d+ \([^)]+\)$/gm) ?? []).length || 1;
+        return createExecResult(JSON.stringify({ blocks: Array.from({ length: blockCount }, () => "- foobar 小工具") }));
+      }
+      if (prompt.includes("【must_fix】")) {
+        repairCalls += 1;
+        return createExecResult("- foobar 小工具（foobar widget）。\n");
+      }
+      const current = extractPromptSection(prompt, "【当前译文】");
+      if (current !== null) {
+        return createExecResult(current);
+      }
+      return createExecResult("- foobar 小工具\n");
+    }
+  };
+
+  const previous = process.env.MDZH_REPAIR_PATCH_LANE;
+  process.env.MDZH_REPAIR_PATCH_LANE = "false";
+  try {
+    await translateMarkdownArticle(source, {
+      executor,
+      formatter: async (markdown) => markdown,
+      softGate: true
+    });
+  } finally {
+    if (previous === undefined) {
+      delete process.env.MDZH_REPAIR_PATCH_LANE;
+    } else {
+      process.env.MDZH_REPAIR_PATCH_LANE = previous;
+    }
+  }
+
+  assert.equal(repairCalls, 1, "with patch lane disabled, repair LLM must be called once");
+});
+

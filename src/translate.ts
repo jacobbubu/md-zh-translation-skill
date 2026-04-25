@@ -35,6 +35,7 @@ import {
   noopTelemetry,
   type TelemetrySink
 } from "./telemetry.js";
+import { applyStructuredRepairPatches } from "./repair-patch.js";
 import { planMarkdownChunks, type MarkdownChunk, type MarkdownChunkPlan } from "./markdown-chunks.js";
 import {
   extractTranslatableStrongEmphasisSpans,
@@ -89,6 +90,18 @@ import {
 
 const DEFAULT_MODEL = "gpt-5.4-mini";
 const MAX_REPAIR_CYCLES = 2;
+
+function isRepairPatchLaneEnabled(): boolean {
+  // Default to enabled. Set MDZH_REPAIR_PATCH_LANE=false to fall back to the
+  // historical "ask the LLM to rewrite the segment" path. Useful when bisecting
+  // regressions or when the patch lane misses a pattern we want the model to
+  // handle.
+  const raw = process.env.MDZH_REPAIR_PATCH_LANE?.trim().toLowerCase();
+  if (!raw) {
+    return true;
+  }
+  return raw !== "false" && raw !== "0" && raw !== "off";
+}
 const MAX_MUST_FIX_PER_REPAIR_CALL = 1;
 const DRAFT_REASONING_EFFORT = "low";
 const AUDIT_REASONING_EFFORT = "low";
@@ -4799,7 +4812,8 @@ function suppressCoveredAnchorMustFix(
 
   return {
     hard_checks: nextHardChecks,
-    must_fix: remainingMustFix
+    must_fix: remainingMustFix,
+    ...(audit.repair_targets ? { repair_targets: audit.repair_targets } : {})
   };
 }
 
@@ -6812,6 +6826,54 @@ async function repairDraftedSegment(
     );
     const batchSuffix =
       repairTaskBatches.length > 1 ? `，修复批次 ${batchIndex + 1}/${repairTaskBatches.length}` : "";
+
+    if (isRepairPatchLaneEnabled()) {
+      const patchOutcome = applyStructuredRepairPatches(draftedSegment.protectedBody, taskBatch);
+      const skipReasons = patchOutcome.attempts
+        .filter((attempt) => attempt.status === "skipped")
+        .map((attempt) => (attempt as { reason: string }).reason);
+      context.telemetry.emit({
+        ts: Date.now(),
+        runId: context.runId,
+        type: "repair.patch",
+        chunkId: context.chunkId,
+        meta: {
+          segmentIndex: draftedSegment.segment.index + 1,
+          batch: `${batchIndex + 1}/${repairTaskBatches.length}`,
+          attempted: taskBatch.length,
+          applied: patchOutcome.appliedTaskIds.length,
+          ...(skipReasons.length ? { skipReasons } : {})
+        }
+      });
+
+      if (
+        patchOutcome.appliedTaskIds.length > 0 &&
+        patchOutcome.remainingTasks.length === 0
+      ) {
+        report(
+          context.options,
+          "repair",
+          `Chunk ${draftedSegment.promptContext.chunkIndex}/${plan.chunks.length}${chunkLabel}, segment ${draftedSegment.segment.index + 1}${batchSuffix}: applied ${patchOutcome.appliedTaskIds.length} structured patch(es) without invoking the model.`
+        );
+        draftedSegment.protectedBody = patchOutcome.patchedBody;
+        draftedSegment.restoredBody = restoreMarkdownSpans(
+          patchOutcome.patchedBody,
+          draftedSegment.spans
+        );
+        applyRepairResult(
+          context.state,
+          draftedSegment.segmentId,
+          patchOutcome.appliedTaskIds,
+          {
+            protectedBody: draftedSegment.protectedBody,
+            restoredBody: draftedSegment.restoredBody,
+            ...(draftedSegment.threadId ? { threadId: draftedSegment.threadId } : {})
+          }
+        );
+        continue;
+      }
+    }
+
     report(
       context.options,
       "repair",
