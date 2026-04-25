@@ -18,6 +18,7 @@ import {
 } from "../src/translate.js";
 import { CodexExecutionError } from "../src/errors.js";
 import type { CodexExecOptions, CodexExecResult, CodexExecutor } from "../src/codex-exec.js";
+import { createMemoryTelemetrySink, type TelemetryEvent } from "../src/telemetry.js";
 
 function isDocumentAnalysisPrompt(prompt: string): boolean {
   return prompt.includes("【文档分析输入】");
@@ -3313,5 +3314,107 @@ test("translateMarkdownArticle under soft-gate still throws HardGateError when a
       return true;
     }
   );
+});
+
+test("translateMarkdownArticle emits telemetry around run, chunks, stages and gate results", async () => {
+  const source = ["# Hello", "", "World."].join("\n");
+  const sink = createMemoryTelemetrySink();
+
+  const executor: CodexExecutor = {
+    async execute(prompt: string, options: CodexExecOptions): Promise<CodexExecResult> {
+      if (isDocumentAnalysisPrompt(prompt)) {
+        return {
+          ...createExecResult(createEmptyAnchorCatalog()),
+          usage: { inputTokens: 100, cachedInputTokens: 50, outputTokens: 20, totalTokens: 120 }
+        };
+      }
+      if (options.outputSchema && prompt.includes("### BLOCK")) {
+        const blockCount = (prompt.match(/^### BLOCK \d+ \([^)]+\)$/gm) ?? []).length || 1;
+        return {
+          ...createExecResult(JSON.stringify({ blocks: Array.from({ length: blockCount }, () => "你好世界") })),
+          usage: { inputTokens: 80, cachedInputTokens: 30, outputTokens: 12, totalTokens: 92 }
+        };
+      }
+      if (options.outputSchema || prompt.includes('"hard_checks"') || prompt.includes("只返回 JSON")) {
+        return {
+          ...createExecResult(wrapAuditForSegments(prompt, createAudit(true))),
+          usage: { inputTokens: 60, cachedInputTokens: 20, outputTokens: 30, totalTokens: 90 }
+        };
+      }
+      const current = extractPromptSection(prompt, "【当前译文】");
+      if (current !== null) {
+        return createExecResult(current);
+      }
+      return createExecResult("你好世界");
+    }
+  };
+
+  await translateMarkdownArticle(source, {
+    executor,
+    formatter: async (markdown) => markdown,
+    telemetry: sink
+  });
+
+  const events = [...sink.events];
+  const types = events.map((event) => event.type);
+
+  assert.equal(types[0], "run.start");
+  assert.equal(types[types.length - 1], "run.end");
+  assert.ok(types.includes("chunk.start"), "expected chunk.start");
+  assert.ok(types.includes("chunk.end"), "expected chunk.end");
+  assert.ok(types.includes("stage.start"), "expected stage.start");
+  assert.ok(types.includes("stage.end"), "expected stage.end");
+  assert.ok(types.includes("gate.result"), "expected gate.result");
+
+  const runStart = events.find((event) => event.type === "run.start") as TelemetryEvent;
+  const runEnd = events.find((event) => event.type === "run.end") as TelemetryEvent;
+  assert.equal(runStart.runId, runEnd.runId);
+  assert.match(runStart.runId, /^run_/);
+
+  const stageEnds = events.filter((event) => event.type === "stage.end");
+  assert.ok(stageEnds.length >= 1);
+  for (const event of stageEnds) {
+    assert.equal(typeof event.durationMs, "number");
+    assert.equal(typeof event.inputTokens, "number");
+    assert.equal(typeof event.outputTokens, "number");
+  }
+
+  const gateResults = events.filter((event) => event.type === "gate.result");
+  assert.ok(gateResults.length >= 1);
+  assert.equal((gateResults[0]!.meta as Record<string, unknown>).hardPass, true);
+});
+
+test("translateMarkdownArticle emits stage.error when an LLM stage fails", async () => {
+  const source = ["# Hello", "", "World."].join("\n");
+  const sink = createMemoryTelemetrySink();
+
+  const executor: CodexExecutor = {
+    async execute(prompt: string): Promise<CodexExecResult> {
+      if (isDocumentAnalysisPrompt(prompt)) {
+        return createExecResult(createEmptyAnchorCatalog());
+      }
+      throw new CodexExecutionError("draft synthetic failure");
+    }
+  };
+
+  await assert.rejects(
+    () =>
+      translateMarkdownArticle(source, {
+        executor,
+        formatter: async (markdown) => markdown,
+        telemetry: sink
+      })
+  );
+
+  const stageErrors = [...sink.events].filter((event) => event.type === "stage.error");
+  assert.ok(stageErrors.length >= 1, "expected at least one stage.error event");
+  for (const event of stageErrors) {
+    assert.equal(event.error, "draft synthetic failure");
+    assert.equal(typeof event.durationMs, "number");
+  }
+
+  const runEnd = [...sink.events].find((event) => event.type === "run.end");
+  assert.ok(runEnd, "expected run.end emitted on failure");
+  assert.equal((runEnd!.meta as Record<string, unknown>).failed, true);
 });
 
