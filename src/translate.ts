@@ -6412,6 +6412,24 @@ function getDraftContractViolation(source: string, text: string): string | null 
     }
   }
 
+  // Issue #82: reject drafts that partially drop list items. paragraph_match
+  // catches this at audit, but it's a structural hard check that soft-gate
+  // can't save; by the time it fires, up to 2 repair cycles have been spent
+  // re-rolling the same shape. Reject earlier at the draft contract so draft
+  // retries (stricter prompt) and repair retries each get a swing on a targeted
+  // signal.
+  //
+  // Constraint: only fire when the draft kept SOME bullets but fewer than the
+  // source. A draft with zero bullets typically indicates a different failure
+  // (empty/mocked output, structured-output debris) already covered by earlier
+  // checks; firing here would create noise for legacy tests that mock the
+  // executor without simulating bullet preservation.
+  const sourceListItemCount = countListItemLines(source);
+  const draftListItemCount = countListItemLines(trimmed);
+  if (sourceListItemCount >= 2 && draftListItemCount > 0 && draftListItemCount < sourceListItemCount) {
+    return `draft dropped ${sourceListItemCount - draftListItemCount} list item(s) (source=${sourceListItemCount}, draft=${draftListItemCount})`;
+  }
+
   if (looksLikeStructuredOutputDebris(source, trimmed)) {
     return "draft returned structured-output debris instead of translated content";
   }
@@ -8263,6 +8281,20 @@ function isListLikeBlock(content: string): boolean {
   return content
     .split(/\r?\n/)
     .some((line) => /^(\s*)([-*+]|\d+\.)\s+/.test(line.trimStart()));
+}
+
+// Counts every line that begins with a top-level list marker. Protected-span
+// placeholders are inline tokens (never line-leading), so they don't inflate
+// the count. Used by getDraftContractViolation (#82) to catch drafts that
+// drop bullets before paragraph_match throws a structural hard-gate failure.
+function countListItemLines(body: string): number {
+  let count = 0;
+  for (const line of body.split(/\r?\n/)) {
+    if (/^ {0,3}(?:[-*+]|\d+[.)])\s+/.test(line)) {
+      count += 1;
+    }
+  }
+  return count;
 }
 
 function isToolNameExplanationLine(line: string): boolean {
