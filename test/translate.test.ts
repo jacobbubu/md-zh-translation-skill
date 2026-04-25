@@ -19,6 +19,7 @@ import {
 import { CodexExecutionError } from "../src/errors.js";
 import type { CodexExecOptions, CodexExecResult, CodexExecutor } from "../src/codex-exec.js";
 import { createMemoryTelemetrySink, type TelemetryEvent } from "../src/telemetry.js";
+import { createMemoryTmStore, fingerprint as tmFingerprint } from "../src/translation-memory.js";
 
 function isDocumentAnalysisPrompt(prompt: string): boolean {
   return prompt.includes("【文档分析输入】");
@@ -3708,5 +3709,141 @@ test("default concurrency runs chunks strictly serial — chunk N+1 starts only 
   const concurrencyEvent = [...memory.events].find((event) => event.type === "chunk.concurrency");
   assert.ok(concurrencyEvent, "expected chunk.concurrency event");
   assert.equal((concurrencyEvent!.meta as Record<string, unknown>).concurrency, 1);
+});
+
+test("Translation Memory hit short-circuits the draft LLM call and reuses the cached target", async () => {
+  const source = "## Hello\n\nWorld.\n";
+  const sink = createMemoryTelemetrySink();
+
+  let draftCalls = 0;
+  const cachedTarget = "## 你好\n\n世界。\n";
+
+  // Pre-seed the TM with the cached target, fingerprinted from the segment
+  // source the pipeline will produce. We don't know the exact protected-span
+  // splits up-front, so this is the simplest cross-check: the only segment
+  // here has no spans, so segment.source === source body of the chunk minus
+  // separators. Use a snapshot fingerprint based on the full source minus
+  // the trailing newline.
+  const tm = createMemoryTmStore();
+
+  const executor: CodexExecutor = {
+    async execute(prompt: string, options: CodexExecOptions): Promise<CodexExecResult> {
+      if (isDocumentAnalysisPrompt(prompt)) {
+        return createExecResult(createEmptyAnchorCatalog());
+      }
+      if (isBundledAuditPrompt(prompt, options) || (options.outputSchema && prompt.includes('"hard_checks"'))) {
+        return createExecResult(wrapAuditForSegments(prompt, createAudit(true)));
+      }
+      // Any draft / json-blocks call should never fire on a TM hit.
+      draftCalls += 1;
+      const sourceSection = extractPromptSection(prompt, "【英文原文】") ?? "";
+      return createExecResult(sourceSection);
+    }
+  };
+
+  // First run: TM is cold. The pipeline drafts via the executor and writes a
+  // hard-passed entry into the TM.
+  await translateMarkdownArticle(source, {
+    executor,
+    formatter: async (markdown) => markdown,
+    telemetry: sink,
+    tmStore: tm
+  });
+  assert.ok(draftCalls > 0, "first run should still call the draft LLM");
+  const writtenAfterFirstRun = tm.entries.length;
+  assert.ok(writtenAfterFirstRun > 0, "first run should populate at least one TM entry");
+
+  // Second run: with TM warmed, every segment's draft LLM call should be
+  // skipped — only audit (and any other non-draft stages) should fire.
+  draftCalls = 0;
+  const sink2 = createMemoryTelemetrySink();
+  void cachedTarget;
+  await translateMarkdownArticle(source, {
+    executor,
+    formatter: async (markdown) => markdown,
+    telemetry: sink2,
+    tmStore: tm
+  });
+
+  assert.equal(draftCalls, 0, "with a warm TM, no draft LLM calls should fire");
+  const hits = [...sink2.events].filter((event) => event.type === "tm.hit");
+  assert.ok(hits.length >= 1, "second run should emit at least one tm.hit event");
+});
+
+test("Translation Memory writes only when the chunk hard-passes", async () => {
+  const source = "## Hello\n\nWorld.\n";
+  const tm = createMemoryTmStore();
+  const sink = createMemoryTelemetrySink();
+
+  // Force a hard-gate failure: the audit reports failure repeatedly, the run
+  // exhausts MAX_REPAIR_CYCLES and (with softGate=false) throws HardGateError.
+  // We expect the TM to remain empty because no chunk actually passed.
+  const executor: CodexExecutor = {
+    async execute(prompt: string, options: CodexExecOptions): Promise<CodexExecResult> {
+      if (isDocumentAnalysisPrompt(prompt)) {
+        return createExecResult(createEmptyAnchorCatalog());
+      }
+      if (isBundledAuditPrompt(prompt, options) || (options.outputSchema && prompt.includes('"hard_checks"'))) {
+        const failingAudit: GateAudit = {
+          ...createAudit(false, ["第 1 段需补 first 锚定。"], {
+            first_mention_bilingual: { pass: false, problem: "缺首现双语。" },
+            chinese_punctuation: { pass: false, problem: "标点缺失。" }
+          })
+        };
+        return createExecResult(wrapAuditForSegments(prompt, failingAudit));
+      }
+      const current = extractPromptSection(prompt, "【当前译文】");
+      if (current !== null) {
+        return createExecResult(current);
+      }
+      const sourceSection = extractPromptSection(prompt, "【英文原文】") ?? "";
+      return createExecResult(sourceSection);
+    }
+  };
+
+  await assert.rejects(
+    () =>
+      translateMarkdownArticle(source, {
+        executor,
+        formatter: async (markdown) => markdown,
+        softGate: false,
+        telemetry: sink,
+        tmStore: tm
+      })
+  );
+
+  assert.equal(tm.entries.length, 0, "no TM entries should be written when no chunk hard-passes");
+  const writes = [...sink.events].filter((event) => event.type === "tm.write");
+  assert.equal(writes.length, 0, "no tm.write events should fire when no chunk hard-passes");
+});
+
+test("Translation Memory miss event fires when no entry exists for the segment", async () => {
+  const source = "## Hello\n\nWorld.\n";
+  const tm = createMemoryTmStore();
+  const sink = createMemoryTelemetrySink();
+
+  const executor: CodexExecutor = {
+    async execute(prompt: string, options: CodexExecOptions): Promise<CodexExecResult> {
+      if (isDocumentAnalysisPrompt(prompt)) {
+        return createExecResult(createEmptyAnchorCatalog());
+      }
+      if (isBundledAuditPrompt(prompt, options) || (options.outputSchema && prompt.includes('"hard_checks"'))) {
+        return createExecResult(wrapAuditForSegments(prompt, createAudit(true)));
+      }
+      const sourceSection = extractPromptSection(prompt, "【英文原文】") ?? "";
+      return createExecResult(sourceSection);
+    }
+  };
+
+  await translateMarkdownArticle(source, {
+    executor,
+    formatter: async (markdown) => markdown,
+    telemetry: sink,
+    tmStore: tm
+  });
+
+  const misses = [...sink.events].filter((event) => event.type === "tm.miss");
+  assert.ok(misses.length >= 1, "first run with cold TM should emit at least one tm.miss event");
+  void tmFingerprint;
 });
 

@@ -81,6 +81,11 @@ Performance knobs:
     and resume semantics are unchanged.
   - MDZH_REPAIR_PATCH_LANE=false disables the structured repair-target patch
     lane and forces the historical full-segment LLM rewrite for every repair.
+  - MDZH_TM_PATH=<path> enables segment-level translation memory at <path>
+    (JSONL). The pipeline reads cached translations on draft and writes back
+    only when a chunk hard-passes. Use it to short-circuit identical re-runs
+    (e.g. iterating on the same fixture). Audit and repair still run on TM
+    hits, so a stale entry can't silently leak through.
 
 Exit codes:
   0  Success (may include soft-gate degraded output; see stderr for warnings).

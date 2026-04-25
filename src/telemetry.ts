@@ -14,6 +14,9 @@ export type TelemetryEventType =
   | "repair.cycle"
   | "repair.patch"
   | "gate.result"
+  | "tm.hit"
+  | "tm.miss"
+  | "tm.write"
   | "analysis.shard.start"
   | "analysis.shard.end";
 

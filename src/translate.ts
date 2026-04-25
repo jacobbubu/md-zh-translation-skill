@@ -36,6 +36,12 @@ import {
   type TelemetrySink
 } from "./telemetry.js";
 import { applyStructuredRepairPatches } from "./repair-patch.js";
+import {
+  createJsonlTmStore,
+  fingerprint as tmFingerprint,
+  noopTmStore,
+  type TmStore
+} from "./translation-memory.js";
 import { planMarkdownChunks, type MarkdownChunk, type MarkdownChunkPlan } from "./markdown-chunks.js";
 import {
   extractTranslatableStrongEmphasisSpans,
@@ -245,6 +251,14 @@ export type TranslateOptions = {
    * care pay nothing.
    */
   telemetry?: TelemetrySink;
+  /**
+   * Optional segment-level translation memory. When provided and a segment's
+   * source matches a previously hard-passed entry, the draft LLM call is
+   * skipped and the cached target is reused as the segment draft. Audit and
+   * repair still run, so stale entries don't silently leak through. Default
+   * is a no-op store.
+   */
+  tmStore?: TmStore;
 };
 
 export type TranslateResult = {
@@ -2678,6 +2692,20 @@ export async function translateMarkdownArticle(source: string, options: Translat
   } else {
     telemetry = noopTelemetry;
   }
+  // TM resolution mirrors telemetry: caller-supplied store wins, otherwise
+  // MDZH_TM_PATH opens a JSONL store for this run, otherwise noop.
+  let ownedTmStore: TmStore | null = null;
+  let tmStore: TmStore;
+  if (options.tmStore) {
+    tmStore = options.tmStore;
+  } else if (process.env.MDZH_TM_PATH?.trim()) {
+    ownedTmStore = await createJsonlTmStore(
+      path.resolve(cwd, process.env.MDZH_TM_PATH.trim())
+    );
+    tmStore = ownedTmStore;
+  } else {
+    tmStore = noopTmStore;
+  }
   const runId = generateRunId();
   const runStartedAt = Date.now();
   telemetry.emit({
@@ -2846,7 +2874,8 @@ export async function translateMarkdownArticle(source: string, options: Translat
           draftReasoningEffort: DRAFT_REASONING_EFFORT as ReasoningEffort,
           postDraftReasoningEffort,
           runId,
-          telemetry
+          telemetry,
+          tmStore
         });
       } catch (error) {
         // Soft-gate fallback for any chunk-level error (HardGateError from
@@ -3050,6 +3079,9 @@ export async function translateMarkdownArticle(source: string, options: Translat
     if (ownedTelemetry) {
       await ownedTelemetry.close();
     }
+    if (ownedTmStore) {
+      await ownedTmStore.close();
+    }
     return result;
   } catch (error) {
     await writeDebugStateIfRequested(state);
@@ -3064,6 +3096,9 @@ export async function translateMarkdownArticle(source: string, options: Translat
     });
     if (ownedTelemetry) {
       await ownedTelemetry.close();
+    }
+    if (ownedTmStore) {
+      await ownedTmStore.close();
     }
     if (error instanceof HardGateError || error instanceof FormattingError) {
       throw error;
@@ -3136,6 +3171,7 @@ type ChunkTranslationContext = {
   postDraftReasoningEffort: ReasoningEffort | undefined;
   runId: string;
   telemetry: TelemetrySink;
+  tmStore: TmStore;
 };
 
 type ChunkTranslationResult = {
@@ -5221,6 +5257,53 @@ async function translateProtectedChunk(
     });
   }
 
+  // Write hard-passed segments to translation memory so future runs of the
+  // same source can short-circuit the draft LLM call. We only persist when
+  // the entire chunk hard-passed — a chunk-level pass is the strongest
+  // evidence we have that each segment's translation is correct.
+  if (isBundledHardPass(bundledAudit)) {
+    for (const drafted of draftedSegments) {
+      const segmentAudit = bundledAudit.segments.find(
+        (entry) => entry.segment_index === drafted.segment.index + 1
+      );
+      if (!segmentAudit || !isHardPass(segmentAudit)) {
+        continue;
+      }
+      try {
+        await context.tmStore.put({
+          fingerprint: tmFingerprint(drafted.segment.source),
+          source: drafted.segment.source,
+          target: drafted.protectedBody,
+          hardPassed: true,
+          auditedAt: Date.now(),
+          runId: context.runId
+        });
+        context.telemetry.emit({
+          ts: Date.now(),
+          runId: context.runId,
+          type: "tm.write",
+          chunkId: context.chunkId,
+          meta: {
+            segmentIndex: drafted.segment.index + 1,
+            sourceChars: drafted.segment.source.length
+          }
+        });
+      } catch (error) {
+        // TM persistence is best-effort; never fail the run because the cache
+        // file couldn't be written.
+        const message = error instanceof Error ? error.message : String(error);
+        context.telemetry.emit({
+          ts: Date.now(),
+          runId: context.runId,
+          type: "tm.write",
+          chunkId: context.chunkId,
+          error: message,
+          meta: { segmentIndex: drafted.segment.index + 1 }
+        });
+      }
+    }
+  }
+
   if (!isBundledHardPass(bundledAudit)) {
     const failedSegments = bundledAudit.segments
       .filter((audit) => !isHardPass(audit))
@@ -6172,6 +6255,52 @@ async function translateProtectedSegment(
   const localFormatting = protectSegmentFormattingSpans(segment.source, localSpanStartIndex);
   const protectedSource = localFormatting.protectedBody;
   const combinedSpans = [...localFormatting.spans, ...segment.spans];
+
+  // TM short-circuit: if a previous run hard-passed translation for this exact
+  // segment source (with the same protected-span IDs), reuse the cached
+  // protectedBody as our draft. Audit + repair still run on top, so a stale or
+  // wrong cached target won't silently leak through. Fingerprinting the raw
+  // segment.source (with placeholder IDs embedded) means hits only fire when
+  // the document layout truly matches — safe for smoke re-runs.
+  const tmKey = tmFingerprint(segment.source);
+  const cachedTm = context.tmStore.get(tmKey);
+  if (cachedTm?.hardPassed) {
+    context.telemetry.emit({
+      ts: Date.now(),
+      runId: context.runId,
+      type: "tm.hit",
+      chunkId: context.chunkId,
+      meta: {
+        segmentIndex: segment.index + 1,
+        sourceChars: segment.source.length,
+        cachedRunId: cachedTm.runId
+      }
+    });
+    const cachedProtectedBody = cachedTm.target;
+    const cachedRestoredBody = restoreMarkdownSpans(cachedProtectedBody, combinedSpans);
+    applySegmentDraft(context.state, segmentId, {
+      protectedSource,
+      protectedBody: cachedProtectedBody,
+      restoredBody: cachedRestoredBody
+    });
+    return {
+      segment,
+      segmentId,
+      promptContext: chunkPromptContext,
+      protectedSource,
+      protectedBody: cachedProtectedBody,
+      restoredBody: cachedRestoredBody,
+      spans: combinedSpans
+    };
+  }
+  context.telemetry.emit({
+    ts: Date.now(),
+    runId: context.runId,
+    type: "tm.miss",
+    chunkId: context.chunkId,
+    meta: { segmentIndex: segment.index + 1 }
+  });
+
   const structuralSegmentDraft = classifyStructuralSegmentDraftStrategy(protectedSource);
 
   report(
