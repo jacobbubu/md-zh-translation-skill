@@ -11,6 +11,7 @@ export type TelemetryEventType =
   | "chunk.end"
   | "chunk.error"
   | "repair.cycle"
+  | "repair.patch"
   | "gate.result"
   | "analysis.shard.start"
   | "analysis.shard.end";
