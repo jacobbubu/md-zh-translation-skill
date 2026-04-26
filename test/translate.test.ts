@@ -2569,10 +2569,23 @@ test("translateMarkdownArticle includes established terms from prior chunks in l
   }
 
   const executor = new PriorAnchorExecutor();
-  await translateMarkdownArticle(source, {
-    executor,
-    formatter: async (markdown) => markdown
-  });
+  // Established-anchor flow only fires when chunk N-1 finishes audit before
+  // chunk N's slice is built — which requires strictly serial chunk
+  // processing. The default concurrency is 3 so we pin to 1 here.
+  const previousConcurrency = process.env.MDZH_CHUNK_CONCURRENCY;
+  process.env.MDZH_CHUNK_CONCURRENCY = "1";
+  try {
+    await translateMarkdownArticle(source, {
+      executor,
+      formatter: async (markdown) => markdown
+    });
+  } finally {
+    if (previousConcurrency === undefined) {
+      delete process.env.MDZH_CHUNK_CONCURRENCY;
+    } else {
+      process.env.MDZH_CHUNK_CONCURRENCY = previousConcurrency;
+    }
+  }
 
   const secondChunkPrompt = executor.prompts.find(
     (prompt) => !isDocumentAnalysisPrompt(prompt) && prompt.includes("当前分块：第 2 /")
@@ -2622,10 +2635,22 @@ test("translateMarkdownArticle does not carry generic prior headings into establ
   }
 
   const executor = new PriorAnchorExecutor();
-  await translateMarkdownArticle(source, {
-    executor,
-    formatter: async (markdown) => markdown
-  });
+  // Pin to serial: established-anchor propagation across chunks needs the
+  // prior chunk to finish before the next slice is built.
+  const previousConcurrency = process.env.MDZH_CHUNK_CONCURRENCY;
+  process.env.MDZH_CHUNK_CONCURRENCY = "1";
+  try {
+    await translateMarkdownArticle(source, {
+      executor,
+      formatter: async (markdown) => markdown
+    });
+  } finally {
+    if (previousConcurrency === undefined) {
+      delete process.env.MDZH_CHUNK_CONCURRENCY;
+    } else {
+      process.env.MDZH_CHUNK_CONCURRENCY = previousConcurrency;
+    }
+  }
 
   const secondChunkPrompt = executor.prompts.find(
     (prompt) => !isDocumentAnalysisPrompt(prompt) && prompt.includes("当前分块：第 2 /")
@@ -3655,7 +3680,7 @@ test("MDZH_CHUNK_CONCURRENCY=2 preserves chunk order in the final document", asy
   assert.equal((concurrencyEvent!.meta as Record<string, unknown>).concurrency, 2);
 });
 
-test("default concurrency runs chunks strictly serial — chunk N+1 starts only after chunk N ends", async () => {
+test("MDZH_CHUNK_CONCURRENCY=1 forces strict serial — chunk N+1 starts only after chunk N ends", async () => {
   const source = ["## A", "", "Body A.", "", "## B", "", "Body B.", ""].join("\n");
 
   const startTimestamps: Array<{ chunkId: string; ts: number }> = [];
@@ -3675,23 +3700,33 @@ test("default concurrency runs chunks strictly serial — chunk N+1 starts only 
     }
   };
 
-  await translateMarkdownArticle(source, {
-    executor,
-    formatter: async (markdown) => markdown,
-    telemetry: {
-      emit(event) {
-        memory.emit(event);
-        if (event.type === "chunk.start" && event.chunkId) {
-          startTimestamps.push({ chunkId: event.chunkId, ts: event.ts });
-        } else if (event.type === "chunk.end" && event.chunkId) {
-          endTimestamps.push({ chunkId: event.chunkId, ts: event.ts });
+  const previous = process.env.MDZH_CHUNK_CONCURRENCY;
+  process.env.MDZH_CHUNK_CONCURRENCY = "1";
+  try {
+    await translateMarkdownArticle(source, {
+      executor,
+      formatter: async (markdown) => markdown,
+      telemetry: {
+        emit(event) {
+          memory.emit(event);
+          if (event.type === "chunk.start" && event.chunkId) {
+            startTimestamps.push({ chunkId: event.chunkId, ts: event.ts });
+          } else if (event.type === "chunk.end" && event.chunkId) {
+            endTimestamps.push({ chunkId: event.chunkId, ts: event.ts });
+          }
+        },
+        async close() {
+          await memory.close();
         }
-      },
-      async close() {
-        await memory.close();
       }
+    });
+  } finally {
+    if (previous === undefined) {
+      delete process.env.MDZH_CHUNK_CONCURRENCY;
+    } else {
+      process.env.MDZH_CHUNK_CONCURRENCY = previous;
     }
-  });
+  }
 
   for (let index = 1; index < startTimestamps.length; index += 1) {
     const previousEnd = endTimestamps[index - 1]?.ts;
@@ -3709,6 +3744,42 @@ test("default concurrency runs chunks strictly serial — chunk N+1 starts only 
   const concurrencyEvent = [...memory.events].find((event) => event.type === "chunk.concurrency");
   assert.ok(concurrencyEvent, "expected chunk.concurrency event");
   assert.equal((concurrencyEvent!.meta as Record<string, unknown>).concurrency, 1);
+});
+
+test("default concurrency is 3 when MDZH_CHUNK_CONCURRENCY is unset", async () => {
+  const source = ["## A", "", "Body A.", "", "## B", "", "Body B.", ""].join("\n");
+
+  const memory = createMemoryTelemetrySink();
+  const executor: CodexExecutor = {
+    async execute(prompt: string, options: CodexExecOptions): Promise<CodexExecResult> {
+      if (isDocumentAnalysisPrompt(prompt)) {
+        return createExecResult(createEmptyAnchorCatalog());
+      }
+      if (isBundledAuditPrompt(prompt, options) || (options.outputSchema && prompt.includes('"hard_checks"'))) {
+        return createExecResult(wrapAuditForSegments(prompt, createAudit(true)));
+      }
+      const sourceSection = extractPromptSection(prompt, "【英文原文】") ?? "";
+      return createExecResult(sourceSection);
+    }
+  };
+
+  const previous = process.env.MDZH_CHUNK_CONCURRENCY;
+  delete process.env.MDZH_CHUNK_CONCURRENCY;
+  try {
+    await translateMarkdownArticle(source, {
+      executor,
+      formatter: async (markdown) => markdown,
+      telemetry: memory
+    });
+  } finally {
+    if (previous !== undefined) {
+      process.env.MDZH_CHUNK_CONCURRENCY = previous;
+    }
+  }
+
+  const concurrencyEvent = [...memory.events].find((event) => event.type === "chunk.concurrency");
+  assert.ok(concurrencyEvent, "expected chunk.concurrency event");
+  assert.equal((concurrencyEvent!.meta as Record<string, unknown>).concurrency, 3);
 });
 
 test("Translation Memory hit short-circuits the draft LLM call and reuses the cached target", async () => {

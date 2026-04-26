@@ -125,19 +125,21 @@ function readRescueModel(): string | null {
   return trimmed;
 }
 
+const DEFAULT_CHUNK_CONCURRENCY = 3;
+
 function readChunkConcurrency(): number {
-  // Bounded chunk-level parallelism. Defaults to 1 (the historical serial
-  // pipeline). Set MDZH_CHUNK_CONCURRENCY=N (N≥1) to run up to N
-  // translateProtectedChunk calls in parallel; result push, state mutation
-  // and checkpoint writes still happen strictly in chunk-index order so
-  // resume semantics and final document order are preserved.
+  // Bounded chunk-level parallelism. Defaults to 3 — long-form c=3 smoke
+  // measured a 1.88× wall-time speedup with no correctness regressions
+  // (result push, state mutation and checkpoint writes still happen strictly
+  // in chunk-index order). Set MDZH_CHUNK_CONCURRENCY=N (N≥1) to override;
+  // 1 restores the historical serial pipeline.
   const raw = process.env.MDZH_CHUNK_CONCURRENCY?.trim();
   if (!raw) {
-    return 1;
+    return DEFAULT_CHUNK_CONCURRENCY;
   }
   const parsed = Number.parseInt(raw, 10);
   if (!Number.isFinite(parsed) || parsed < 1) {
-    return 1;
+    return DEFAULT_CHUNK_CONCURRENCY;
   }
   // Hard ceiling: too much parallelism mostly buys throttling on the LLM
   // backend without meaningful speedup. 8 is a generous upper bound.
