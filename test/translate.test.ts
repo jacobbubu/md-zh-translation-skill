@@ -3950,7 +3950,47 @@ test("MDZH_RESCUE_MODEL surfaces the original error when the rescue also fails",
   assert.equal((rescueEnd!.meta as Record<string, unknown>).success, false);
 });
 
-test("default behavior: no MDZH_RESCUE_MODEL means no rescue attempt", async () => {
+test("default behavior: rescue defaults to gpt-5.5 when MDZH_RESCUE_MODEL is unset", async () => {
+  const source = "## Hello\n\nWorld.\n";
+
+  const executor: CodexExecutor = {
+    async execute(prompt: string, options: CodexExecOptions): Promise<CodexExecResult> {
+      if (isDocumentAnalysisPrompt(prompt)) {
+        return createExecResult(createEmptyAnchorCatalog());
+      }
+      if (isBundledAuditPrompt(prompt, options) || (options.outputSchema && prompt.includes('"hard_checks"'))) {
+        return createExecResult(wrapAuditForSegments(prompt, createAudit(true)));
+      }
+      const sourceSection = extractPromptSection(prompt, "【英文原文】") ?? "";
+      // Primary mini draft fails; the default rescue model recovers it.
+      if (options.model === "gpt-5.5") {
+        return createExecResult(sourceSection.replace("World.", "世界。"));
+      }
+      throw new CodexExecutionError("primary draft fail");
+    }
+  };
+
+  const previous = process.env.MDZH_RESCUE_MODEL;
+  delete process.env.MDZH_RESCUE_MODEL;
+  const sink = createMemoryTelemetrySink();
+  try {
+    await translateMarkdownArticle(source, {
+      executor,
+      formatter: async (markdown) => markdown,
+      telemetry: sink
+    });
+  } finally {
+    if (previous !== undefined) {
+      process.env.MDZH_RESCUE_MODEL = previous;
+    }
+  }
+
+  const rescueStart = [...sink.events].find((event) => event.type === "chunk.rescue.start");
+  assert.ok(rescueStart, "default rescue should fire when MDZH_RESCUE_MODEL is unset");
+  assert.equal((rescueStart!.meta as Record<string, unknown>).rescueModel, "gpt-5.5");
+});
+
+test("MDZH_RESCUE_MODEL=off explicitly disables rescue", async () => {
   const source = "## Hello\n\nWorld.\n";
 
   const executor: CodexExecutor = {
@@ -3966,7 +4006,7 @@ test("default behavior: no MDZH_RESCUE_MODEL means no rescue attempt", async () 
   };
 
   const previous = process.env.MDZH_RESCUE_MODEL;
-  delete process.env.MDZH_RESCUE_MODEL;
+  process.env.MDZH_RESCUE_MODEL = "off";
   const sink = createMemoryTelemetrySink();
   try {
     await assert.rejects(() =>
@@ -3977,12 +4017,14 @@ test("default behavior: no MDZH_RESCUE_MODEL means no rescue attempt", async () 
       })
     );
   } finally {
-    if (previous !== undefined) {
+    if (previous === undefined) {
+      delete process.env.MDZH_RESCUE_MODEL;
+    } else {
       process.env.MDZH_RESCUE_MODEL = previous;
     }
   }
 
   const rescueEvents = [...sink.events].filter((event) => event.type.startsWith("chunk.rescue"));
-  assert.equal(rescueEvents.length, 0, "no rescue events should fire when MDZH_RESCUE_MODEL is unset");
+  assert.equal(rescueEvents.length, 0, "no rescue events should fire when MDZH_RESCUE_MODEL=off");
 });
 

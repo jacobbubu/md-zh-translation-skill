@@ -97,17 +97,32 @@ import {
 const DEFAULT_MODEL = "gpt-5.4-mini";
 const MAX_REPAIR_CYCLES = 2;
 
+const DEFAULT_RESCUE_MODEL = "gpt-5.5";
+
 function readRescueModel(): string | null {
-  // Optional stronger fallback model. When set, a chunk that exhausts its
-  // normal draft+audit+repair cycle and would otherwise throw HardGateError
-  // (or fail soft-gate's structural carve-out) is retried once end-to-end
-  // with this model substituted for both draftModel and postDraftModel. If
-  // the rescue also fails, the original error propagates.
-  const raw = process.env.MDZH_RESCUE_MODEL?.trim();
-  if (!raw) {
+  // Stronger fallback model used when a chunk exhausts its normal
+  // draft+audit+repair cycle and would otherwise throw HardGateError. The
+  // chunk is retried once end-to-end with this model substituted for both
+  // draftModel and postDraftModel; if the rescue also fails, the original
+  // error propagates.
+  //
+  // Defaults to `gpt-5.5` because long-form smoke validates that this model
+  // recovers list-content / structural failures the mini default reliably
+  // can't. To disable rescue entirely set MDZH_RESCUE_MODEL to an empty
+  // string or any of `off` / `none` / `false` / `0`.
+  const raw = process.env.MDZH_RESCUE_MODEL;
+  if (raw === undefined) {
+    return DEFAULT_RESCUE_MODEL;
+  }
+  const trimmed = raw.trim();
+  if (trimmed === "") {
     return null;
   }
-  return raw;
+  const lower = trimmed.toLowerCase();
+  if (lower === "off" || lower === "none" || lower === "false" || lower === "0") {
+    return null;
+  }
+  return trimmed;
 }
 
 function readChunkConcurrency(): number {
