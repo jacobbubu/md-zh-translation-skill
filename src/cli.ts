@@ -86,12 +86,13 @@ Performance knobs:
     only when a chunk hard-passes. Use it to short-circuit identical re-runs
     (e.g. iterating on the same fixture). Audit and repair still run on TM
     hits, so a stale entry can't silently leak through.
-  - MDZH_RESCUE_MODEL=<model-id> enables a stronger fallback model. When a
+  - MDZH_RESCUE_MODEL=<model-id> overrides the rescue fallback model. When a
     chunk exhausts its draft+audit+repair cycle and would otherwise throw
     HardGateError, the chunk is retried once end-to-end with this model
     substituted for both draft and post-draft. If the rescue also fails the
-    original error is reported. Trades cost & wall time for stability on
-    flaky chunks.
+    original error is reported. Defaults to \`gpt-5.5\`; set to an empty
+    string or \`off\` / \`none\` / \`false\` / \`0\` to disable rescue entirely.
+    Trades cost & wall time for stability on flaky chunks.
 
 Exit codes:
   0  Success (may include soft-gate degraded output; see stderr for warnings).
