@@ -75,10 +75,10 @@ Telemetry:
     event; useful for offline analysis of latency, token usage, and repair behavior.
 
 Performance knobs:
-  - MDZH_CHUNK_CONCURRENCY=<N> (default 1, max 8) runs up to N
+  - MDZH_CHUNK_CONCURRENCY=<N> (default 3, max 8) runs up to N
     translateProtectedChunk calls in parallel. Result push, state mutation and
     checkpoint writes still happen in chunk-index order, so the final document
-    and resume semantics are unchanged.
+    and resume semantics are unchanged. Set to 1 to restore strict serial.
   - MDZH_REPAIR_PATCH_LANE=false disables the structured repair-target patch
     lane and forces the historical full-segment LLM rewrite for every repair.
   - MDZH_TM_PATH=<path> enables segment-level translation memory at <path>
