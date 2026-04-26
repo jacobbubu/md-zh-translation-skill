@@ -3847,3 +3847,142 @@ test("Translation Memory miss event fires when no entry exists for the segment",
   void tmFingerprint;
 });
 
+test("MDZH_RESCUE_MODEL retries a failed chunk with the rescue model and recovers", async () => {
+  const source = "## Hello\n\nWorld.\n";
+
+  let primaryDraftCalls = 0;
+  let rescueDraftCalls = 0;
+
+  const executor: CodexExecutor = {
+    async execute(prompt: string, options: CodexExecOptions): Promise<CodexExecResult> {
+      if (isDocumentAnalysisPrompt(prompt)) {
+        return createExecResult(createEmptyAnchorCatalog());
+      }
+      if (isBundledAuditPrompt(prompt, options) || (options.outputSchema && prompt.includes('"hard_checks"'))) {
+        return createExecResult(wrapAuditForSegments(prompt, createAudit(true)));
+      }
+      const sourceSection = extractPromptSection(prompt, "【英文原文】") ?? "";
+      if (options.model === "rescue-strong") {
+        rescueDraftCalls += 1;
+        return createExecResult(sourceSection.replace("World.", "世界。"));
+      }
+      primaryDraftCalls += 1;
+      throw new CodexExecutionError("primary draft synthetic failure");
+    }
+  };
+
+  const previous = process.env.MDZH_RESCUE_MODEL;
+  process.env.MDZH_RESCUE_MODEL = "rescue-strong";
+  const sink = createMemoryTelemetrySink();
+  try {
+    await translateMarkdownArticle(source, {
+      executor,
+      formatter: async (markdown) => markdown,
+      telemetry: sink
+    });
+  } finally {
+    if (previous === undefined) {
+      delete process.env.MDZH_RESCUE_MODEL;
+    } else {
+      process.env.MDZH_RESCUE_MODEL = previous;
+    }
+  }
+
+  assert.ok(primaryDraftCalls > 0, "primary draft must have been attempted first");
+  assert.ok(rescueDraftCalls > 0, "rescue draft must have been called after primary failed");
+
+  const rescueStart = [...sink.events].find((event) => event.type === "chunk.rescue.start");
+  assert.ok(rescueStart, "expected chunk.rescue.start event");
+  const rescueEnd = [...sink.events].find((event) => event.type === "chunk.rescue.end");
+  assert.ok(rescueEnd, "expected chunk.rescue.end event");
+  assert.equal((rescueEnd!.meta as Record<string, unknown>).success, true);
+});
+
+test("MDZH_RESCUE_MODEL surfaces the original error when the rescue also fails", async () => {
+  const source = "## Hello\n\nWorld.\n";
+
+  let primaryDraftCalls = 0;
+  let rescueDraftCalls = 0;
+
+  const executor: CodexExecutor = {
+    async execute(prompt: string, options: CodexExecOptions): Promise<CodexExecResult> {
+      if (isDocumentAnalysisPrompt(prompt)) {
+        return createExecResult(createEmptyAnchorCatalog());
+      }
+      if (isBundledAuditPrompt(prompt, options) || (options.outputSchema && prompt.includes('"hard_checks"'))) {
+        return createExecResult(wrapAuditForSegments(prompt, createAudit(true)));
+      }
+      if (options.model === "rescue-strong") {
+        rescueDraftCalls += 1;
+        throw new CodexExecutionError("rescue draft synthetic failure");
+      }
+      primaryDraftCalls += 1;
+      throw new CodexExecutionError("primary draft synthetic failure");
+    }
+  };
+
+  const previous = process.env.MDZH_RESCUE_MODEL;
+  process.env.MDZH_RESCUE_MODEL = "rescue-strong";
+  const sink = createMemoryTelemetrySink();
+  try {
+    await assert.rejects(
+      () =>
+        translateMarkdownArticle(source, {
+          executor,
+          formatter: async (markdown) => markdown,
+          telemetry: sink
+        }),
+      (error: unknown) =>
+        error instanceof CodexExecutionError && /primary draft synthetic failure/.test(error.message)
+    );
+  } finally {
+    if (previous === undefined) {
+      delete process.env.MDZH_RESCUE_MODEL;
+    } else {
+      process.env.MDZH_RESCUE_MODEL = previous;
+    }
+  }
+
+  assert.ok(primaryDraftCalls > 0, "primary draft must have been attempted first");
+  assert.ok(rescueDraftCalls > 0, "rescue draft must have been attempted before failing the run");
+  const rescueEnd = [...sink.events].find((event) => event.type === "chunk.rescue.end");
+  assert.ok(rescueEnd, "expected chunk.rescue.end event");
+  assert.equal((rescueEnd!.meta as Record<string, unknown>).success, false);
+});
+
+test("default behavior: no MDZH_RESCUE_MODEL means no rescue attempt", async () => {
+  const source = "## Hello\n\nWorld.\n";
+
+  const executor: CodexExecutor = {
+    async execute(prompt: string, options: CodexExecOptions): Promise<CodexExecResult> {
+      if (isDocumentAnalysisPrompt(prompt)) {
+        return createExecResult(createEmptyAnchorCatalog());
+      }
+      if (isBundledAuditPrompt(prompt, options) || (options.outputSchema && prompt.includes('"hard_checks"'))) {
+        return createExecResult(wrapAuditForSegments(prompt, createAudit(true)));
+      }
+      throw new CodexExecutionError("draft fail");
+    }
+  };
+
+  const previous = process.env.MDZH_RESCUE_MODEL;
+  delete process.env.MDZH_RESCUE_MODEL;
+  const sink = createMemoryTelemetrySink();
+  try {
+    await assert.rejects(() =>
+      translateMarkdownArticle(source, {
+        executor,
+        formatter: async (markdown) => markdown,
+        telemetry: sink
+      })
+    );
+  } finally {
+    if (previous !== undefined) {
+      process.env.MDZH_RESCUE_MODEL = previous;
+    }
+  }
+
+  const rescueEvents = [...sink.events].filter((event) => event.type.startsWith("chunk.rescue"));
+  assert.equal(rescueEvents.length, 0, "no rescue events should fire when MDZH_RESCUE_MODEL is unset");
+});
+

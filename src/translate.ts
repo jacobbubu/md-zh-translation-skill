@@ -97,6 +97,19 @@ import {
 const DEFAULT_MODEL = "gpt-5.4-mini";
 const MAX_REPAIR_CYCLES = 2;
 
+function readRescueModel(): string | null {
+  // Optional stronger fallback model. When set, a chunk that exhausts its
+  // normal draft+audit+repair cycle and would otherwise throw HardGateError
+  // (or fail soft-gate's structural carve-out) is retried once end-to-end
+  // with this model substituted for both draftModel and postDraftModel. If
+  // the rescue also fails, the original error propagates.
+  const raw = process.env.MDZH_RESCUE_MODEL?.trim();
+  if (!raw) {
+    return null;
+  }
+  return raw;
+}
+
 function readChunkConcurrency(): number {
   // Bounded chunk-level parallelism. Defaults to 1 (the historical serial
   // pipeline). Set MDZH_CHUNK_CONCURRENCY=N (N≥1) to run up to N
@@ -2884,7 +2897,71 @@ export async function translateMarkdownArticle(source: string, options: Translat
         // structurally complete document, just with the failed chunk left in
         // its English / partial form. Quality checker will surface this.
         const errorMessage = error instanceof Error ? error.message : String(error);
-        if (!options.softGate || isStructuralHardGateError(error)) {
+        const rescueModel = readRescueModel();
+        let rescuedResult: ChunkTranslationResult | null = null;
+        if (rescueModel && rescueModel !== draftModel && rescueModel !== postDraftModel) {
+          const rescueStartedAt = Date.now();
+          telemetry.emit({
+            ts: rescueStartedAt,
+            runId,
+            type: "chunk.rescue.start",
+            chunkId,
+            meta: {
+              chunkIndex: chunk.index + 1,
+              originalError: errorMessage,
+              rescueModel
+            }
+          });
+          report(
+            options,
+            "draft",
+            `Chunk ${chunk.index + 1}/${chunkPlan.chunks.length} (${chunk.headingPath.join(" > ") || "untitled"}): retrying with rescue model ${rescueModel} after ${errorMessage}`
+          );
+          try {
+            rescuedResult = await translateProtectedChunk(chunk, chunkPlan, {
+              state,
+              chunkId,
+              cwd,
+              executor,
+              draftModel: rescueModel,
+              postDraftModel: rescueModel,
+              options,
+              sourcePathHint,
+              spanIndex,
+              nextLocalSpanIndex,
+              draftReasoningEffort: DRAFT_REASONING_EFFORT as ReasoningEffort,
+              postDraftReasoningEffort,
+              runId,
+              telemetry,
+              tmStore
+            });
+            telemetry.emit({
+              ts: Date.now(),
+              runId,
+              type: "chunk.rescue.end",
+              chunkId,
+              durationMs: Date.now() - rescueStartedAt,
+              meta: { rescueModel, success: true }
+            });
+          } catch (rescueError) {
+            const rescueMessage =
+              rescueError instanceof Error ? rescueError.message : String(rescueError);
+            telemetry.emit({
+              ts: Date.now(),
+              runId,
+              type: "chunk.rescue.end",
+              chunkId,
+              durationMs: Date.now() - rescueStartedAt,
+              error: rescueMessage,
+              meta: { rescueModel, success: false }
+            });
+            rescuedResult = null;
+          }
+        }
+
+        if (rescuedResult) {
+          chunkResult = rescuedResult;
+        } else if (!options.softGate || isStructuralHardGateError(error)) {
           telemetry.emit({
             ts: Date.now(),
             runId,
@@ -2901,33 +2978,34 @@ export async function translateMarkdownArticle(source: string, options: Translat
             cancelError = error;
           }
           return;
+        } else {
+          telemetry.emit({
+            ts: Date.now(),
+            runId,
+            type: "chunk.error",
+            chunkId,
+            durationMs: Date.now() - chunkStartedAt,
+            error: errorMessage,
+            meta: { recovered: true, structural: false }
+          });
+          report(
+            options,
+            "audit",
+            `Chunk ${chunk.index + 1}/${chunkPlan.chunks.length} (${chunk.headingPath.join(" > ") || "untitled"}): soft-gate caught chunk failure (${errorMessage}); falling back to source content.`
+          );
+          // Pass only spans whose placeholder ID appears in this chunk's source
+          // — restoreMarkdownSpans throws if asked to restore a span absent from
+          // the body, and the document-wide `spans` includes IDs from other
+          // chunks.
+          const chunkSpans = spans.filter((span) => chunk.source.includes(span.id));
+          const fallbackBody = restoreMarkdownSpans(chunk.source, chunkSpans);
+          chunkResult = {
+            body: fallbackBody,
+            repairCyclesUsed: 0,
+            gateAudit: createSyntheticChunkFailureAudit(errorMessage),
+            nextLocalSpanIndex
+          };
         }
-        telemetry.emit({
-          ts: Date.now(),
-          runId,
-          type: "chunk.error",
-          chunkId,
-          durationMs: Date.now() - chunkStartedAt,
-          error: errorMessage,
-          meta: { recovered: true, structural: false }
-        });
-        report(
-          options,
-          "audit",
-          `Chunk ${chunk.index + 1}/${chunkPlan.chunks.length} (${chunk.headingPath.join(" > ") || "untitled"}): soft-gate caught chunk failure (${errorMessage}); falling back to source content.`
-        );
-        // Pass only spans whose placeholder ID appears in this chunk's source
-        // — restoreMarkdownSpans throws if asked to restore a span absent from
-        // the body, and the document-wide `spans` includes IDs from other
-        // chunks.
-        const chunkSpans = spans.filter((span) => chunk.source.includes(span.id));
-        const fallbackBody = restoreMarkdownSpans(chunk.source, chunkSpans);
-        chunkResult = {
-          body: fallbackBody,
-          repairCyclesUsed: 0,
-          gateAudit: createSyntheticChunkFailureAudit(errorMessage),
-          nextLocalSpanIndex
-        };
       }
 
       telemetry.emit({
