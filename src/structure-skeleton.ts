@@ -56,29 +56,53 @@ function countListItems(content: string): number {
 
 /**
  * Parse a markdown body into a structural skeleton: a flat sequence of
- * blocks with kind + size info. Splits on blank-line boundaries (matching
- * `splitPromptBlocks`'s convention) so blocks like a list group + its
- * surrounding prose stay distinguishable.
+ * blocks with kind + size info. Splits on blank-line boundaries first
+ * (matching `splitPromptBlocks`'s convention), then coalesces runs of
+ * adjacent list-block fragments into a single logical list block.
+ *
+ * The coalescing step matters because the spec-driven fixture (and other
+ * Medium-flavor exports) writes bullets with blank lines between each item:
+ *
+ *     - Specs are version-controlled
+ *
+ *     - Linked to code that implements them
+ *
+ *     - Every PR references a spec
+ *
+ * Naive blank-line splitting yields 3 separate `list(1)` blocks, which makes
+ * "an extra bullet appeared" indistinguishable from "an extra paragraph
+ * appeared at the tail". Coalescing produces one `list(3)` block instead,
+ * so list count overflow gets detected directly and tail-block trimming
+ * doesn't over-eagerly remove unrelated trailing prose.
  */
 export function parseStructure(text: string): StructuralSkeleton {
   if (!text || !text.trim()) {
     return [];
   }
-  const blocks: StructuralBlock[] = [];
   const rawBlocks = text
     .split(/\n{2,}/)
     .map((block) => block.replace(/\s+$/, ""))
     .filter((block) => block.trim().length > 0);
+
+  const blocks: StructuralBlock[] = [];
   for (const raw of rawBlocks) {
     const trimmed = raw.trim();
     const kind = classifyBlockKind(trimmed);
+    const items = kind === "list" ? countListItems(trimmed) : 0;
+    const lastBlock = blocks[blocks.length - 1];
+    if (kind === "list" && lastBlock?.kind === "list") {
+      lastBlock.listItemCount = (lastBlock.listItemCount ?? 0) + items;
+      lastBlock.charLen += trimmed.length;
+      lastBlock.lineCount += trimmed.split(/\r?\n/).length;
+      continue;
+    }
     const block: StructuralBlock = {
       kind,
       charLen: trimmed.length,
       lineCount: trimmed.split(/\r?\n/).length
     };
     if (kind === "list") {
-      block.listItemCount = countListItems(trimmed);
+      block.listItemCount = items;
     }
     blocks.push(block);
   }
@@ -177,7 +201,6 @@ export function planListOverflowTrim(
   return null;
 }
 
-const RAW_BLOCK_SEPARATOR = "\n\n";
 const PROTECTED_PLACEHOLDER_PATTERN = /@@MDZH_[A-Z_]+_\d{4}@@/g;
 
 function countProtectedPlaceholders(text: string): number {
@@ -189,78 +212,110 @@ function countProtectedPlaceholders(text: string): number {
   return count;
 }
 
-function rawBlocksOf(text: string): string[] {
-  if (!text) {
-    return [];
+type LogicalBlockRange = {
+  /** index of the logical block in the skeleton (parseStructure output) */
+  index: number;
+  kind: StructuralBlockKind;
+  startLine: number;
+  /** inclusive */
+  endLine: number;
+};
+
+/**
+ * Walk lines and produce per-logical-block line ranges. Consecutive list
+ * runs (with blank lines between them) get coalesced into one logical block,
+ * matching parseStructure's coalescing rule. Used by the tail / overflow
+ * trim helpers so they operate on the same boundaries the skeleton sees.
+ */
+function findLogicalBlockRanges(text: string): LogicalBlockRange[] {
+  const lines = text.split(/\r?\n/);
+  const ranges: LogicalBlockRange[] = [];
+  let i = 0;
+  while (i < lines.length) {
+    if (lines[i]!.trim().length === 0) {
+      i += 1;
+      continue;
+    }
+    const runStart = i;
+    const runKind = classifyBlockKind(lines[i]!);
+    let runEnd = i;
+    while (runEnd < lines.length && lines[runEnd]!.trim().length > 0) {
+      runEnd += 1;
+    }
+    const last = ranges[ranges.length - 1];
+    if (runKind === "list" && last?.kind === "list") {
+      // Coalesce adjacent list run into the previous logical list block.
+      last.endLine = runEnd - 1;
+    } else {
+      ranges.push({
+        index: ranges.length,
+        kind: runKind,
+        startLine: runStart,
+        endLine: runEnd - 1
+      });
+    }
+    i = runEnd + 1;
   }
-  return text.split(/\n{2,}/).map((block) => block.replace(/\s+$/, ""));
+  return ranges;
 }
 
 function applyTailTrim(text: string, draftSkeleton: StructuralSkeleton, dropFrom: number): string {
-  const rawBlocks = rawBlocksOf(text);
-  const nonEmptyIndices: number[] = [];
-  for (let i = 0; i < rawBlocks.length; i += 1) {
-    if (rawBlocks[i]!.trim().length > 0) {
-      nonEmptyIndices.push(i);
-    }
-  }
-  if (dropFrom >= nonEmptyIndices.length) {
+  void draftSkeleton;
+  const ranges = findLogicalBlockRanges(text);
+  if (dropFrom >= ranges.length) {
     return text;
   }
-  void draftSkeleton;
-  const cutAt = nonEmptyIndices[dropFrom]!;
-  return rawBlocks.slice(0, cutAt).join(RAW_BLOCK_SEPARATOR).replace(/\s+$/u, "");
+  const cutAtLine = ranges[dropFrom]!.startLine;
+  const lines = text.split(/\r?\n/);
+  return lines.slice(0, cutAtLine).join("\n").replace(/\s+$/u, "");
 }
 
 function applyListItemTrim(text: string, blockIndex: number, keepItems: number): string {
-  const rawBlocks = rawBlocksOf(text);
-  let nonEmptyCounter = -1;
-  for (let i = 0; i < rawBlocks.length; i += 1) {
-    if (rawBlocks[i]!.trim().length === 0) {
-      continue;
-    }
-    nonEmptyCounter += 1;
-    if (nonEmptyCounter !== blockIndex) {
-      continue;
-    }
-    const lines = rawBlocks[i]!.split(/\r?\n/);
-    const keptLines: string[] = [];
-    let kept = 0;
-    let stopAfter = false;
-    for (const line of lines) {
-      if (LIST_ITEM_LINE_PATTERN.test(line)) {
-        if (stopAfter) {
-          continue;
-        }
-        if (kept < keepItems) {
-          keptLines.push(line);
-          kept += 1;
-          if (kept >= keepItems) {
-            stopAfter = true;
-          }
-          continue;
-        }
-        // Excess list item: skip.
-        continue;
-      }
-      if (stopAfter) {
-        // After the kept items end, drop trailing list-only filler (blank
-        // lines between bullets get collapsed).
-        if (line.trim().length === 0) {
-          continue;
-        }
-        // Anything non-bullet after the kept items breaks the trim window —
-        // we don't want to swallow legitimate prose. Stop trimming here.
-        stopAfter = false;
-        keptLines.push(line);
-        continue;
-      }
-      keptLines.push(line);
-    }
-    rawBlocks[i] = keptLines.join("\n").replace(/\s+$/u, "");
-    break;
+  const ranges = findLogicalBlockRanges(text);
+  if (blockIndex >= ranges.length || ranges[blockIndex]!.kind !== "list") {
+    return text;
   }
-  return rawBlocks.join(RAW_BLOCK_SEPARATOR).replace(/\s+$/u, "");
+  const target = ranges[blockIndex]!;
+  const lines = text.split(/\r?\n/);
+  const out: string[] = [];
+  for (let j = 0; j < target.startLine; j += 1) {
+    out.push(lines[j]!);
+  }
+  let kept = 0;
+  let trailingBlankSkipped = false;
+  for (let j = target.startLine; j <= target.endLine; j += 1) {
+    const line = lines[j]!;
+    if (LIST_ITEM_LINE_PATTERN.test(line)) {
+      if (kept < keepItems) {
+        out.push(line);
+        kept += 1;
+        trailingBlankSkipped = false;
+      }
+      // else: drop excess bullet
+      continue;
+    }
+    if (line.trim().length === 0) {
+      if (kept < keepItems) {
+        out.push(line);
+      } else if (!trailingBlankSkipped) {
+        // After we've kept the last bullet we want, drop any trailing blank
+        // lines that were sitting between bullets (avoids orphan blanks).
+        trailingBlankSkipped = true;
+      }
+      continue;
+    }
+    // Non-bullet, non-blank line inside what parseStructure called a list
+    // block: typically a continuation line indented under a bullet. Keep
+    // it iff we haven't yet hit the keep limit OR it directly follows a
+    // kept bullet.
+    if (kept <= keepItems) {
+      out.push(line);
+    }
+  }
+  for (let j = target.endLine + 1; j < lines.length; j += 1) {
+    out.push(lines[j]!);
+  }
+  return out.join("\n").replace(/\s+$/u, "");
 }
 
 /**

@@ -226,3 +226,81 @@ test("alignDraftToSourceSkeleton trims when no placeholders are touched", () => 
   const placeholderCount = (aligned.match(/@@MDZH_LINK_DESTINATION_0001@@/g) ?? []).length;
   assert.equal(placeholderCount, 1);
 });
+
+test("parseStructure coalesces blank-separated bullets into a single list block", () => {
+  // Spec-driven / Medium-flavor pattern: bullets with blank lines between
+  // each item. Without coalescing, the skeleton sees N list(1) blocks and
+  // aligner misidentifies "list overflow" as "tail block extra paragraph".
+  const text = [
+    "Lead-in.",
+    "",
+    "- a",
+    "",
+    "- b",
+    "",
+    "- c",
+    "",
+    "Closing line.",
+    ""
+  ].join("\n");
+  const skel = parseStructure(text);
+  assert.equal(skel.length, 3, `expected 3 logical blocks, got ${skel.length}`);
+  assert.equal(skel[0]!.kind, "paragraph");
+  assert.equal(skel[1]!.kind, "list");
+  assert.equal(skel[1]!.listItemCount, 3);
+  assert.equal(skel[2]!.kind, "paragraph");
+});
+
+test("alignDraftToSourceSkeleton handles middle list overflow + tail prose dup (chunk 13 pattern)", () => {
+  // Mirror spec-driven §The Tools With Specs subsection (L378-390 of fixture).
+  // Draft adds 1 extra middle bullet AND duplicates the italic caption at
+  // the tail — exact spec8 chunk-13 failure pattern. Aligner must trim to
+  // bullet count = 4 AND drop the duplicate tail caption.
+  const source = [
+    "This way:",
+    "",
+    "- Specs are version-controlled",
+    "",
+    "- Linked to code that implements them",
+    "",
+    "- Every PR references a spec",
+    "",
+    "- Nothing gets lost",
+    "",
+    "![](@@MDZH_IMAGE_DESTINATION_0007@@)",
+    "",
+    "*How we can use the templates and it is easy to use*",
+    ""
+  ].join("\n");
+  const draft = [
+    "这样：",
+    "",
+    "- 规格被版本化",
+    "",
+    "- 链接到实现它的代码",
+    "",
+    "- 每个 PR 都引用一份规格",
+    "",
+    "- 不会丢失任何内容",
+    "",
+    "- 不会丢失任何内容",
+    "",
+    "![](@@MDZH_IMAGE_DESTINATION_0007@@)",
+    "",
+    "*如何使用模板，简单易用*",
+    "",
+    "*如何使用模板，简单易用*",
+    ""
+  ].join("\n");
+
+  const aligned = alignDraftToSourceSkeleton(source, draft);
+  const skel = parseStructure(aligned);
+
+  assert.equal(skel.length, 4, `expected 4 logical blocks, got ${skel.length}`);
+  assert.equal(skel[1]!.kind, "list");
+  assert.equal(skel[1]!.listItemCount, 4);
+  const italicLines = aligned.split("\n").filter((line) => line.startsWith("*如何"));
+  assert.equal(italicLines.length, 1);
+  const placeholderCount = (aligned.match(/@@MDZH_IMAGE_DESTINATION_0007@@/g) ?? []).length;
+  assert.equal(placeholderCount, 1);
+});
