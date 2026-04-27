@@ -5,6 +5,7 @@ import {
   alignDraftToSourceSkeleton,
   parseStructure,
   planListOverflowTrim,
+  planLiteralLineDedup,
   planTailTrim,
   type StructuralSkeleton
 } from "../src/structure-skeleton.js";
@@ -249,6 +250,85 @@ test("parseStructure coalesces blank-separated bullets into a single list block"
   assert.equal(skel[1]!.kind, "list");
   assert.equal(skel[1]!.listItemCount, 3);
   assert.equal(skel[2]!.kind, "paragraph");
+});
+
+test("planLiteralLineDedup flags literal-line duplicates inside an embedded type-signature template (chunk 7 pattern)", () => {
+  // Source has User { ... } and Photo { ... } blocks where `fileName: string`
+  // appears exactly once (only inside Photo). The model accidentally re-emits
+  // that line a second time inside the User block.
+  const source = [
+    "type User = {",
+    "  id: string;",
+    "  name: string;",
+    "};",
+    "",
+    "type Photo = {",
+    "  id: string;",
+    "  fileName: string;",
+    "};",
+    ""
+  ].join("\n");
+  const draft = [
+    "type User = {",
+    "  id: string;",
+    "  name: string;",
+    "  fileName: string;",
+    "};",
+    "",
+    "type Photo = {",
+    "  id: string;",
+    "  fileName: string;",
+    "};",
+    ""
+  ].join("\n");
+
+  const plan = planLiteralLineDedup(source, draft);
+  assert.ok(plan, "expected a literal-line dedup plan");
+  assert.equal(plan!.removeAtIndices.length, 1);
+
+  const aligned = alignDraftToSourceSkeleton(source, draft);
+  const occurrences = aligned.split("\n").filter((line) => line.trim() === "fileName: string;").length;
+  assert.equal(occurrences, 1, `expected exactly 1 \`fileName: string;\` line, got ${occurrences}`);
+});
+
+test("planLiteralLineDedup leaves translation-side text alone even if it repeats", () => {
+  // Source is English; draft is Chinese with a duplicated Chinese line. None of
+  // the duplicated draft lines appear in source verbatim, so literal dedup
+  // must NOT touch them — that's the n-gram dedup's job, not literal dedup's.
+  const source = "Lead-in.\n\nThis is a long sentence that explains something.\n";
+  const draft = [
+    "导语。",
+    "",
+    "这是一句解释什么的长句。",
+    "这是一句解释什么的长句。",
+    ""
+  ].join("\n");
+
+  const plan = planLiteralLineDedup(source, draft);
+  assert.equal(plan, null, "literal dedup should not flag draft-only text");
+});
+
+test("alignDraftToSourceSkeleton's literal-line dedup respects placeholder guard", () => {
+  // Source has a single line with a placeholder; draft duplicates that exact
+  // line. Removing the duplicate would drop one placeholder occurrence, so
+  // the placeholder guard must roll the trim back.
+  const source = [
+    "Lead-in.",
+    "",
+    "See [doc](@@MDZH_LINK_DESTINATION_0001@@).",
+    ""
+  ].join("\n");
+  const draft = [
+    "Lead-in.",
+    "",
+    "See [doc](@@MDZH_LINK_DESTINATION_0001@@).",
+    "See [doc](@@MDZH_LINK_DESTINATION_0001@@).",
+    ""
+  ].join("\n");
+
+  const aligned = alignDraftToSourceSkeleton(source, draft);
+  const placeholderCount = (aligned.match(/@@MDZH_LINK_DESTINATION_0001@@/g) ?? []).length;
+  assert.equal(placeholderCount, 2, "guard must keep all placeholders intact");
 });
 
 test("alignDraftToSourceSkeleton handles middle list overflow + tail prose dup (chunk 13 pattern)", () => {
