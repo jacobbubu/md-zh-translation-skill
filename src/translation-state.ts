@@ -12,7 +12,8 @@ export type AuditCheckKey =
   | "numbers_units_logic"
   | "chinese_punctuation"
   | "unit_conversion_boundary"
-  | "protected_span_integrity";
+  | "protected_span_integrity"
+  | "embedded_template_integrity";
 
 export type HardCheckState = {
   pass: boolean;
@@ -77,6 +78,7 @@ export type RepairFailureType =
   | "chinese_punctuation"
   | "unit_conversion_boundary"
   | "protected_span_integrity"
+  | "embedded_template_integrity"
   | "other";
 
 export type StructuredRepairTarget = {

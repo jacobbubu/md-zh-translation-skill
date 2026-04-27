@@ -74,7 +74,8 @@ test("translation state tracks first-occurrence anchors and repeat anchors acros
       numbers_units_logic: { pass: true, problem: "" },
       chinese_punctuation: { pass: true, problem: "" },
       unit_conversion_boundary: { pass: true, problem: "" },
-      protected_span_integrity: { pass: true, problem: "" }
+      protected_span_integrity: { pass: true, problem: "" },
+      embedded_template_integrity: { pass: true, problem: "" }
     },
     repairTasks: [],
     rawMustFix: []
@@ -119,7 +120,8 @@ test("translation state keeps repair tasks bound to the target segment only", ()
       numbers_units_logic: { pass: true, problem: "" },
       chinese_punctuation: { pass: true, problem: "" },
       unit_conversion_boundary: { pass: true, problem: "" },
-      protected_span_integrity: { pass: true, problem: "" }
+      protected_span_integrity: { pass: true, problem: "" },
+      embedded_template_integrity: { pass: true, problem: "" }
     },
     repairTasks: [
       {
@@ -179,7 +181,8 @@ test("translation state carries sentence-local repair constraints into the promp
       numbers_units_logic: { pass: true, problem: "" },
       chinese_punctuation: { pass: true, problem: "" },
       unit_conversion_boundary: { pass: true, problem: "" },
-      protected_span_integrity: { pass: true, problem: "" }
+      protected_span_integrity: { pass: true, problem: "" },
+      embedded_template_integrity: { pass: true, problem: "" }
     },
     repairTasks: [
       {
@@ -453,7 +456,8 @@ test("translation state links pending repairs to matching analysis IR plans", ()
       numbers_units_logic: { pass: true, problem: "" },
       chinese_punctuation: { pass: true, problem: "" },
       unit_conversion_boundary: { pass: true, problem: "" },
-      protected_span_integrity: { pass: true, problem: "" }
+      protected_span_integrity: { pass: true, problem: "" },
+      embedded_template_integrity: { pass: true, problem: "" }
     },
     repairTasks: [
       {
@@ -508,7 +512,8 @@ test("translation state synthesizes local fallback anchors from bound IR targets
       numbers_units_logic: { pass: true, problem: "" },
       chinese_punctuation: { pass: true, problem: "" },
       unit_conversion_boundary: { pass: true, problem: "" },
-      protected_span_integrity: { pass: true, problem: "" }
+      protected_span_integrity: { pass: true, problem: "" },
+      embedded_template_integrity: { pass: true, problem: "" }
     },
     repairTasks: [
       {
@@ -584,7 +589,8 @@ test("translation state synthesizes a local fallback anchor for a longer list-it
       },
       chinese_punctuation: { pass: true, problem: "" },
       unit_conversion_boundary: { pass: true, problem: "" },
-      protected_span_integrity: { pass: true, problem: "" }
+      protected_span_integrity: { pass: true, problem: "" },
+      embedded_template_integrity: { pass: true, problem: "" }
     },
     repairTasks: [
       {
@@ -637,7 +643,8 @@ test("translation state synthesizes a local fallback anchor from a structured re
       numbers_units_logic: { pass: true, problem: "" },
       chinese_punctuation: { pass: true, problem: "" },
       unit_conversion_boundary: { pass: true, problem: "" },
-      protected_span_integrity: { pass: true, problem: "" }
+      protected_span_integrity: { pass: true, problem: "" },
+      embedded_template_integrity: { pass: true, problem: "" }
     },
     repairTasks: [
       {
@@ -714,7 +721,8 @@ test("translation state reconciles a shorter family local fallback target to an 
       numbers_units_logic: { pass: true, problem: "" },
       chinese_punctuation: { pass: true, problem: "" },
       unit_conversion_boundary: { pass: true, problem: "" },
-      protected_span_integrity: { pass: true, problem: "" }
+      protected_span_integrity: { pass: true, problem: "" },
+      embedded_template_integrity: { pass: true, problem: "" }
     },
     repairTasks: [
       {
@@ -835,7 +843,8 @@ test("translation state synthesizes a local fallback anchor for an inline concep
       numbers_units_logic: { pass: true, problem: "" },
       chinese_punctuation: { pass: true, problem: "" },
       unit_conversion_boundary: { pass: true, problem: "" },
-      protected_span_integrity: { pass: true, problem: "" }
+      protected_span_integrity: { pass: true, problem: "" },
+      embedded_template_integrity: { pass: true, problem: "" }
     },
     repairTasks: [
       {
@@ -1047,7 +1056,8 @@ test("translation state synthesizes local fallback anchors for heading-like conf
       numbers_units_logic: { pass: true, problem: "" },
       chinese_punctuation: { pass: true, problem: "" },
       unit_conversion_boundary: { pass: true, problem: "" },
-      protected_span_integrity: { pass: true, problem: "" }
+      protected_span_integrity: { pass: true, problem: "" },
+      embedded_template_integrity: { pass: true, problem: "" }
     },
     repairTasks: [
       {
@@ -1672,7 +1682,8 @@ test("translation state allows bare repeat text for established english-primary 
       numbers_units_logic: { pass: true, problem: "" },
       chinese_punctuation: { pass: true, problem: "" },
       unit_conversion_boundary: { pass: true, problem: "" },
-      protected_span_integrity: { pass: true, problem: "" }
+      protected_span_integrity: { pass: true, problem: "" },
+      embedded_template_integrity: { pass: true, problem: "" }
     },
     repairTasks: [],
     rawMustFix: []
@@ -1745,7 +1756,8 @@ test("translation state does not treat a singular anchor as mentioned by a plura
       numbers_units_logic: { pass: true, problem: "" },
       chinese_punctuation: { pass: true, problem: "" },
       unit_conversion_boundary: { pass: true, problem: "" },
-      protected_span_integrity: { pass: true, problem: "" }
+      protected_span_integrity: { pass: true, problem: "" },
+      embedded_template_integrity: { pass: true, problem: "" }
     },
     repairTasks: [],
     rawMustFix: []
