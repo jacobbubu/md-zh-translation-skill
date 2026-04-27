@@ -172,6 +172,87 @@ export function planTailTrim(
 }
 
 /**
+ * Find non-blank lines in draft whose exact-text occurrence count exceeds
+ * the same line's occurrence count in source. These are model-introduced
+ * literal duplicates — typically inside code-style or pseudo-code template
+ * blocks where the model accidentally re-emits a line like `fileName: string`
+ * that was supposed to appear once. Returns the line indices to drop.
+ *
+ * Rules:
+ * - Only considers lines that ALSO appear in source (count >= 1). Lines that
+ *   never appear in source are likely translation-side text and are skipped
+ *   to avoid misclassifying paraphrased duplicates as literal duplicates.
+ * - Drops the LATER occurrences (keeps the first N where N = source count),
+ *   so the original first-occurrence position stays anchored.
+ *
+ * Returns null when nothing needs trimming.
+ */
+export function planLiteralLineDedup(
+  source: string,
+  draft: string
+): { removeAtIndices: readonly number[] } | null {
+  const sourceLines = source.split(/\r?\n/);
+  const draftLines = draft.split(/\r?\n/);
+
+  const sourceCounts = new Map<string, number>();
+  for (const line of sourceLines) {
+    const trimmed = line.trim();
+    if (trimmed.length === 0) {
+      continue;
+    }
+    sourceCounts.set(trimmed, (sourceCounts.get(trimmed) ?? 0) + 1);
+  }
+
+  const draftSeenCounts = new Map<string, number>();
+  const removeAtIndices: number[] = [];
+  for (let i = 0; i < draftLines.length; i += 1) {
+    const trimmed = draftLines[i]!.trim();
+    if (trimmed.length === 0) {
+      continue;
+    }
+    const sourceCount = sourceCounts.get(trimmed) ?? 0;
+    if (sourceCount === 0) {
+      continue;
+    }
+    const seen = (draftSeenCounts.get(trimmed) ?? 0) + 1;
+    draftSeenCounts.set(trimmed, seen);
+    if (seen > sourceCount) {
+      removeAtIndices.push(i);
+    }
+  }
+
+  if (removeAtIndices.length === 0) {
+    return null;
+  }
+  return { removeAtIndices };
+}
+
+function applyLiteralLineDedup(text: string, removeAtIndices: readonly number[]): string {
+  if (removeAtIndices.length === 0) {
+    return text;
+  }
+  const drop = new Set(removeAtIndices);
+  const lines = text.split(/\r?\n/);
+  const out: string[] = [];
+  for (let i = 0; i < lines.length; i += 1) {
+    if (drop.has(i)) {
+      continue;
+    }
+    out.push(lines[i]!);
+  }
+  // Collapse double-blank-lines that the dedup might have introduced when
+  // an isolated literal line (with blank lines on both sides) was dropped.
+  const compacted: string[] = [];
+  for (const line of out) {
+    if (line.trim().length === 0 && compacted[compacted.length - 1]?.trim().length === 0) {
+      continue;
+    }
+    compacted.push(line);
+  }
+  return compacted.join("\n").replace(/\s+$/u, "");
+}
+
+/**
  * Detect the case where source and draft have the same block count but a
  * specific list block in draft has MORE items than the source counterpart,
  * and the extra items appear to be a duplicate run of earlier items. Returns
@@ -353,6 +434,19 @@ export function alignDraftToSourceSkeleton(source: string, draft: string): strin
   const overflowPlan = planListOverflowTrim(sourceSkeleton, draftSkeleton);
   if (overflowPlan) {
     const candidate = applyListItemTrim(body, overflowPlan.blockIndex, overflowPlan.keepItems);
+    if (countProtectedPlaceholders(candidate) === draftPlaceholderCount) {
+      body = candidate;
+    }
+  }
+
+  // Final pass: literal-line dedup. Catches model duplicating an exact line
+  // that lives outside the list / tail-block patterns (e.g., a single
+  // `fileName: string` line inside an embedded type-signature template that
+  // the model accidentally re-emits). Skipped when the source body itself
+  // is empty.
+  const literalPlan = planLiteralLineDedup(source, body);
+  if (literalPlan) {
+    const candidate = applyLiteralLineDedup(body, literalPlan.removeAtIndices);
     if (countProtectedPlaceholders(candidate) === draftPlaceholderCount) {
       body = candidate;
     }
