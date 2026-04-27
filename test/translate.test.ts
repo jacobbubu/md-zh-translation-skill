@@ -4273,3 +4273,81 @@ test("dedupDraftDuplicateTailListItems trims numbered list duplicates too", () =
   assert.equal(items.length, 3);
 });
 
+test("splitProtectedChunkSegments cuts a chunk when ≥3 list groups co-occur in one pending segment", async () => {
+  // Mirror the spec-driven §How To Implement pattern: emphasis-headed list
+  // groups stacked together. Three list groups in the same segment is the
+  // exact configuration that empirically triggers tail-bullet duplication.
+  const { splitProtectedChunkSegments } = await import("../src/translate.js") as {
+    splitProtectedChunkSegments: (
+      source: string,
+      spanIndex: Map<string, unknown>
+    ) => Array<{ kind: string; source: string }>;
+  };
+
+  const source = [
+    "**Step 1: Spec**",
+    "",
+    "Some lead-in.",
+    "",
+    "- list-1 a",
+    "- list-1 b",
+    "- list-1 c",
+    "",
+    "**Step 2: Stakeholders**",
+    "",
+    "More lead-in.",
+    "",
+    "- list-2 a",
+    "- list-2 b",
+    "",
+    "**Step 3: Tasks**",
+    "",
+    "Task lead-in.",
+    "",
+    "- list-3 a",
+    "- list-3 b",
+    "- list-3 c",
+    "- list-3 d",
+    "",
+    "**Step 4: Tests**",
+    "",
+    "Test lead-in.",
+    "",
+    "- list-4 a",
+    "- list-4 b",
+    ""
+  ].join("\n");
+
+  const segments = splitProtectedChunkSegments(source, new Map());
+  const translatable = segments.filter((segment) => segment.kind === "translatable");
+  assert.ok(
+    translatable.length >= 2,
+    `expected ≥ 2 translatable segments after list-density split, got ${translatable.length}`
+  );
+});
+
+test("splitProtectedChunkSegments leaves a single-list section in a single segment", async () => {
+  // A single list group with a small lead-in should not trip any of the
+  // splitter heuristics. Acts as a sanity floor: the new ≥3-list cut must
+  // not regress the simple case down to multiple segments.
+  const { splitProtectedChunkSegments } = await import("../src/translate.js") as {
+    splitProtectedChunkSegments: (
+      source: string,
+      spanIndex: Map<string, unknown>
+    ) => Array<{ kind: string; source: string }>;
+  };
+
+  const source = [
+    "Lead-in.",
+    "",
+    "- a",
+    "- b",
+    "- c",
+    ""
+  ].join("\n");
+
+  const segments = splitProtectedChunkSegments(source, new Map());
+  const translatable = segments.filter((segment) => segment.kind === "translatable");
+  assert.equal(translatable.length, 1, "single list group should remain in a single segment");
+});
+
