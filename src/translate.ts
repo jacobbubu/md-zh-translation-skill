@@ -36,6 +36,7 @@ import {
   type TelemetrySink
 } from "./telemetry.js";
 import { applyStructuredRepairPatches } from "./repair-patch.js";
+import { alignDraftToSourceSkeleton } from "./structure-skeleton.js";
 import {
   createJsonlTmStore,
   fingerprint as tmFingerprint,
@@ -6692,11 +6693,14 @@ async function translateProtectedSegment(
     );
   }
   threadId = draftResult.threadId;
-  const dedupedDraftText = dedupDraftDuplicateTailListItems(
+  const dedupedDraftText = alignDraftToSourceSkeleton(
     protectedSource,
-    dedupDraftDuplicateTailSentences(
+    dedupDraftDuplicateTailListItems(
       protectedSource,
-      dedupDraftDuplicateTailBlocks(protectedSource, draftResult.text)
+      dedupDraftDuplicateTailSentences(
+        protectedSource,
+        dedupDraftDuplicateTailBlocks(protectedSource, draftResult.text)
+      )
     )
   );
   const normalizedDraftText = normalizeSegmentAnchorText(
@@ -7513,11 +7517,14 @@ async function repairDraftedSegment(
     if (repairResult.threadId) {
       draftedSegment.threadId = repairResult.threadId;
     }
-    const dedupedRepairText = dedupDraftDuplicateTailListItems(
+    const dedupedRepairText = alignDraftToSourceSkeleton(
       draftedSegment.protectedSource,
-      dedupDraftDuplicateTailSentences(
+      dedupDraftDuplicateTailListItems(
         draftedSegment.protectedSource,
-        dedupDraftDuplicateTailBlocks(draftedSegment.protectedSource, repairResult.text)
+        dedupDraftDuplicateTailSentences(
+          draftedSegment.protectedSource,
+          dedupDraftDuplicateTailBlocks(draftedSegment.protectedSource, repairResult.text)
+        )
       )
     );
     const normalizedRepairText = normalizeSegmentAnchorText(
