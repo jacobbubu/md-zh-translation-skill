@@ -8485,6 +8485,7 @@ function formatBundledAuditSegments(draftedSegments: readonly DraftedSegmentStat
 const MIN_SEGMENT_HEADING_SPLIT_CHARACTERS = 2600;
 const MIN_COMPLEX_SEGMENT_CHARACTERS = 160;
 const COMPLEX_SEGMENT_SCORE_THRESHOLD = 4;
+const MIN_REPEATED_LIST_GROUPS_TO_SPLIT = 3;
 
 export function splitProtectedChunkSegments(
   source: string,
@@ -8717,6 +8718,17 @@ function shouldSplitPendingByComplexity(
     return false;
   }
 
+  // Repeated list-group cut: when the pending segment already contains
+  // ≥ MIN_REPEATED_LIST_GROUPS_TO_SPLIT distinct list blocks (typically a
+  // **Step N:** / **Heading:** lead-in followed by bullets pattern), force a
+  // split before another list arrives. Empirically the model loses track of
+  // "which list group am I translating?" once 3+ similar groups co-occur in
+  // one segment — it duplicates prior bullets at the segment tail. Cutting
+  // earlier keeps each segment focused on one list group.
+  if (incomingKind === "list" && countListBlocks(pending) >= MIN_REPEATED_LIST_GROUPS_TO_SPLIT) {
+    return true;
+  }
+
   const pendingChars = measureRawBlocks(pending);
   if (pendingChars < MIN_COMPLEX_SEGMENT_CHARACTERS) {
     return false;
@@ -8724,6 +8736,16 @@ function shouldSplitPendingByComplexity(
 
   const complexityScore = pending.reduce((total, block) => total + scoreSegmentComplexityBlock(block.content), 0);
   return complexityScore >= COMPLEX_SEGMENT_SCORE_THRESHOLD;
+}
+
+function countListBlocks(blocks: ReadonlyArray<{ content: string }>): number {
+  let count = 0;
+  for (const block of blocks) {
+    if (classifyPromptBlockKind(block.content) === "list") {
+      count += 1;
+    }
+  }
+  return count;
 }
 
 function scoreSegmentComplexityBlock(content: string): number {
