@@ -6693,14 +6693,19 @@ async function translateProtectedSegment(
     );
   }
   threadId = draftResult.threadId;
-  const dedupedDraftText = alignDraftToSourceSkeleton(
+  // Note: alignDraftToSourceSkeleton previously ran here (before the
+  // anchor / plan / restore normalization chain). Empirical debug runs
+  // showed it never fired on real failures because subsequent normalizers
+  // — most likely injectPlannedAnchorText / applyBlockPlanTargets — were
+  // duplicating list items AFTER alignment. Aligner is moved to right
+  // after reprotectMarkdownSpans so it sees the same body audit will see.
+  // The dedupDraftDuplicate* family stays here as a pre-normalization
+  // safety net for the model's own immediate echoes.
+  const dedupedDraftText = dedupDraftDuplicateTailListItems(
     protectedSource,
-    dedupDraftDuplicateTailListItems(
+    dedupDraftDuplicateTailSentences(
       protectedSource,
-      dedupDraftDuplicateTailSentences(
-        protectedSource,
-        dedupDraftDuplicateTailBlocks(protectedSource, draftResult.text)
-      )
+      dedupDraftDuplicateTailBlocks(protectedSource, draftResult.text)
     )
   );
   const normalizedDraftText = normalizeSegmentAnchorText(
@@ -6762,7 +6767,15 @@ async function translateProtectedSegment(
       normalizeMarkdownLinkLabelWhitespace(restoredExampleTokenDraftText)
     )
   );
-  const canonicalProtectedBody = reprotectMarkdownSpans(normalizedDraftSurfaceText, combinedSpans);
+  const reprotectedBody = reprotectMarkdownSpans(normalizedDraftSurfaceText, combinedSpans);
+  // Final structural skeleton alignment: now that the body has been through
+  // anchor / plan / inline-code / autolink / etc. normalization and is
+  // reprotected, compare it to the source skeleton and trim any list-item
+  // overflow / tail-block duplication that was injected (or left untouched)
+  // by intermediate steps. The aligner refuses to trim if doing so would
+  // change the protected-placeholder count, so this is safe vs the
+  // protected_span_integrity hard check.
+  const canonicalProtectedBody = alignDraftToSourceSkeleton(protectedSource, reprotectedBody);
   const restoredBody = restoreMarkdownSpans(canonicalProtectedBody, combinedSpans);
   applySegmentDraft(context.state, segmentId, {
     protectedSource,
@@ -7517,14 +7530,15 @@ async function repairDraftedSegment(
     if (repairResult.threadId) {
       draftedSegment.threadId = repairResult.threadId;
     }
-    const dedupedRepairText = alignDraftToSourceSkeleton(
+    // alignDraftToSourceSkeleton moved to after reprotectMarkdownSpans below
+    // (same reason as in translateProtectedSegment): pre-normalization the
+    // body still has anchors / plans / blocks to apply, which can themselves
+    // duplicate list items.
+    const dedupedRepairText = dedupDraftDuplicateTailListItems(
       draftedSegment.protectedSource,
-      dedupDraftDuplicateTailListItems(
+      dedupDraftDuplicateTailSentences(
         draftedSegment.protectedSource,
-        dedupDraftDuplicateTailSentences(
-          draftedSegment.protectedSource,
-          dedupDraftDuplicateTailBlocks(draftedSegment.protectedSource, repairResult.text)
-        )
+        dedupDraftDuplicateTailBlocks(draftedSegment.protectedSource, repairResult.text)
       )
     );
     const normalizedRepairText = normalizeSegmentAnchorText(
@@ -7591,9 +7605,17 @@ async function repairDraftedSegment(
         normalizeMarkdownLinkLabelWhitespace(restoredExampleTokenRepairText)
       )
     );
-    draftedSegment.protectedBody = reprotectMarkdownSpans(
+    const reprotectedRepairBody = reprotectMarkdownSpans(
       normalizedRepairSurfaceText,
       draftedSegment.spans
+    );
+    // Final structural skeleton alignment for repair output (mirror of draft
+    // path). Trims any list / tail-block overflow injected by the post-repair
+    // normalization chain. Placeholder-count guard prevents protected_span
+    // breakage.
+    draftedSegment.protectedBody = alignDraftToSourceSkeleton(
+      draftedSegment.protectedSource,
+      reprotectedRepairBody
     );
     draftedSegment.restoredBody = restoreMarkdownSpans(draftedSegment.protectedBody, draftedSegment.spans);
     applyRepairResult(context.state, draftedSegment.segmentId, taskBatch.map((task) => task.id), {
