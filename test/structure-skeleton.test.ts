@@ -173,3 +173,56 @@ test("alignDraftToSourceSkeleton tolerates empty inputs", () => {
   assert.equal(alignDraftToSourceSkeleton("", "anything"), "anything");
   assert.equal(alignDraftToSourceSkeleton("anything", ""), "");
 });
+
+test("alignDraftToSourceSkeleton refuses to trim when doing so would drop a protected placeholder", () => {
+  // Source has 1 list item with a protected link placeholder. Draft has 4
+  // list items, with placeholder copies in the duplicates. Trimming the
+  // duplicates would also drop placeholder occurrences and break the
+  // protected_span_integrity hard check; aligner must abort the trim.
+  const source = [
+    "Lead-in.",
+    "",
+    "- See [doc](@@MDZH_LINK_DESTINATION_0001@@)",
+    ""
+  ].join("\n");
+  const draft = [
+    "导语。",
+    "",
+    "- 见 [文档](@@MDZH_LINK_DESTINATION_0001@@)",
+    "- 见 [文档](@@MDZH_LINK_DESTINATION_0001@@)",
+    "- 见 [文档](@@MDZH_LINK_DESTINATION_0001@@)",
+    "- 见 [文档](@@MDZH_LINK_DESTINATION_0001@@)",
+    ""
+  ].join("\n");
+
+  const aligned = alignDraftToSourceSkeleton(source, draft);
+  assert.equal(aligned, draft, "aligner must keep draft untouched when trim would drop placeholders");
+});
+
+test("alignDraftToSourceSkeleton trims when no placeholders are touched", () => {
+  // Draft duplicates plain bullets without placeholders; source's only
+  // placeholder lives in the lead-in paragraph. Trim should fire because
+  // the trimmed bullets carry no placeholders.
+  const source = [
+    "Lead-in with a [link](@@MDZH_LINK_DESTINATION_0001@@).",
+    "",
+    "- alpha",
+    "- bravo",
+    ""
+  ].join("\n");
+  const draft = [
+    "导语带 [链接](@@MDZH_LINK_DESTINATION_0001@@)。",
+    "",
+    "- 甲",
+    "- 乙",
+    "- 甲",
+    "- 乙",
+    ""
+  ].join("\n");
+
+  const aligned = alignDraftToSourceSkeleton(source, draft);
+  const items = aligned.split("\n").filter((line) => /^\s*-\s/.test(line));
+  assert.equal(items.length, 2);
+  const placeholderCount = (aligned.match(/@@MDZH_LINK_DESTINATION_0001@@/g) ?? []).length;
+  assert.equal(placeholderCount, 1);
+});

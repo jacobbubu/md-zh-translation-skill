@@ -178,6 +178,16 @@ export function planListOverflowTrim(
 }
 
 const RAW_BLOCK_SEPARATOR = "\n\n";
+const PROTECTED_PLACEHOLDER_PATTERN = /@@MDZH_[A-Z_]+_\d{4}@@/g;
+
+function countProtectedPlaceholders(text: string): number {
+  PROTECTED_PLACEHOLDER_PATTERN.lastIndex = 0;
+  let count = 0;
+  while (PROTECTED_PLACEHOLDER_PATTERN.exec(text) !== null) {
+    count += 1;
+  }
+  return count;
+}
 
 function rawBlocksOf(text: string): string[] {
   if (!text) {
@@ -264,19 +274,33 @@ export function alignDraftToSourceSkeleton(source: string, draft: string): strin
   if (!source || !draft) {
     return draft;
   }
+  // Placeholder safety: when this aligner runs after reprotectMarkdownSpans,
+  // the body carries `@@MDZH_*@@` placeholders for protected spans (links,
+  // image destinations, autolinks, html attributes). Trimming a tail block
+  // or list item that contains a placeholder would silently delete the
+  // span and trip the downstream `protected_span_integrity` hard check.
+  // Guard each trim with a count check and revert if the trim would change
+  // the placeholder count.
+  const draftPlaceholderCount = countProtectedPlaceholders(draft);
   let body = draft;
   let sourceSkeleton = parseStructure(source);
   let draftSkeleton = parseStructure(body);
 
   const tailPlan = planTailTrim(sourceSkeleton, draftSkeleton);
   if (tailPlan) {
-    body = applyTailTrim(body, draftSkeleton, tailPlan.dropFrom);
-    draftSkeleton = parseStructure(body);
+    const candidate = applyTailTrim(body, draftSkeleton, tailPlan.dropFrom);
+    if (countProtectedPlaceholders(candidate) === draftPlaceholderCount) {
+      body = candidate;
+      draftSkeleton = parseStructure(body);
+    }
   }
 
   const overflowPlan = planListOverflowTrim(sourceSkeleton, draftSkeleton);
   if (overflowPlan) {
-    body = applyListItemTrim(body, overflowPlan.blockIndex, overflowPlan.keepItems);
+    const candidate = applyListItemTrim(body, overflowPlan.blockIndex, overflowPlan.keepItems);
+    if (countProtectedPlaceholders(candidate) === draftPlaceholderCount) {
+      body = candidate;
+    }
   }
   void sourceSkeleton;
   return body;
