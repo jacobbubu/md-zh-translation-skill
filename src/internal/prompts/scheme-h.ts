@@ -7,6 +7,7 @@ Markdown 结构要求：
 5. 如果原文正文使用了可翻译的 Markdown 强调结构（如 **加粗**、*斜体*）或命令/flag 写法（如 --flag），译文应保持等价结构；不要丢掉强调，也不要把普通命令/flag 误改成代码块、标题或其他 Markdown 结构。
 6. 列表项数必须与原文严格一致：原文每条 \`-\` / \`*\` / 数字编号必须对应译文中一条独立列表项，**不得合并、不得拆分、不得重复追加、不得整段化**。即使条目文字简短，也必须保持单独成行的 bullet/编号结构，不能把多条 bullets 拼成一个段落或一行。
 7. 项目符号 (\`-\`、\`*\`、\`+\`)、有序列表编号 (\`1.\` / \`1)\`)、引用前缀 (\`>\`)、分隔线 (\`---\`) 等行级 Markdown 标记必须按原文逐行保留，不要误删、不要换形式。
+8. 内嵌模板与类型签名字面保留：原文有时会在正文里**嵌入示例性的 Markdown 模板或代码片段**（例如 \`**# Feature Specification**\`、\`**## 1. Overview**\`、\`User { id: string, email: string }\`、\`Response: { photoId: string, success: boolean }\` 这类伪标题或类型签名）。这些**不是真正的文档结构**，而是字面示例：必须**整段照抄保留**（包括 \`**\` 强调、\`#\`/\`##\` 字符、\`{\`/\`}\` 大括号、\`:\` 分隔、\`string\`/\`boolean\`/\`number\` 等类型名、字段名 \`photoId\`/\`fileName\` 等）。**绝对不要**把 \`string\` 翻成「字符串」、\`boolean\` 翻成「布尔值」、\`number\` 翻成「数字」；也不要把伪标题里的英文名翻成中文。占位文字（如 \`[Feature Name]\`、\`[2–3 sentences]\`、\`[Exact endpoints and responses]\`）允许翻成中文。
 `.trim();
 
 export const DOCUMENT_ANALYSIS_PROMPT = `
@@ -224,7 +225,8 @@ export const GATE_AUDIT_PROMPT = `
     "numbers_units_logic": { "pass": true, "problem": "" },
     "chinese_punctuation": { "pass": true, "problem": "" },
     "unit_conversion_boundary": { "pass": true, "problem": "" },
-    "protected_span_integrity": { "pass": true, "problem": "" }
+    "protected_span_integrity": { "pass": true, "problem": "" },
+    "embedded_template_integrity": { "pass": true, "problem": "" }
   },
   "must_fix": [
     "逐条列出必须修复的问题，描述要具体、可执行"
@@ -261,6 +263,7 @@ export const GATE_AUDIT_PROMPT = `
 4. chinese_punctuation：是否符合中文标点习惯；如果保留完整英文段落，该英文段落内部可保留英文标点，不单独判错。中文句内若保留英文缩写并补中文解释，括号必须是全角，例如“CNN（美国有线电视新闻网）”。
 5. unit_conversion_boundary：长度、重量、华氏温度、以英寸表示的累计降水量是否按规则补常见换算，其他单位是否没有被擅自换算。
 6. protected_span_integrity：所有占位符是否逐字保留、没有丢失、没有改写、没有增删、没有被污染进别的文本。
+7. embedded_template_integrity：原文正文里**嵌入的示例性 Markdown 模板或类型签名**是否被字面保留。例如 \`**# Feature Specification**\`、\`**## 1. Overview**\`、\`User { id: string, email: string }\`、\`Response: { photoId: string, success: boolean }\`、\`POST /api/photos/upload\`、\`Request: FormData with file\` 这类伪标题、伪代码、类型签名块。如果出现「\`string\` 被翻成「字符串」」「\`boolean\` 被翻成「布尔值」」「字段名 \`photoId\`/\`fileName\`/\`uploadedAt\` 被译成中文」「伪标题里的英文名被翻译」「\`{ ... }\` 大括号块结构被改写或丢失」，都判为不通过；并在 must_fix 里写明位置和应恢复的字面文本（必要时填 repair_targets 的 currentText / targetText 直接修复）。占位文字如 \`[Feature Name]\`、\`[2–3 sentences]\`、\`[Tech stack, database design, API structure]\` 这类用方括号包起来的提示文字允许翻成中文，不算违规。
 
 输出要求：
 - 只返回 JSON。
@@ -298,7 +301,8 @@ export const BUNDLED_GATE_AUDIT_PROMPT = `
         "numbers_units_logic": { "pass": true, "problem": "" },
         "chinese_punctuation": { "pass": true, "problem": "" },
         "unit_conversion_boundary": { "pass": true, "problem": "" },
-        "protected_span_integrity": { "pass": true, "problem": "" }
+        "protected_span_integrity": { "pass": true, "problem": "" },
+        "embedded_template_integrity": { "pass": true, "problem": "" }
       },
       "must_fix": [
         "逐条列出必须修复的问题，描述要具体、可执行"
@@ -337,6 +341,7 @@ export const BUNDLED_GATE_AUDIT_PROMPT = `
 4. chinese_punctuation：是否符合中文标点习惯；如果保留完整英文段落，该英文段落内部可保留英文标点，不单独判错。中文句内若保留英文缩写并补中文解释，括号必须是全角，例如“CNN（美国有线电视新闻网）”。
 5. unit_conversion_boundary：长度、重量、华氏温度、以英寸表示的累计降水量是否按规则补常见换算，其他单位是否没有被擅自换算。
 6. protected_span_integrity：所有占位符是否逐字保留、没有丢失、没有改写、没有增删、没有被污染进别的文本。
+7. embedded_template_integrity：原文正文里**嵌入的示例性 Markdown 模板或类型签名**是否被字面保留。例如 \`**# Feature Specification**\`、\`**## 1. Overview**\`、\`User { id: string, email: string }\`、\`Response: { photoId: string, success: boolean }\`、\`POST /api/photos/upload\`、\`Request: FormData with file\` 这类伪标题、伪代码、类型签名块。如果出现「\`string\` 被翻成「字符串」」「\`boolean\` 被翻成「布尔值」」「字段名 \`photoId\`/\`fileName\`/\`uploadedAt\` 被译成中文」「伪标题里的英文名被翻译」「\`{ ... }\` 大括号块结构被改写或丢失」，都判为不通过；并在 must_fix 里写明位置和应恢复的字面文本（必要时填 repair_targets 的 currentText / targetText 直接修复）。占位文字如 \`[Feature Name]\`、\`[2–3 sentences]\`、\`[Tech stack, database design, API structure]\` 这类用方括号包起来的提示文字允许翻成中文，不算违规。
 
 输出要求：
 - 只返回 JSON。

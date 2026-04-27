@@ -185,6 +185,7 @@ function createAudit(pass: boolean, mustFix: string[] = [], overrides: Partial<G
       chinese_punctuation: { pass, problem: pass ? "" : "punctuation mismatch" },
       unit_conversion_boundary: { pass, problem: pass ? "" : "conversion mismatch" },
       protected_span_integrity: { pass: true, problem: "" },
+      embedded_template_integrity: { pass: true, problem: "" },
       ...overrides
     },
     must_fix: mustFix
@@ -517,7 +518,8 @@ test("parseGateAudit downgrades formatter-only chinese punctuation failures", ()
       numbers_units_logic: { pass: true, problem: "" },
       chinese_punctuation: { pass: false, problem: "“审批疲劳（approval fatigue):”中的半角冒号应改为全角。" },
       unit_conversion_boundary: { pass: true, problem: "" },
-      protected_span_integrity: { pass: true, problem: "" }
+      protected_span_integrity: { pass: true, problem: "" },
+      embedded_template_integrity: { pass: true, problem: "" }
     }),
     repair_targets: [
       {
@@ -561,7 +563,8 @@ test("translateMarkdownArticle reifies chunk failures into executable repair tas
             // path still exercises.
             chinese_punctuation: { pass: false, problem: "第 1 个项目符号句末缺少中文标点。" },
             unit_conversion_boundary: { pass: true, problem: "" },
-            protected_span_integrity: { pass: true, problem: "" }
+            protected_span_integrity: { pass: true, problem: "" },
+            embedded_template_integrity: { pass: true, problem: "" }
           }),
           repair_targets: [
             {
@@ -1914,7 +1917,8 @@ test("translateMarkdownArticle ships first_mention_bilingual cut-piece guidance 
       numbers_units_logic: { pass: true, problem: "" },
       chinese_punctuation: { pass: false, problem: "missing Chinese punctuation" },
       unit_conversion_boundary: { pass: true, problem: "" },
-      protected_span_integrity: { pass: true, problem: "" }
+      protected_span_integrity: { pass: true, problem: "" },
+      embedded_template_integrity: { pass: true, problem: "" }
     }
   );
 
@@ -3276,7 +3280,8 @@ test("translateMarkdownArticle under soft-gate treats first_mention_bilingual-on
     numbers_units_logic: { pass: true, problem: "" },
     chinese_punctuation: { pass: true, problem: "" },
     unit_conversion_boundary: { pass: true, problem: "" },
-    protected_span_integrity: { pass: true, problem: "" }
+    protected_span_integrity: { pass: true, problem: "" },
+    embedded_template_integrity: { pass: true, problem: "" }
   });
 
   const result = await translateMarkdownArticle(source, {
@@ -3317,7 +3322,8 @@ test("translateMarkdownArticle under soft-gate still throws HardGateError when a
     numbers_units_logic: { pass: true, problem: "" },
     chinese_punctuation: { pass: true, problem: "" },
     unit_conversion_boundary: { pass: true, problem: "" },
-    protected_span_integrity: { pass: true, problem: "" }
+    protected_span_integrity: { pass: true, problem: "" },
+    embedded_template_integrity: { pass: true, problem: "" }
   });
 
   await assert.rejects(
@@ -3470,7 +3476,8 @@ test("repair patch lane short-circuits the LLM when structured targets fully cov
               numbers_units_logic: { pass: false, problem: "需补 foobar 小工具的双语锚定。" },
               chinese_punctuation: { pass: true, problem: "" },
               unit_conversion_boundary: { pass: true, problem: "" },
-              protected_span_integrity: { pass: true, problem: "" }
+              protected_span_integrity: { pass: true, problem: "" },
+              embedded_template_integrity: { pass: true, problem: "" }
             },
             must_fix: ["第 1 个项目符号需补 foobar 小工具（foobar widget）首现双语。"],
             repair_targets: [
@@ -3546,7 +3553,8 @@ test("repair patch lane falls through to the LLM when MDZH_REPAIR_PATCH_LANE=fal
               numbers_units_logic: { pass: false, problem: "需补 foobar 小工具双语。" },
               chinese_punctuation: { pass: true, problem: "" },
               unit_conversion_boundary: { pass: true, problem: "" },
-              protected_span_integrity: { pass: true, problem: "" }
+              protected_span_integrity: { pass: true, problem: "" },
+              embedded_template_integrity: { pass: true, problem: "" }
             },
             must_fix: ["第 1 个项目符号需补首现双语。"],
             repair_targets: [
@@ -4097,5 +4105,91 @@ test("MDZH_RESCUE_MODEL=off explicitly disables rescue", async () => {
 
   const rescueEvents = [...sink.events].filter((event) => event.type.startsWith("chunk.rescue"));
   assert.equal(rescueEvents.length, 0, "no rescue events should fire when MDZH_RESCUE_MODEL=off");
+});
+
+test("embedded_template_integrity check failure routes through repair lane and patch fix", async () => {
+  // Audit reports embedded_template_integrity=false with a structured target;
+  // the patch lane should fix it via literal replacement without an LLM repair
+  // call. Validates that the new check participates in the existing repair
+  // pipeline rather than escalating directly to a structural HardGateError.
+  const source = "## API\n\nfoobar 小工具\n";
+
+  const sink = createMemoryTelemetrySink();
+  let auditPasses = 0;
+  let repairCalls = 0;
+
+  const executor: CodexExecutor = {
+    async execute(prompt: string, options: CodexExecOptions): Promise<CodexExecResult> {
+      if (isDocumentAnalysisPrompt(prompt)) {
+        return createExecResult(createEmptyAnchorCatalog());
+      }
+      if (isBundledAuditPrompt(prompt, options) || (prompt.includes("只返回 JSON") && prompt.includes("hard_checks"))) {
+        if (auditPasses === 0) {
+          auditPasses += 1;
+          const failingAudit: GateAudit = {
+            hard_checks: {
+              paragraph_match: { pass: true, problem: "" },
+              first_mention_bilingual: { pass: true, problem: "" },
+              numbers_units_logic: { pass: true, problem: "" },
+              chinese_punctuation: { pass: true, problem: "" },
+              unit_conversion_boundary: { pass: true, problem: "" },
+              protected_span_integrity: { pass: true, problem: "" },
+              embedded_template_integrity: { pass: false, problem: "字段名 foobar 小工具 应字面保留为 foobar widget。" }
+            },
+            must_fix: ["第 1 段需保留原文字面 foobar widget，不要改为 foobar 小工具。"],
+            repair_targets: [
+              {
+                location: "第 1 段",
+                kind: "block",
+                currentText: "foobar 小工具",
+                targetText: "foobar widget",
+                english: "foobar widget"
+              }
+            ]
+          };
+          return createExecResult(wrapAuditForSegments(prompt, failingAudit));
+        }
+        return createExecResult(wrapAuditForSegments(prompt, createAudit(true)));
+      }
+      if (options.outputSchema && prompt.includes("### BLOCK")) {
+        const blockCount = (prompt.match(/^### BLOCK \d+ \([^)]+\)$/gm) ?? []).length || 1;
+        return createExecResult(JSON.stringify({ blocks: Array.from({ length: blockCount }, () => "foobar 小工具") }));
+      }
+      if (prompt.includes("【must_fix】")) {
+        repairCalls += 1;
+        return createExecResult("foobar widget\n");
+      }
+      const current = extractPromptSection(prompt, "【当前译文】");
+      if (current !== null) {
+        return createExecResult(current);
+      }
+      return createExecResult("foobar 小工具\n");
+    }
+  };
+
+  await translateMarkdownArticle(source, {
+    executor,
+    formatter: async (markdown) => markdown,
+    softGate: true,
+    telemetry: sink
+  });
+
+  // Patch lane should have applied the structured target at least once. We
+  // don't assert repairCalls === 0 because materializeFailedHardCheckProblems
+  // injects a sentinel must_fix for the failing check itself (which has no
+  // structuredTarget), so the LLM repair lane still fires for that companion
+  // task. The point of the test is that embedded_template_integrity failures
+  // flow through the existing repair pipeline (patch lane + LLM) rather than
+  // immediately bubbling as a structural HardGateError.
+  const repairCycles = [...sink.events].filter((event) => event.type === "repair.cycle");
+  assert.ok(repairCycles.length >= 1, "expected at least one repair.cycle event");
+  const patchEvents = [...sink.events].filter((event) => event.type === "repair.patch");
+  assert.ok(patchEvents.length >= 1, "expected at least one repair.patch event");
+  const applied = patchEvents.reduce(
+    (sum, event) => sum + Number((event.meta as Record<string, unknown>).applied ?? 0),
+    0
+  );
+  assert.ok(applied >= 1, `expected at least one structured patch to apply, got ${applied}`);
+  void repairCalls;
 });
 

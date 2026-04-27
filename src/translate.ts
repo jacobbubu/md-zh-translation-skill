@@ -228,7 +228,8 @@ type AuditCheckKey =
   | "numbers_units_logic"
   | "chinese_punctuation"
   | "unit_conversion_boundary"
-  | "protected_span_integrity";
+  | "protected_span_integrity"
+  | "embedded_template_integrity";
 
 export type GateAudit = {
   hard_checks: Record<AuditCheckKey, { pass: boolean; problem: string }>;
@@ -330,7 +331,8 @@ const GATE_AUDIT_SCHEMA = {
         "numbers_units_logic",
         "chinese_punctuation",
         "unit_conversion_boundary",
-        "protected_span_integrity"
+        "protected_span_integrity",
+        "embedded_template_integrity"
       ],
       properties: {
         paragraph_match: auditItemSchema(),
@@ -338,7 +340,8 @@ const GATE_AUDIT_SCHEMA = {
         numbers_units_logic: auditItemSchema(),
         chinese_punctuation: auditItemSchema(),
         unit_conversion_boundary: auditItemSchema(),
-        protected_span_integrity: auditItemSchema()
+        protected_span_integrity: auditItemSchema(),
+        embedded_template_integrity: auditItemSchema()
       }
     },
     must_fix: {
@@ -722,6 +725,10 @@ function parseGateAuditValue(value: unknown): GateAudit {
   const hardChecks = data.hard_checks;
   const mustFix = data.must_fix;
   const repairTargets = data.repair_targets;
+  // Required keys must be present in the audit response. embedded_template_
+  // integrity was added later and is parsed leniently below — it defaults to
+  // `{ pass: true, problem: "" }` when older audit prompts / fixtures don't
+  // emit it, so adding the check is non-breaking for legacy callers.
   const keys: AuditCheckKey[] = [
     "paragraph_match",
     "first_mention_bilingual",
@@ -745,6 +752,23 @@ function parseGateAuditValue(value: unknown): GateAudit {
       throw new HardGateError(`Gate audit JSON has an invalid hard_checks.${key} entry.`);
     }
 
+    typed.problem = normalizeAuditQuoteStyle(typed.problem);
+  }
+
+  const optionalChecks: AuditCheckKey[] = ["embedded_template_integrity"];
+  for (const key of optionalChecks) {
+    const item = (hardChecks as Record<string, unknown>)[key];
+    if (item == null) {
+      (hardChecks as Record<string, unknown>)[key] = { pass: true, problem: "" };
+      continue;
+    }
+    if (typeof item !== "object") {
+      throw new HardGateError(`Gate audit JSON has an invalid hard_checks.${key} entry.`);
+    }
+    const typed = item as Record<string, unknown>;
+    if (typeof typed.pass !== "boolean" || typeof typed.problem !== "string") {
+      throw new HardGateError(`Gate audit JSON has an invalid hard_checks.${key} entry.`);
+    }
     typed.problem = normalizeAuditQuoteStyle(typed.problem);
   }
 
@@ -1274,6 +1298,11 @@ function validateStructuralGateChecks(audit: GateAudit): void {
     const detail = audit.hard_checks.protected_span_integrity.problem || "Protected span integrity failed.";
     throw markStructuralHardGateError(new HardGateError(`Protected span integrity failed: ${detail}`));
   }
+  // embedded_template_integrity is intentionally NOT escalated here. We want
+  // it to flow through the normal repair pipeline (patch lane → LLM repair →
+  // rescue model) — the offending spans are usually fixable through a literal
+  // text replacement rather than the unrecoverable placeholder corruption
+  // that protected_span_integrity catches.
 }
 
 function report(options: TranslateOptions, stage: TranslateProgress, message: string): void {
@@ -3219,7 +3248,8 @@ function createSyntheticChunkFailureAudit(message: string): GateAudit {
       numbers_units_logic: { pass: true, problem: "" },
       chinese_punctuation: { pass: true, problem: "" },
       unit_conversion_boundary: { pass: true, problem: "" },
-      protected_span_integrity: { pass: true, problem: "" }
+      protected_span_integrity: { pass: true, problem: "" },
+      embedded_template_integrity: { pass: true, problem: "" }
     },
     must_fix: [`chunk fell back to source content under soft-gate: ${message}`]
   };
@@ -3233,7 +3263,8 @@ function mergeGateAudits(audits: readonly GateAudit[]): GateAudit {
       numbers_units_logic: { pass: true, problem: "" },
       chinese_punctuation: { pass: true, problem: "" },
       unit_conversion_boundary: { pass: true, problem: "" },
-      protected_span_integrity: { pass: true, problem: "" }
+      protected_span_integrity: { pass: true, problem: "" },
+      embedded_template_integrity: { pass: true, problem: "" }
     },
     must_fix: []
   };
@@ -3410,6 +3441,8 @@ function inferRepairFailureType(audit: GateAudit, instruction: string): RepairFa
       return "unit_conversion_boundary";
     case "protected_span_integrity":
       return "protected_span_integrity";
+    case "embedded_template_integrity":
+      return "embedded_template_integrity";
     default:
       return "other";
   }
@@ -5592,7 +5625,8 @@ function buildChunkFailureHardChecks(
         numbers_units_logic: { ...previous.numbers_units_logic },
         chinese_punctuation: { ...previous.chinese_punctuation },
         unit_conversion_boundary: { ...previous.unit_conversion_boundary },
-        protected_span_integrity: { ...previous.protected_span_integrity }
+        protected_span_integrity: { ...previous.protected_span_integrity },
+        embedded_template_integrity: { ...previous.embedded_template_integrity }
       }
     : {
         paragraph_match: { pass: true, problem: "" },
@@ -5600,7 +5634,8 @@ function buildChunkFailureHardChecks(
         numbers_units_logic: { pass: true, problem: "" },
         chinese_punctuation: { pass: true, problem: "" },
         unit_conversion_boundary: { pass: true, problem: "" },
-        protected_span_integrity: { pass: true, problem: "" }
+        protected_span_integrity: { pass: true, problem: "" },
+        embedded_template_integrity: { pass: true, problem: "" }
       };
 
   for (const instruction of mustFix) {
