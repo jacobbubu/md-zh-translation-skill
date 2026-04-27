@@ -107,9 +107,9 @@ function alignSkeletons(source: StructuralSkeleton, draft: StructuralSkeleton):
 
 不要平行做。一次一个。
 
-1. **本 PR**（已开始）：fixtures 落库 + 这份设计文档。**不动 src/**。让方向先沉淀下来，避免又一次"边写代码边改方向"。
-2. **下一个 PR**（推荐方向 3.1）：复杂度指标加列表组维度 + JSON-blocks lane 强制路由。**单一改动，单一目标**：让 chunks 9 / 12 / 13 / 14 那些 fixture 在 short smoke 里通过率上升 ≥ 1 档。
-3. **再下一个 PR**（推荐方向 3.2）：结构骨架对齐校验。同时**清理**老 dedup 函数（验证完后删）。
+1. **PR #96**（已合）：fixtures 落库 + 这份设计文档。
+2. **PR #97 / #98**（已合，§3.1 第一条）：复杂度指标加「连续相似 list 群」信号，threshold 从 3 调到 2。spec-driven 长文 chunk 9 由 2 段拆成 3 段——但**实测发现 1 导语+2 bullets 的极小 segment 仍被模型自我重复**。结论：缩小 segment 边际收益已触底，单纯继续拆没意义（小段 list self-duplication fixture 已补，见 §5）。
+3. **下一个 PR**（推荐方向 3.2）：结构骨架对齐校验。直接比对 source / draft 的 list 项数、段数等**结构信号**，不依赖文本相似度。能直接覆盖小段 self-duplication 这类无法靠 n-gram 相似度判定的情形。同时**收编**老 dedup 函数（PR #95）+ embedded_template_integrity（PR #94）+ list 群拆 segment（PR #97/#98）的 patch 范围。
 4. **观察期**（不做新功能）：跑两三轮真实长文 smoke，看 long-tail 失败分布是否变了；如果是同类问题反复出现，回看 §3.1/3.2 是否真到位；如果是新模式，先加 fixture，不要立即写代码。
 
 ## 5. 已合并 PR 的处置建议
