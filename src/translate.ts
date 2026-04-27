@@ -8485,7 +8485,13 @@ function formatBundledAuditSegments(draftedSegments: readonly DraftedSegmentStat
 const MIN_SEGMENT_HEADING_SPLIT_CHARACTERS = 2600;
 const MIN_COMPLEX_SEGMENT_CHARACTERS = 160;
 const COMPLEX_SEGMENT_SCORE_THRESHOLD = 4;
-const MIN_REPEATED_LIST_GROUPS_TO_SPLIT = 3;
+// Empirically tuned on spec-driven §How To Implement (chunks 9 / 12 / 14):
+// threshold = 3 only cut into 2 segments which still left 3 list groups in
+// one segment, model duplicated tail. Lowering to 2 cuts every time a third
+// list arrives — segment 2 of those failing chunks now splits into ≥ 2
+// pieces, and each piece carries at most 2 list groups (well within the
+// model's "track which list I'm on" capacity).
+const MIN_REPEATED_LIST_GROUPS_TO_SPLIT = 2;
 
 export function splitProtectedChunkSegments(
   source: string,
