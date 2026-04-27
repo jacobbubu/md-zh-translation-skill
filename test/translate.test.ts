@@ -13,6 +13,7 @@ import {
   parseGateAudit,
   translateMarkdownArticle,
   __testOnlyIsHardPass,
+  __testOnlyDedupDraftDuplicateTailListItems,
   type ChunkPromptContext,
   type GateAudit
 } from "../src/translate.js";
@@ -4191,5 +4192,84 @@ test("embedded_template_integrity check failure routes through repair lane and p
   );
   assert.ok(applied >= 1, `expected at least one structured patch to apply, got ${applied}`);
   void repairCalls;
+});
+
+test("dedupDraftDuplicateTailListItems trims duplicated tail bullets matching earlier ones", () => {
+  const source = [
+    "Here are the tools:",
+    "",
+    "- alpha",
+    "- bravo",
+    "- charlie",
+    ""
+  ].join("\n");
+  const draft = [
+    "工具如下：",
+    "",
+    "- 甲",
+    "- 乙",
+    "- 丙",
+    "- 甲",
+    "- 乙",
+    "- 丙",
+    ""
+  ].join("\n");
+
+  const trimmed = __testOnlyDedupDraftDuplicateTailListItems(source, draft);
+  const trimmedLines = trimmed.split("\n");
+  const bulletLines = trimmedLines.filter((line) => /^\s*-\s/.test(line));
+  assert.equal(bulletLines.length, 3, `expected 3 bullets, got ${bulletLines.length}`);
+});
+
+test("dedupDraftDuplicateTailListItems leaves draft untouched when tail bullets are not duplicates", () => {
+  const source = [
+    "Here are the tools:",
+    "",
+    "- alpha",
+    "- bravo",
+    ""
+  ].join("\n");
+  // Draft has 3 bullets but the third is genuinely new content (not a
+  // duplicate of any earlier bullet) — should NOT trim.
+  const draft = [
+    "工具如下：",
+    "",
+    "- 甲",
+    "- 乙",
+    "- 完全不一样的 X 项目说明",
+    ""
+  ].join("\n");
+
+  const trimmed = __testOnlyDedupDraftDuplicateTailListItems(source, draft);
+  assert.equal(trimmed, draft);
+});
+
+test("dedupDraftDuplicateTailListItems is a no-op when source has no trailing list", () => {
+  const source = "Just a paragraph.\n\nAnother paragraph.\n";
+  const draft = "中文段落。\n\n再一段。\n";
+  const trimmed = __testOnlyDedupDraftDuplicateTailListItems(source, draft);
+  assert.equal(trimmed, draft);
+});
+
+test("dedupDraftDuplicateTailListItems is a no-op when draft list count matches source", () => {
+  const source = "- a\n- b\n- c\n";
+  const draft = "- 甲\n- 乙\n- 丙\n";
+  const trimmed = __testOnlyDedupDraftDuplicateTailListItems(source, draft);
+  assert.equal(trimmed, draft);
+});
+
+test("dedupDraftDuplicateTailListItems trims numbered list duplicates too", () => {
+  const source = "1. first\n2. second\n3. third\n";
+  const draft = [
+    "1. 第一",
+    "2. 第二",
+    "3. 第三",
+    "1. 第一",
+    "2. 第二",
+    "3. 第三"
+  ].join("\n");
+  const trimmed = __testOnlyDedupDraftDuplicateTailListItems(source, draft);
+  const items = trimmed.split("\n").filter((line) => /^\d+\.\s/.test(line));
+  assert.equal(items.length, 3);
 });
 

@@ -1260,6 +1260,7 @@ function isHardPass(audit: GateAudit): boolean {
 }
 
 export { isHardPass as __testOnlyIsHardPass };
+export { dedupDraftDuplicateTailListItems as __testOnlyDedupDraftDuplicateTailListItems };
 
 function isBundledHardPass(audit: BundledGateAudit): boolean {
   return audit.segments.every((segment) => isHardPass(segment));
@@ -4491,6 +4492,104 @@ function splitIntoSentencesForDedup(text: string): string[] {
     .filter((sentence) => sentence.length > 0);
 }
 
+const LIST_ITEM_LINE = /^\s*(?:[-*+]|\d+[.)])\s+\S/u;
+
+function isListItemLine(line: string): boolean {
+  return LIST_ITEM_LINE.test(line);
+}
+
+/**
+ * Detect and trim duplicate list items at the tail of `draft` relative to
+ * `source`. Tail-block / sentence dedup catches near-duplicates separated by
+ * blank lines or sentence boundaries, but list items are usually packed
+ * tightly (no blank lines between bullets) and don't end in sentence
+ * punctuation, so they slip through. This helper specifically counts list
+ * items in the tail bullet group of source vs draft and trims trailing
+ * draft bullets that look like duplicates of earlier ones in the same group.
+ *
+ * Conservative shape:
+ * - Only acts on the trailing contiguous list group in draft.
+ * - Only trims when (a) draft has more list items than source, and
+ *   (b) every "extra" trailing bullet near-duplicates one of the earlier
+ *       bullets in that same group.
+ * - Leaves the surrounding lead-in / closing prose untouched.
+ */
+function dedupDraftDuplicateTailListItems(source: string, draft: string): string {
+  if (!draft || !source) {
+    return draft;
+  }
+  const draftLines = draft.split(/\r?\n/);
+  const sourceLines = source.split(/\r?\n/);
+
+  const collectTrailingListGroup = (lines: readonly string[]): { startIndex: number; items: string[] } | null => {
+    let endIndex = lines.length - 1;
+    while (endIndex >= 0 && lines[endIndex]!.trim().length === 0) {
+      endIndex -= 1;
+    }
+    if (endIndex < 0 || !isListItemLine(lines[endIndex]!)) {
+      return null;
+    }
+    const items: string[] = [];
+    let cursor = endIndex;
+    while (cursor >= 0) {
+      const line = lines[cursor]!;
+      if (isListItemLine(line)) {
+        items.unshift(line);
+        cursor -= 1;
+        continue;
+      }
+      if (line.trim().length === 0) {
+        // Allow a single blank line between items (keeps groups contiguous
+        // even when the writer inserts vertical spacing).
+        const previous = cursor > 0 ? lines[cursor - 1]! : "";
+        if (isListItemLine(previous)) {
+          cursor -= 1;
+          continue;
+        }
+      }
+      break;
+    }
+    return { startIndex: cursor + 1, items };
+  };
+
+  const draftGroup = collectTrailingListGroup(draftLines);
+  if (!draftGroup || draftGroup.items.length < 2) {
+    return draft;
+  }
+  const sourceGroup = collectTrailingListGroup(sourceLines);
+  const sourceCount = sourceGroup?.items.length ?? 0;
+  const draftCount = draftGroup.items.length;
+  if (draftCount <= sourceCount) {
+    return draft;
+  }
+  const excess = draftCount - sourceCount;
+  // Preserve the earliest `draftCount - excess` bullets, then check that the
+  // last `excess` bullets each near-duplicate one of the kept bullets.
+  const keptItems = draftGroup.items.slice(0, draftCount - excess);
+  const tailItems = draftGroup.items.slice(draftCount - excess);
+  if (keptItems.length === 0) {
+    return draft;
+  }
+  for (const tailItem of tailItems) {
+    const looksLikeDup = keptItems.some((kept) => draftBlocksLookLikeDuplicate(kept, tailItem));
+    if (!looksLikeDup) {
+      return draft;
+    }
+  }
+
+  // Splice the trimmed group back into the draft, preserving any blank-line
+  // tail that followed the original list (so trailing newlines don't change
+  // unless the whole tail was nothing but duplicates).
+  const trailingBlankLines: string[] = [];
+  let scanIndex = draftLines.length - 1;
+  while (scanIndex >= 0 && draftLines[scanIndex]!.trim().length === 0) {
+    trailingBlankLines.unshift(draftLines[scanIndex]!);
+    scanIndex -= 1;
+  }
+  const head = draftLines.slice(0, draftGroup.startIndex);
+  return [...head, ...keptItems, ...trailingBlankLines].join("\n");
+}
+
 function isSegmentStillEchoingSource(draftedSegment: DraftedSegmentState): boolean {
   if (draftedSegment.segment.kind !== "translatable") {
     return false;
@@ -6593,9 +6692,12 @@ async function translateProtectedSegment(
     );
   }
   threadId = draftResult.threadId;
-  const dedupedDraftText = dedupDraftDuplicateTailSentences(
+  const dedupedDraftText = dedupDraftDuplicateTailListItems(
     protectedSource,
-    dedupDraftDuplicateTailBlocks(protectedSource, draftResult.text)
+    dedupDraftDuplicateTailSentences(
+      protectedSource,
+      dedupDraftDuplicateTailBlocks(protectedSource, draftResult.text)
+    )
   );
   const normalizedDraftText = normalizeSegmentAnchorText(
     stripAddedInlineCodeFromPlainPaths(protectedSource, dedupedDraftText),
@@ -7411,9 +7513,12 @@ async function repairDraftedSegment(
     if (repairResult.threadId) {
       draftedSegment.threadId = repairResult.threadId;
     }
-    const dedupedRepairText = dedupDraftDuplicateTailSentences(
+    const dedupedRepairText = dedupDraftDuplicateTailListItems(
       draftedSegment.protectedSource,
-      dedupDraftDuplicateTailBlocks(draftedSegment.protectedSource, repairResult.text)
+      dedupDraftDuplicateTailSentences(
+        draftedSegment.protectedSource,
+        dedupDraftDuplicateTailBlocks(draftedSegment.protectedSource, repairResult.text)
+      )
     );
     const normalizedRepairText = normalizeSegmentAnchorText(
       stripAddedInlineCodeFromPlainPaths(draftedSegment.protectedSource, dedupedRepairText),
