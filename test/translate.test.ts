@@ -3186,6 +3186,123 @@ test("translateMarkdownArticle retries a failed JSON block draft with a stricter
   assert.match(result.markdown, /--dangerously-skip-permissions/);
 });
 
+test("JSON-blocks strict retry violations no longer fall back to the freeform draft lane (chunk 7 root cause)", async () => {
+  // chunk 7 of the spec-driven long-form article fails because:
+  //   1. The embedded spec template (User { ... } / Photo { ... } / **## 5.
+  //      API Contracts** / **## 6. Error Handling** / ...) is split into
+  //      ~30 source blocks by splitPromptBlocks.
+  //   2. The model returns json-blocks slots whose contents themselves
+  //      contain blank lines, so reconstructJsonBlockDraft produces text
+  //      that splitPromptBlocks re-splits into more blocks than the
+  //      source — `getDraftContractViolation` flags it as
+  //      "draft expanded the block structure beyond the source segment".
+  //   3. The strict JSON-block retry hits the same violation.
+  //   4. `translateProtectedSegment` then falls back to the FREEFORM text
+  //      rescue lane, where the model is free to paraphrase the entire
+  //      segment. With a complex embedded template, the model rewrites
+  //      the section in a different order and silently drops a heading.
+  //
+  // This test reproduces the structural condition: simple 4-block source,
+  // mock returns slots with embedded blank lines on both json-blocks
+  // attempts. We expect the bug to surface as `freeformDraftCalls > 0`
+  // (current behaviour). After the fix, freeform must NOT be invoked when
+  // the json-blocks lane has already been chosen — the failure should be
+  // surfaced upstream (HardGateError or chunk-level source fallback).
+  const source = [
+    "First paragraph.",
+    "",
+    "Second paragraph.",
+    "",
+    "Third paragraph.",
+    "",
+    "Fourth paragraph.",
+    ""
+  ].join("\n");
+
+  // Each slot embeds blank lines so reconstruction yields ≥ 4+3 blocks
+  // and triggers `translatedBlocks.length > sourceBlocks.length + 2`.
+  const inflatedSlot = (idx: number) =>
+    [
+      `第 ${idx} 段译文。`,
+      "",
+      `第 ${idx} 段附注 1。`,
+      "",
+      `第 ${idx} 段附注 2。`,
+      "",
+      `第 ${idx} 段附注 3。`
+    ].join("\n");
+
+  let jsonDraftCalls = 0;
+  let freeformDraftCalls = 0;
+
+  const executor: CodexExecutor = {
+    async execute(prompt: string, options: CodexExecOptions): Promise<CodexExecResult> {
+      if (isDocumentAnalysisPrompt(prompt)) {
+        return createExecResult(createEmptyAnchorCatalog());
+      }
+      if (options.outputSchema && prompt.includes("### BLOCK 1")) {
+        jsonDraftCalls += 1;
+        return createExecResult(
+          JSON.stringify({
+            blocks: [inflatedSlot(1), inflatedSlot(2), inflatedSlot(3), inflatedSlot(4)]
+          })
+        );
+      }
+      if (options.outputSchema || prompt.includes('"hard_checks"') || prompt.includes("只返回 JSON")) {
+        return createExecResult(wrapAuditForSegments(prompt, createAudit(true)));
+      }
+      if (prompt.includes("【英文原文】")) {
+        freeformDraftCalls += 1;
+        return createExecResult("FREEFORM_FALLBACK_TRIGGERED");
+      }
+      return createExecResult(extractPromptSection(prompt, "【当前译文】") ?? "中文占位译文");
+    }
+  };
+
+  let translationError: unknown = null;
+  let translatedMarkdown: string | null = null;
+  try {
+    const result = await translateMarkdownArticle(source, {
+      executor,
+      formatter: async (markdown) => markdown,
+      softGate: true
+    });
+    translatedMarkdown = result.markdown;
+  } catch (error) {
+    translationError = error;
+  }
+
+  // At minimum, the initial + strict json-blocks attempt must run on the
+  // primary model. If chunk-level rescue (default gpt-5.5) kicks in, the
+  // same mock will replay the json-blocks attempts for the rescue model,
+  // so the count can be 2 (no rescue) or 4 (with rescue) — both prove
+  // that the freeform fallback path was bypassed.
+  assert.ok(
+    jsonDraftCalls >= 2,
+    `expected at least 2 json-blocks attempts, got ${jsonDraftCalls}`
+  );
+
+  // Core fix: json-blocks structural-expansion contract violations must
+  // NOT route into the freeform text rescue. The freeform model would
+  // otherwise get free rein to rewrite the whole segment without slot
+  // constraints — exactly the path that historically caused chunk 7's
+  // section reordering / dropped-heading regression.
+  assert.equal(
+    freeformDraftCalls,
+    0,
+    `freeform draft must not fire after a json-blocks structural-expansion violation, got ${freeformDraftCalls} calls`
+  );
+
+  // The freeform marker should never appear anywhere — neither in the
+  // produced markdown nor in the failure surface.
+  const surface = translatedMarkdown ?? (translationError instanceof Error ? translationError.message : "");
+  assert.doesNotMatch(
+    surface,
+    /FREEFORM_FALLBACK_TRIGGERED/,
+    "freeform marker must not leak into output or error after json-blocks fails strict retry"
+  );
+});
+
 test("translateMarkdownArticle fails fast when analysis quality collapses below the heading-plan threshold", async () => {
   const source = [
     "# Title",

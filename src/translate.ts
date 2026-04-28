@@ -6660,7 +6660,32 @@ async function translateProtectedSegment(
       lastDraftViolation = jsonBlockError instanceof Error ? jsonBlockError.message : String(jsonBlockError);
     }
   }
-  if (!draftResult || lastDraftViolation) {
+  // Freeform fallback policy (chunk 7 root cause):
+  // After json-blocks strict retry, two violation classes need different
+  // handling. "Content-empty" violations (empty slots, structured-output
+  // debris, source-verbatim echoes, dropped list items) leave the segment
+  // with nothing to translate, and the freeform text rescue is a
+  // legitimate last-ditch path. "Structural-expansion" violations
+  // (expanded block structure, expanded length, introduced
+  // headings/code) mean the model produced too MUCH — letting freeform
+  // rewrite the whole segment without slot constraints reliably makes it
+  // worse: with embedded pseudo-template chunks (spec-driven §How To
+  // Implement) freeform reorders sections and drops headings, surfacing
+  // upstream as paragraph_match / first_mention_bilingual /
+  // embedded_template_integrity failures that hard-fail the chunk. Block
+  // freeform on the structural-expansion class so the chunk-level
+  // rescue / soft-gate path can preserve shape instead.
+  const wasJsonBlocksMode = structuralSegmentDraft?.mode === "json-blocks";
+  const lastViolationIsStructuralExpansion =
+    lastDraftViolation !== null &&
+    (lastDraftViolation.includes("expanded the block structure") ||
+      lastDraftViolation.includes("expanded far beyond") ||
+      lastDraftViolation.includes("introduced heading blocks") ||
+      lastDraftViolation.includes("introduced code blocks"));
+  const shouldFallThroughToFreeform =
+    !draftResult ||
+    (lastDraftViolation !== null && !(wasJsonBlocksMode && lastViolationIsStructuralExpansion));
+  if (shouldFallThroughToFreeform) {
     for (const [attemptIndex, draftPrompt] of draftPrompts.entries()) {
       const rawDraftResult = await executeDraft(draftPrompt, false);
       draftResult = {
