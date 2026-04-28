@@ -496,6 +496,198 @@ test("normalizeDiscoveredAnchorCatalog rejects discovered config-path anchors", 
   ]);
 });
 
+test("normalizeDiscoveredAnchorCatalog rejects latin-head + lowercase english tail compound anchors", () => {
+  const state = createTranslationRunState({
+    sourcePathHint: "sample.md",
+    documentTitle: "Sample",
+    frontmatterPresent: false,
+    protectedSpans: [],
+    chunks: [
+      {
+        source: "Neo4j clusters hit a scaling wall.\n",
+        separatorAfter: "",
+        headingPath: ["Sample"],
+        segments: [
+          {
+            kind: "translatable",
+            source: "Neo4j clusters hit a scaling wall.\n",
+            separatorAfter: "",
+            spanIds: [],
+            headingHints: [],
+            specialNotes: []
+          }
+        ]
+      }
+    ]
+  });
+
+  const normalized = normalizeDiscoveredAnchorCatalog(state, {
+    anchors: [
+      {
+        english: "Neo4j clusters",
+        chineseHint: "Neo4j 集群",
+        familyKey: "neo4j-clusters",
+        displayPolicy: "chinese-primary",
+        sourceForms: ["Neo4j clusters"],
+        firstOccurrence: {
+          chunkId: "chunk-1",
+          segmentId: "chunk-1-segment-1"
+        }
+      }
+    ],
+    ignoredTerms: []
+  });
+
+  assert.equal(normalized.anchors.length, 0);
+  assert.deepEqual(normalized.ignoredTerms, [
+    {
+      english: "Neo4j clusters",
+      reason: "latin-head + lowercase english tail compound should not be promoted as bilingual anchor"
+    }
+  ]);
+});
+
+test("normalizeDiscoveredAnchorCatalog rejects latin-head + lowercase tail when head contains digits and hyphen", () => {
+  const state = createTranslationRunState({
+    sourcePathHint: "sample.md",
+    documentTitle: "Sample",
+    frontmatterPresent: false,
+    protectedSpans: [],
+    chunks: [
+      {
+        source: "GPT-4 models outperform older baselines.\n",
+        separatorAfter: "",
+        headingPath: ["Sample"],
+        segments: [
+          {
+            kind: "translatable",
+            source: "GPT-4 models outperform older baselines.\n",
+            separatorAfter: "",
+            spanIds: [],
+            headingHints: [],
+            specialNotes: []
+          }
+        ]
+      }
+    ]
+  });
+
+  const normalized = normalizeDiscoveredAnchorCatalog(state, {
+    anchors: [
+      {
+        english: "GPT-4 models",
+        chineseHint: "GPT-4 模型",
+        familyKey: "gpt-4-models",
+        displayPolicy: "chinese-primary",
+        sourceForms: ["GPT-4 models"],
+        firstOccurrence: {
+          chunkId: "chunk-1",
+          segmentId: "chunk-1-segment-1"
+        }
+      }
+    ],
+    ignoredTerms: []
+  });
+
+  assert.equal(normalized.anchors.length, 0);
+  assert.equal(normalized.ignoredTerms.length, 1);
+  assert.equal(normalized.ignoredTerms[0]?.english, "GPT-4 models");
+});
+
+test("normalizeDiscoveredAnchorCatalog keeps Title Case compound anchors (Claude Code)", () => {
+  const state = createTranslationRunState({
+    sourcePathHint: "sample.md",
+    documentTitle: "Sample",
+    frontmatterPresent: false,
+    protectedSpans: [],
+    chunks: [
+      {
+        source: "Claude Code is a new CLI.\n",
+        separatorAfter: "",
+        headingPath: ["Sample"],
+        segments: [
+          {
+            kind: "translatable",
+            source: "Claude Code is a new CLI.\n",
+            separatorAfter: "",
+            spanIds: [],
+            headingHints: [],
+            specialNotes: []
+          }
+        ]
+      }
+    ]
+  });
+
+  const normalized = normalizeDiscoveredAnchorCatalog(state, {
+    anchors: [
+      {
+        english: "Claude Code",
+        chineseHint: "Claude 代码",
+        familyKey: "claude-code",
+        displayPolicy: "english-primary",
+        sourceForms: ["Claude Code"],
+        firstOccurrence: {
+          chunkId: "chunk-1",
+          segmentId: "chunk-1-segment-1"
+        }
+      }
+    ],
+    ignoredTerms: []
+  });
+
+  assert.equal(normalized.anchors.length, 1);
+  assert.equal(normalized.anchors[0]?.english, "Claude Code");
+  assert.equal(normalized.ignoredTerms.length, 0);
+});
+
+test("normalizeDiscoveredAnchorCatalog keeps compound anchors whose chineseHint does not start with the head (Knowledge Graphs)", () => {
+  const state = createTranslationRunState({
+    sourcePathHint: "sample.md",
+    documentTitle: "Sample",
+    frontmatterPresent: false,
+    protectedSpans: [],
+    chunks: [
+      {
+        source: "Knowledge Graphs combine facts.\n",
+        separatorAfter: "",
+        headingPath: ["Sample"],
+        segments: [
+          {
+            kind: "translatable",
+            source: "Knowledge Graphs combine facts.\n",
+            separatorAfter: "",
+            spanIds: [],
+            headingHints: [],
+            specialNotes: []
+          }
+        ]
+      }
+    ]
+  });
+
+  const normalized = normalizeDiscoveredAnchorCatalog(state, {
+    anchors: [
+      {
+        english: "Knowledge Graphs",
+        chineseHint: "知识图谱",
+        familyKey: "knowledge-graphs",
+        displayPolicy: "chinese-primary",
+        sourceForms: ["Knowledge Graphs"],
+        firstOccurrence: {
+          chunkId: "chunk-1",
+          segmentId: "chunk-1-segment-1"
+        }
+      }
+    ],
+    ignoredTerms: []
+  });
+
+  assert.equal(normalized.anchors.length, 1);
+  assert.equal(normalized.anchors[0]?.english, "Knowledge Graphs");
+  assert.equal(normalized.ignoredTerms.length, 0);
+});
+
 test("writeKnownEntityCandidatesIfRequested persists unknown anchors into a candidate file", async () => {
   const tempDir = await mkdtemp(path.join(os.tmpdir(), "mdzh-known-entities-"));
   const outputPath = path.join(tempDir, "known_entities_candidates.json");
