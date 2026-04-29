@@ -3432,7 +3432,61 @@ test("translateMarkdownArticle under soft-gate treats first_mention_bilingual-on
   );
 });
 
-test("translateMarkdownArticle under soft-gate still throws HardGateError when a structural hard-check fails", async () => {
+test("translateMarkdownArticle under soft-gate falls back to source when a structural hard-check fails (bug 2 fix)", async () => {
+  // Pre-bug-2-fix behavior: structural hard-check failures (e.g. paragraph_match)
+  // were treated as un-rescuable under soft-gate, hard-failing the whole run.
+  // Post-fix: soft-gate must catch ANY chunk failure (semantic or structural)
+  // and fall back to the source body for that chunk so the run completes
+  // with a structurally complete output.md (failed chunks left as English).
+  const source = "# Title\n\nBody\n";
+  const structuralFailingAudit = createAudit(false, ["段落数对不上"], {
+    paragraph_match: { pass: false, problem: "source has 2 paragraphs, draft has 3" },
+    first_mention_bilingual: { pass: true, problem: "" },
+    numbers_units_logic: { pass: true, problem: "" },
+    chinese_punctuation: { pass: true, problem: "" },
+    unit_conversion_boundary: { pass: true, problem: "" },
+    protected_span_integrity: { pass: true, problem: "" },
+    embedded_template_integrity: { pass: true, problem: "" }
+  });
+
+  const sink = createMemoryTelemetrySink();
+  const result = await translateMarkdownArticle(source, {
+    executor: createP2CompatibleExecutor({
+      async execute(prompt: string, options: CodexExecOptions): Promise<CodexExecResult> {
+        if (isDocumentAnalysisPrompt(prompt)) return createExecResult(createEmptyAnchorCatalog());
+        if (options.outputSchema || prompt.includes("只返回 JSON"))
+          return createExecResult(wrapAuditForSegments(prompt, structuralFailingAudit));
+        const current = extractPromptSection(prompt, "【当前译文】");
+        return createExecResult(current ?? "中文占位译文");
+      }
+    }),
+    formatter: async (markdown) => markdown,
+    softGate: true,
+    telemetry: sink
+  });
+
+  // Run must complete (no throw). Output must contain the source content for
+  // the failed chunk (English fallback).
+  assert.match(result.markdown, /Title/);
+  assert.match(result.markdown, /Body/);
+
+  // chunk.error telemetry should record `recovered: true` since soft-gate
+  // caught the structural failure rather than canceling the run.
+  const chunkErrors = [...sink.events].filter((event) => event.type === "chunk.error");
+  assert.ok(chunkErrors.length > 0, "chunk.error event should fire when soft-gate falls back");
+  for (const event of chunkErrors) {
+    assert.equal(
+      (event.meta as Record<string, unknown>).recovered,
+      true,
+      "soft-gate should record recovered=true even on structural failures"
+    );
+  }
+});
+
+test("translateMarkdownArticle without soft-gate still throws HardGateError on structural failure", async () => {
+  // Inverse of the test above: with soft-gate disabled, structural hard-check
+  // failures still propagate as HardGateError. This pins down that the bug 2
+  // fix only changes behavior under soft-gate=true.
   const source = "# Title\n\nBody\n";
   const structuralFailingAudit = createAudit(false, ["段落数对不上"], {
     paragraph_match: { pass: false, problem: "source has 2 paragraphs, draft has 3" },
@@ -3456,7 +3510,7 @@ test("translateMarkdownArticle under soft-gate still throws HardGateError when a
         }
       }),
       formatter: async (markdown) => markdown,
-      softGate: true
+      softGate: false
     }),
     (error: unknown) => {
       assert.ok(error instanceof HardGateError);
