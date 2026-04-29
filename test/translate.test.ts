@@ -4225,6 +4225,169 @@ test("MDZH_RESCUE_MODEL=off explicitly disables rescue", async () => {
   assert.equal(rescueEvents.length, 0, "no rescue events should fire when MDZH_RESCUE_MODEL=off");
 });
 
+test("default behavior: repair defaults to gpt-5.5 when MDZH_REPAIR_MODEL is unset", async () => {
+  // Trigger one repair cycle (audit fails on first pass, second audit passes)
+  // and verify the repair stage call landed on gpt-5.5, not the mini default.
+  const source = "## Hello\n\nWorld.\n";
+
+  let auditCalls = 0;
+  const repairModelsSeen: string[] = [];
+  const executor: CodexExecutor = {
+    async execute(prompt: string, options: CodexExecOptions): Promise<CodexExecResult> {
+      if (isDocumentAnalysisPrompt(prompt)) {
+        return createExecResult(createEmptyAnchorCatalog());
+      }
+      if (isBundledAuditPrompt(prompt, options) || (options.outputSchema && prompt.includes('"hard_checks"'))) {
+        auditCalls += 1;
+        // First audit fails to force a repair; subsequent audits pass.
+        if (auditCalls === 1) {
+          return createExecResult(
+            wrapAuditForSegments(prompt, createAudit(false, ["术语首现需补对照"]))
+          );
+        }
+        return createExecResult(wrapAuditForSegments(prompt, createAudit(true)));
+      }
+      // The repair stage runs without outputSchema and the prompt contains the
+      // current translation marker — record which model was used.
+      const currentTranslation = extractPromptSection(prompt, "【当前译文】");
+      if (currentTranslation !== null) {
+        repairModelsSeen.push(options.model ?? "<unset>");
+        return createExecResult(currentTranslation);
+      }
+      const sourceSection = extractPromptSection(prompt, "【英文原文】");
+      return createExecResult(sourceSection ?? "中文占位译文");
+    }
+  };
+
+  const previous = process.env.MDZH_REPAIR_MODEL;
+  delete process.env.MDZH_REPAIR_MODEL;
+  try {
+    await translateMarkdownArticle(source, {
+      executor,
+      formatter: async (markdown) => markdown,
+      softGate: true
+    });
+  } finally {
+    if (previous !== undefined) {
+      process.env.MDZH_REPAIR_MODEL = previous;
+    }
+  }
+
+  assert.ok(
+    repairModelsSeen.length > 0,
+    `expected at least one repair stage call, got ${repairModelsSeen.length}`
+  );
+  for (const model of repairModelsSeen) {
+    assert.equal(
+      model,
+      "gpt-5.5",
+      `repair stage should default to gpt-5.5, observed ${model}`
+    );
+  }
+});
+
+test("MDZH_REPAIR_MODEL overrides the repair stage model", async () => {
+  const source = "## Hello\n\nWorld.\n";
+
+  let auditCalls = 0;
+  const repairModelsSeen: string[] = [];
+  const executor: CodexExecutor = {
+    async execute(prompt: string, options: CodexExecOptions): Promise<CodexExecResult> {
+      if (isDocumentAnalysisPrompt(prompt)) {
+        return createExecResult(createEmptyAnchorCatalog());
+      }
+      if (isBundledAuditPrompt(prompt, options) || (options.outputSchema && prompt.includes('"hard_checks"'))) {
+        auditCalls += 1;
+        if (auditCalls === 1) {
+          return createExecResult(
+            wrapAuditForSegments(prompt, createAudit(false, ["术语首现需补对照"]))
+          );
+        }
+        return createExecResult(wrapAuditForSegments(prompt, createAudit(true)));
+      }
+      const currentTranslation = extractPromptSection(prompt, "【当前译文】");
+      if (currentTranslation !== null) {
+        repairModelsSeen.push(options.model ?? "<unset>");
+        return createExecResult(currentTranslation);
+      }
+      const sourceSection = extractPromptSection(prompt, "【英文原文】");
+      return createExecResult(sourceSection ?? "中文占位译文");
+    }
+  };
+
+  const previous = process.env.MDZH_REPAIR_MODEL;
+  process.env.MDZH_REPAIR_MODEL = "gpt-custom-model";
+  try {
+    await translateMarkdownArticle(source, {
+      executor,
+      formatter: async (markdown) => markdown,
+      softGate: true
+    });
+  } finally {
+    if (previous === undefined) {
+      delete process.env.MDZH_REPAIR_MODEL;
+    } else {
+      process.env.MDZH_REPAIR_MODEL = previous;
+    }
+  }
+
+  assert.ok(repairModelsSeen.length > 0);
+  for (const model of repairModelsSeen) {
+    assert.equal(model, "gpt-custom-model");
+  }
+});
+
+test("MDZH_REPAIR_MODEL=off falls back to the post-draft (mini) model", async () => {
+  const source = "## Hello\n\nWorld.\n";
+
+  let auditCalls = 0;
+  const repairModelsSeen: string[] = [];
+  const executor: CodexExecutor = {
+    async execute(prompt: string, options: CodexExecOptions): Promise<CodexExecResult> {
+      if (isDocumentAnalysisPrompt(prompt)) {
+        return createExecResult(createEmptyAnchorCatalog());
+      }
+      if (isBundledAuditPrompt(prompt, options) || (options.outputSchema && prompt.includes('"hard_checks"'))) {
+        auditCalls += 1;
+        if (auditCalls === 1) {
+          return createExecResult(
+            wrapAuditForSegments(prompt, createAudit(false, ["术语首现需补对照"]))
+          );
+        }
+        return createExecResult(wrapAuditForSegments(prompt, createAudit(true)));
+      }
+      const currentTranslation = extractPromptSection(prompt, "【当前译文】");
+      if (currentTranslation !== null) {
+        repairModelsSeen.push(options.model ?? "<unset>");
+        return createExecResult(currentTranslation);
+      }
+      const sourceSection = extractPromptSection(prompt, "【英文原文】");
+      return createExecResult(sourceSection ?? "中文占位译文");
+    }
+  };
+
+  const previous = process.env.MDZH_REPAIR_MODEL;
+  process.env.MDZH_REPAIR_MODEL = "off";
+  try {
+    await translateMarkdownArticle(source, {
+      executor,
+      formatter: async (markdown) => markdown,
+      softGate: true
+    });
+  } finally {
+    if (previous === undefined) {
+      delete process.env.MDZH_REPAIR_MODEL;
+    } else {
+      process.env.MDZH_REPAIR_MODEL = previous;
+    }
+  }
+
+  assert.ok(repairModelsSeen.length > 0);
+  for (const model of repairModelsSeen) {
+    assert.equal(model, "gpt-5.4-mini");
+  }
+});
+
 test("embedded_template_integrity check failure routes through repair lane and patch fix", async () => {
   // Audit reports embedded_template_integrity=false with a structured target;
   // the patch lane should fix it via literal replacement without an LLM repair

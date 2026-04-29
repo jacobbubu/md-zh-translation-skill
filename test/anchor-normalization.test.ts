@@ -517,6 +517,26 @@ test("injectPlannedAnchorText injects a missing anchor into a paragraph line", (
   assert.equal(normalized, "提示注入攻击（Prompt injection attacks）会隐藏恶意指令。");
 });
 
+test("injectPlannedAnchorText does not re-inject when the line already carries `（English，ABBR）` bilingual canonical (loonshots chunk 23 root cause)", () => {
+  // Root cause: lineAlreadyHasFamilyVariantAnchorParen's regex only accepts
+  // pure-ASCII parenthetical content, so legitimate first-mention forms with
+  // a Chinese-comma + abbreviation suffix — `（Spouse Activation Factor，
+  // SAF）` — are not recognized as "already injected" and the injector
+  // appends a second `（Spouse Activation Factor）`, producing the runaway
+  // chain that audit later flags as polluted first-mention bilingual.
+  const slice = createSlice({
+    requiredAnchors: [createAnchor("anchor-1", "Spouse Activation Factor", "配偶激活因子")]
+  });
+  const source = "He coined the term Spouse Activation Factor (SAF) for this dynamic.";
+  const translated = "他把这种现象称为配偶激活因子（Spouse Activation Factor，SAF）。";
+
+  const normalized = injectPlannedAnchorText(source, translated, slice);
+
+  // Must NOT append `（Spouse Activation Factor）` after the existing canonical;
+  // the bilingual abbreviation form already established the anchor.
+  assert.equal(normalized, translated);
+});
+
 test("injectPlannedAnchorText does not expand command phrases inside Commands-style list items", () => {
   const slice = createSlice({
     requiredAnchors: [

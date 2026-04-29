@@ -99,6 +99,31 @@ const DEFAULT_MODEL = "gpt-5.4-mini";
 const MAX_REPAIR_CYCLES = 2;
 
 const DEFAULT_RESCUE_MODEL = "gpt-5.5";
+const DEFAULT_REPAIR_MODEL = "gpt-5.5";
+
+/**
+ * Repair-stage model resolution. Repair runs with audit's `must_fix` list as
+ * an explicit instruction, so a stronger model should give it the best shot
+ * at hitting the structural fixes the mini default cannot land. Default is
+ * `gpt-5.5`; users can opt back into the post-draft (typically mini) model
+ * via `MDZH_REPAIR_MODEL=off` (or `none` / `false` / `0` / empty string).
+ * Any other non-empty value is taken as the model id verbatim.
+ */
+function readRepairModel(postDraftModel: string): string {
+  const raw = process.env.MDZH_REPAIR_MODEL;
+  if (raw === undefined) {
+    return DEFAULT_REPAIR_MODEL;
+  }
+  const trimmed = raw.trim();
+  if (trimmed === "") {
+    return postDraftModel;
+  }
+  const lower = trimmed.toLowerCase();
+  if (lower === "off" || lower === "none" || lower === "false" || lower === "0") {
+    return postDraftModel;
+  }
+  return trimmed;
+}
 
 function readRescueModel(): string | null {
   // Stronger fallback model used when a chunk exhausts its normal
@@ -2731,6 +2756,7 @@ export async function translateMarkdownArticle(source: string, options: Translat
   const formatter = options.formatter ?? formatTranslatedBody;
   const draftModel = options.model ?? (process.env.TRANSLATION_MODEL?.trim() || DEFAULT_MODEL);
   const postDraftModel = options.postDraftModel ?? (process.env.POST_DRAFT_MODEL?.trim() || draftModel);
+  const repairModel = readRepairModel(postDraftModel);
   const styleMode = resolveStyleMode(options.styleMode);
   const postDraftReasoningEffort = process.env.POST_DRAFT_REASONING_EFFORT?.trim()
     ? (process.env.POST_DRAFT_REASONING_EFFORT.trim() as ReasoningEffort)
@@ -2928,6 +2954,7 @@ export async function translateMarkdownArticle(source: string, options: Translat
           executor,
           draftModel,
           postDraftModel,
+          repairModel,
           options,
           sourcePathHint,
           spanIndex,
@@ -2973,6 +3000,7 @@ export async function translateMarkdownArticle(source: string, options: Translat
               executor,
               draftModel: rescueModel,
               postDraftModel: rescueModel,
+              repairModel: rescueModel,
               options,
               sourcePathHint,
               spanIndex,
@@ -3290,6 +3318,8 @@ type ChunkTranslationContext = {
   executor: CodexExecutor;
   draftModel: string;
   postDraftModel: string;
+  /** Model used for repair stage (default `gpt-5.5`, see readRepairModel). */
+  repairModel: string;
   cwd: string;
   sourcePathHint: string;
   options: TranslateOptions;
@@ -7394,7 +7424,7 @@ async function repairDraftedSegment(
         prompt,
         {
           cwd: context.cwd,
-          model: context.postDraftModel,
+          model: context.repairModel,
           reasoningEffort: context.postDraftReasoningEffort ?? REPAIR_REASONING_EFFORT,
           reuseSession: false,
           onStderr: (stderrChunk) =>
@@ -7429,7 +7459,7 @@ async function repairDraftedSegment(
         prompt,
         {
           cwd: context.cwd,
-          model: context.postDraftModel,
+          model: context.repairModel,
           reasoningEffort: context.postDraftReasoningEffort ?? REPAIR_REASONING_EFFORT,
           reuseSession: false,
           outputSchema: buildJsonBlockDraftSchema(blockCount),

@@ -1630,7 +1630,17 @@ function lineAlreadyHasFamilyVariantAnchorParen(text: string, english: string): 
   if (!target) {
     return null;
   }
-  for (const match of text.matchAll(/（([A-Za-z][A-Za-z0-9 .+/_\-]*)）/gu)) {
+  // Match either a pure-English paren `（Sandbox mode）` or the bilingual
+  // first-mention canonical with a Chinese-comma + abbreviation suffix
+  // `（Spouse Activation Factor，SAF）`. Capturing only the leading English
+  // phrase keeps the family-match logic below unchanged; the optional
+  // abbreviation tail is consumed by the regex but discarded. Without this
+  // tolerance, the injector misclassified bilingual canonicals already
+  // present in the line and stacked a second paren on top (loonshots
+  // chunk 23 spouse-activation-factor regression).
+  for (const match of text.matchAll(
+    /（([A-Za-z][A-Za-z0-9 .+/_\-]*)(?:[，][A-Za-z0-9 .+/_\-]+)?）/gu
+  )) {
     const raw = String(match[1]).trim();
     if (!raw) {
       continue;
