@@ -3037,7 +3037,9 @@ export async function translateMarkdownArticle(source: string, options: Translat
 
         if (rescuedResult) {
           chunkResult = rescuedResult;
-        } else if (!options.softGate || isStructuralHardGateError(error)) {
+        } else if (!options.softGate) {
+          // Soft-gate disabled: any failure (semantic or structural) is fatal
+          // and cancels the run.
           telemetry.emit({
             ts: Date.now(),
             runId,
@@ -5623,7 +5625,7 @@ async function translateProtectedChunk(
       report(
         context.options,
         "audit",
-        `Chunk ${chunkPromptContext.chunkIndex}/${plan.chunks.length}${chunkLabel}: soft-gate cannot rescue structural hard-check failure; failing hard.`
+        `Chunk ${chunkPromptContext.chunkIndex}/${plan.chunks.length}${chunkLabel}: structural hard-check failed; deferring to chunk-level rescue / source fallback.`
       );
     }
     const failureError = new HardGateError(
