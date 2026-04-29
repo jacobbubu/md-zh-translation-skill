@@ -93,6 +93,13 @@ Performance knobs:
     original error is reported. Defaults to \`gpt-5.5\`; set to an empty
     string or \`off\` / \`none\` / \`false\` / \`0\` to disable rescue entirely.
     Trades cost & wall time for stability on flaky chunks.
+  - MDZH_REPAIR_MODEL=<model-id> overrides the model used for the per-chunk
+    repair stage (the stage that re-runs failing segments with audit's
+    must_fix list as an explicit instruction). Defaults to \`gpt-5.5\`
+    because the stronger model lands structural fixes the mini default
+    cannot. Set to \`off\` / \`none\` / \`false\` / \`0\` (or empty) to fall
+    back to the post-draft (typically mini) model. Trades cost for first-pass
+    repair success on long-form content.
 
 Exit codes:
   0  Success (may include soft-gate degraded output; see stderr for warnings).
