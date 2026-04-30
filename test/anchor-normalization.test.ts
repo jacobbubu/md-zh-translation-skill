@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import {
   applyEmphasisPlanTargets,
   applySemanticMentionPlans,
+  cleanMisboundAnchorParens,
   formatAnchorDisplay,
   injectPlannedAnchorText,
   normalizeExplicitRepairAnchorText,
@@ -550,6 +551,69 @@ test("injectPlannedAnchorText does not expand command phrases inside Commands-st
   const normalized = injectPlannedAnchorText(source, translated, slice);
 
   assert.equal(normalized, translated);
+});
+
+test("cleanMisboundAnchorParens removes (English) when English is absent from source line and unrelated to line anchors (loonshots Pan Am↔TWA misbinding)", () => {
+  // Real failure pattern from loonshots chunk 33 line 1003: model wrote
+  // 泛美航空公司（Trans World Airlines）, but the source line is
+  // "Boeing told Trippe that it would build Pan Am a commercial jet" —
+  // Trans World Airlines does not appear on this line and is unrelated
+  // to the Pan Am anchor required here.
+  const slice = createSlice({
+    requiredAnchors: [createAnchor("anchor-1", "Pan Am", "泛美航空")]
+  });
+  const source = "Boeing told Trippe that it would build Pan Am a commercial jet if he would place a firm order.";
+  const translated = "波音告诉特里普会为泛美航空公司（Trans World Airlines）制造一架商用喷气客机。";
+  const cleaned = cleanMisboundAnchorParens(source, translated, slice);
+  assert.equal(cleaned, "波音告诉特里普会为泛美航空公司制造一架商用喷气客机。");
+});
+
+test("cleanMisboundAnchorParens preserves (English) when source line contains the same English token", () => {
+  // The model echoes a parenthetical that genuinely lives in the source
+  // line. Even if there is no anchor for it, we keep the binding.
+  const slice = createSlice({
+    requiredAnchors: [createAnchor("anchor-1", "TWA", "环球航空")]
+  });
+  const source = "American Airlines and Trans World Airlines (TWA) announced their decision.";
+  const translated = "美国航空和环球航空（Trans World Airlines）宣布了决定。";
+  const cleaned = cleanMisboundAnchorParens(source, translated, slice);
+  assert.equal(cleaned, translated);
+});
+
+test("cleanMisboundAnchorParens preserves (English) when English matches a line-required anchor", () => {
+  const slice = createSlice({
+    requiredAnchors: [createAnchor("anchor-1", "Boeing", "波音")]
+  });
+  const source = "Trippe began discussions with Boeing.";
+  const translated = "特里普开始与波音（Boeing）展开讨论。";
+  const cleaned = cleanMisboundAnchorParens(source, translated, slice);
+  assert.equal(cleaned, translated);
+});
+
+test("cleanMisboundAnchorParens is a no-op when the line has no required anchors", () => {
+  // Without a sense of "what should be here", the cleaner stays out — too
+  // risky to delete parentheticals on free-form prose where the model may
+  // be supplying a translator's note.
+  const slice = createSlice({
+    requiredAnchors: []
+  });
+  const source = "Some arbitrary sentence in the source.";
+  const translated = "源文本里某句话（Foo Bar）的中文翻译。";
+  const cleaned = cleanMisboundAnchorParens(source, translated, slice);
+  assert.equal(cleaned, translated);
+});
+
+test("cleanMisboundAnchorParens preserves bilingual canonical with abbreviation suffix", () => {
+  // (English，ABBR) is a legitimate first-mention form. When the source
+  // line carries the English token, the binding stays — abbreviation tail
+  // is consumed by the regex but not checked separately.
+  const slice = createSlice({
+    requiredAnchors: [createAnchor("anchor-1", "Spouse Activation Factor", "配偶激活因子")]
+  });
+  const source = "He coined the term Spouse Activation Factor (SAF) for this dynamic.";
+  const translated = "他把这种现象称为配偶激活因子（Spouse Activation Factor，SAF）。";
+  const cleaned = cleanMisboundAnchorParens(source, translated, slice);
+  assert.equal(cleaned, translated);
 });
 
 test("normalizeExplicitRepairAnchorText restores a quoted-line anchor from an explicit repair target", () => {

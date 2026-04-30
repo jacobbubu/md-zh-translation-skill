@@ -461,6 +461,100 @@ function resolveEmphasisPlanTargetText(
   return targetText;
 }
 
+/**
+ * Strip `（English[，ABBR]）` parentheticals that follow a Chinese phrase when
+ * the parenthesised English is neither (a) present in the corresponding
+ * source line, nor (b) the canonical english of any anchor required for that
+ * line. Catches the loonshots-style misbinding where the model writes
+ * `泛美航空公司（Trans World Airlines）`: Pan Am is the source-line term but
+ * Trans World Airlines is a different entity that only appears later in the
+ * chunk. The misbound paren survives audit (Pan Am is already established
+ * earlier in the doc, so first_mention_bilingual doesn't fire) and the
+ * existing collapsers only remove duplicate / runaway chains, not pairings.
+ *
+ * Conservative: only fires when (1) the line carries at least one required
+ * anchor (so we have a sense of what is "expected" here) AND (2) the
+ * parenthesised English is absent from the source line. If the source line
+ * itself contains the same English token (case-insensitive), the binding is
+ * preserved on the assumption the model is mirroring source structure.
+ */
+export function cleanMisboundAnchorParens(
+  source: string,
+  text: string,
+  slice: PromptSlice | null
+): string {
+  if (!slice) {
+    return text;
+  }
+  const requiredAnchors = dedupePromptAnchors(slice.requiredAnchors);
+  if (requiredAnchors.length === 0) {
+    return text;
+  }
+  const sourceLines = source.split(/\r?\n/);
+  const translatedLines = text.split(/\r?\n/);
+  let changed = false;
+  // Match `中文短语（English[，ABBR]）`. The Chinese run must end immediately
+  // before `（`; the parenthesised content is the same shape accepted by
+  // lineAlreadyHasFamilyVariantAnchorParen so legitimate first-mention
+  // canonicals (含中文逗号 + 缩写) are recognised.
+  const misboundPattern =
+    /([一-鿿]+)（([A-Za-z][A-Za-z0-9 .+/_\-]*)(?:[，][A-Za-z0-9 .+/_\-]+)?）/gu;
+  for (let index = 0; index < Math.min(sourceLines.length, translatedLines.length); index += 1) {
+    const sourceLine = sourceLines[index] ?? "";
+    const translatedLine = translatedLines[index] ?? "";
+    const lineAnchors = requiredAnchors.filter((anchor) =>
+      containsSourceAnchorPhrase(sourceLine, anchor.english)
+    );
+    if (lineAnchors.length === 0) {
+      continue;
+    }
+    const sourceLower = sourceLine.toLowerCase();
+    let lineChanged = false;
+    const cleaned = translatedLine.replace(misboundPattern, (match, prefix, englishToken) => {
+      const englishRaw = String(englishToken).trim();
+      const englishLower = englishRaw.toLowerCase();
+      if (!englishRaw || !prefix) {
+        return match;
+      }
+      // (a) preserve when source line itself contains this english token —
+      // the binding mirrors source structure (e.g. an aside / parenthetical
+      // copy of an English term that is genuinely present in the source).
+      if (sourceLower.includes(englishLower)) {
+        return match;
+      }
+      // (b) preserve when the english matches an anchor required for THIS
+      // line. The anchor's english is the canonical surface form; minor
+      // case / suffix variants are handled by lineAlreadyHasFamilyVariantAnchorParen
+      // in injectAnchorIntoLine, but here we only need to know whether the
+      // english token actually belongs to a binding the model was told to
+      // produce.
+      for (const anchor of lineAnchors) {
+        const candidates = [anchor.english, anchor.chineseHint];
+        if (candidates.some((c) => String(c).toLowerCase() === englishLower)) {
+          return match;
+        }
+        const cl = anchor.english.toLowerCase();
+        if (
+          cl.startsWith(`${englishLower} `) ||
+          cl.endsWith(` ${englishLower}`) ||
+          englishLower.startsWith(`${cl} `) ||
+          englishLower.endsWith(` ${cl}`)
+        ) {
+          return match;
+        }
+      }
+      // Misbinding: drop the parenthetical, keep the leading Chinese phrase.
+      lineChanged = true;
+      return String(prefix);
+    });
+    if (lineChanged) {
+      translatedLines[index] = cleaned;
+      changed = true;
+    }
+  }
+  return changed ? translatedLines.join("\n") : text;
+}
+
 export function injectPlannedAnchorText(
   source: string,
   text: string,

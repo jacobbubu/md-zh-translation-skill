@@ -17,6 +17,7 @@ import {
 import { DefaultCodexExecutor, type CodexExecOptions, type CodexExecResult, type CodexExecutor } from "./codex-exec.js";
 import {
   applyEmphasisPlanTargets,
+  cleanMisboundAnchorParens,
   applySemanticMentionPlans,
   describeAnchorDisplay,
   formatAnchorDisplay,
@@ -6819,9 +6820,14 @@ async function translateProtectedSegment(
     protectedSource,
     restoredCodeLikeDraftText
   );
+  const misbindCleanedDraftText = cleanMisboundAnchorParens(
+    protectedSource,
+    restoredExampleTokenDraftText,
+    headingPlanningSlice
+  );
   const normalizedDraftSurfaceText = collapseRunawayEnglishAnchorChain(
     normalizeMalformedInlineEnglishEmphasis(
-      normalizeMarkdownLinkLabelWhitespace(restoredExampleTokenDraftText)
+      normalizeMarkdownLinkLabelWhitespace(misbindCleanedDraftText)
     )
   );
   const reprotectedBody = reprotectMarkdownSpans(normalizedDraftSurfaceText, combinedSpans);
@@ -7657,9 +7663,14 @@ async function repairDraftedSegment(
       draftedSegment.protectedSource,
       restoredCodeLikeRepairText
     );
+    const misbindCleanedRepairText = cleanMisboundAnchorParens(
+      draftedSegment.protectedSource,
+      restoredExampleTokenRepairText,
+      headingPlanningSlice
+    );
     const normalizedRepairSurfaceText = collapseRunawayEnglishAnchorChain(
       normalizeMalformedInlineEnglishEmphasis(
-        normalizeMarkdownLinkLabelWhitespace(restoredExampleTokenRepairText)
+        normalizeMarkdownLinkLabelWhitespace(misbindCleanedRepairText)
       )
     );
     const reprotectedRepairBody = reprotectMarkdownSpans(
