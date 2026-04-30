@@ -3081,6 +3081,129 @@ test("translateMarkdownArticle resumes completed chunks from a persisted checkpo
   }
 });
 
+test("translateMarkdownArticle resumes a sparse checkpoint and only re-translates the missing chunks", async () => {
+  // Sparse-checkpoint resume: simulate the retry-failed-chunks workflow by
+  // dropping one chunk's entry from the checkpoint between runs. The second
+  // run should retranslate only that chunk and reuse the rest from
+  // checkpoint.
+  // Pad each section so the planner cuts at least 2 chunks.
+  const padding = "Lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod tempor.\n\n".repeat(20);
+  const source = ["## One", "", padding, "## Two", "", padding].join("\n");
+  const tempDir = await mkdtemp(path.join(tmpdir(), "mdzh-sparse-checkpoint-"));
+  const checkpointDir = path.join(tempDir, "checkpoint");
+  const progressMessages: string[] = [];
+
+  class CheckpointExecutor implements CodexExecutor {
+    analysisCalls = 0;
+    contentCalls = 0;
+    chunkSourceSeen: string[] = [];
+
+    async execute(prompt: string, options: CodexExecOptions): Promise<CodexExecResult> {
+      if (isDocumentAnalysisPrompt(prompt)) {
+        this.analysisCalls += 1;
+        return createExecResult(createEmptyAnchorCatalog());
+      }
+      if (options.outputSchema && prompt.includes("### BLOCK 1")) {
+        this.contentCalls += 1;
+        const sourceSection = extractPromptSection(prompt, "【按块展开的英文原文】") ?? "";
+        if (sourceSection) this.chunkSourceSeen.push(sourceSection);
+        const blockCount = (prompt.match(/^### BLOCK \d+ \([^)]+\)$/gm) ?? []).length;
+        return createExecResult(
+          JSON.stringify({
+            blocks: Array.from({ length: Math.max(1, blockCount) }, (_, index) => `块 ${index + 1}`)
+          })
+        );
+      }
+      if (options.outputSchema || prompt.includes('"hard_checks"') || prompt.includes("只返回 JSON")) {
+        this.contentCalls += 1;
+        return createExecResult(wrapAuditForSegments(prompt, createAudit(true)));
+      }
+      const currentTranslation = extractPromptSection(prompt, "【当前译文】");
+      if (currentTranslation !== null) {
+        this.contentCalls += 1;
+        return createExecResult(currentTranslation);
+      }
+      const sourceSection = extractPromptSection(prompt, "【英文原文】");
+      this.contentCalls += 1;
+      return createExecResult(sourceSection ?? "");
+    }
+  }
+
+  const firstExecutor = new CheckpointExecutor();
+  const secondExecutor = new CheckpointExecutor();
+
+  try {
+    await translateMarkdownArticle(source, {
+      executor: firstExecutor,
+      formatter: async (markdown) => markdown,
+      sourcePathHint: "sparse-checkpoint.md",
+      checkpointDir,
+      disableAnalysisCache: true
+    });
+
+    // Manually strip chunk-1's entry from the checkpoint so the second run
+    // sees a sparse checkpoint (chunks: [chunk-2] only).
+    const fs = await import("node:fs/promises");
+    const files = await fs.readdir(checkpointDir);
+    const checkpointFile = files.find((f) => f.endsWith(".json"));
+    assert.ok(checkpointFile, "checkpoint file should exist after first run");
+    const checkpointPath = path.join(checkpointDir, checkpointFile!);
+    const checkpoint = JSON.parse(await fs.readFile(checkpointPath, "utf8"));
+    const before = checkpoint.completedChunks.length;
+    assert.ok(before >= 2, `first run should have produced ≥2 completed chunks, got ${before}: ${JSON.stringify(checkpoint.completedChunks.map((c: { chunkId: string }) => c.chunkId))}`);
+    checkpoint.completedChunks = checkpoint.completedChunks.filter(
+      (c: { chunkId: string }) => c.chunkId !== "chunk-1"
+    );
+    assert.equal(checkpoint.completedChunks.length, before - 1, "expected to strip chunk-1 entry");
+    await fs.writeFile(checkpointPath, JSON.stringify(checkpoint), "utf8");
+
+    const result = await translateMarkdownArticle(source, {
+      executor: secondExecutor,
+      formatter: async (markdown) => markdown,
+      sourcePathHint: "sparse-checkpoint.md",
+      checkpointDir,
+      disableAnalysisCache: true,
+      onProgress: (message) => progressMessages.push(message)
+    });
+
+    // Second run should resume the sparse checkpoint (before-1 entries left)
+    // and only retranslate chunk-1.
+    const expectedRemaining = before - 1;
+    const resumeMatcher = new RegExp(
+      `Resumed translation checkpoint with ${expectedRemaining} completed chunk\\(s\\)`
+    );
+    assert.match(progressMessages.join("\n"), resumeMatcher);
+    // Each remaining checkpoint chunk must produce a "Skipping ...; restored
+    // from checkpoint." log on the second run; chunk-1 must NOT skip (it has
+    // to be retranslated).
+    const secondRunProgress = progressMessages.slice(progressMessages.length - 30);
+    const skippedIds = secondRunProgress
+      .filter((m) => /Skipping chunk-\d+; restored from checkpoint/.test(m))
+      .map((m) => m.match(/Skipping (chunk-\d+);/)?.[1] ?? "");
+    assert.ok(skippedIds.length === expectedRemaining, `expected ${expectedRemaining} chunks restored from checkpoint, got ${skippedIds.length}: ${skippedIds.join(",")}`);
+    assert.ok(!skippedIds.includes("chunk-1"), "chunk-1 must NOT be skipped — it was stripped from checkpoint");
+    assert.ok(
+      secondExecutor.contentCalls > 0,
+      "expected the missing chunk to trigger retranslation"
+    );
+    // The final body must still contain content from every chunk in plan
+    // order — the freshly retranslated chunk woven with the checkpoint
+    // bodies. Mock executor produces "块 N" placeholders for each source
+    // block, so the document should contain a continuous sequence of those
+    // (one set per chunk-1 worker output, then the restored bodies).
+    assert.ok(result.markdown.length > 0, "result markdown must not be empty");
+    // Output must contain at least as many distinct "块 N" placeholders as
+    // there are chunks (one set from each chunk's body / restored body).
+    const blockMatches = result.markdown.match(/块\s+\d+/g) ?? [];
+    assert.ok(
+      blockMatches.length >= before,
+      `expected at least ${before} block placeholders in output (one per chunk), got ${blockMatches.length}`
+    );
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});
+
 test("translateMarkdownArticle strips hook prompt control-text contamination before audit", async () => {
   const source = "Plain body.\n";
   const executor: CodexExecutor = {

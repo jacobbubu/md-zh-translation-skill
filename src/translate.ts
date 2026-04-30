@@ -2873,24 +2873,28 @@ export async function translateMarkdownArticle(source: string, options: Translat
     if (checkpointDir && checkpointKey) {
       const checkpoint = await readTranslationCheckpoint(checkpointDir, checkpointKey);
       if (checkpoint) {
-        const isPrefixCheckpoint = checkpoint.completedChunks.every((entry, index) => {
-          const chunk = chunkPlan.chunks[index];
-          return chunk ? entry.chunkId === `chunk-${chunk.index + 1}` : false;
-        });
+        // Sparse checkpoints are valid: as long as every checkpointed chunkId
+        // resolves to a chunk in the current plan, we can resume any subset of
+        // completed chunks (e.g. when retry-failed-chunks selectively drops
+        // soft-fallback entries from the checkpoint to re-translate them
+        // without redoing the whole book). The finalize loop below already
+        // checks `completedCheckpointChunks.some(...)` per index, so it can
+        // weave checkpoint bodies and worker-produced bodies together in plan
+        // order. Resume only needs to import the run-level state and seed
+        // completedCheckpointChunks here; the finalize loop will push each
+        // restored body into restoredChunks at the right index.
+        const planChunkIds = new Set(
+          chunkPlan.chunks.map((chunk) => `chunk-${chunk.index + 1}`)
+        );
+        const allCheckpointIdsKnown = checkpoint.completedChunks.every((entry) =>
+          planChunkIds.has(entry.chunkId)
+        );
 
-        if (isPrefixCheckpoint) {
+        if (allCheckpointIdsKnown) {
           state = checkpoint.state;
           repairCyclesUsed = checkpoint.repairCyclesUsed;
           nextLocalSpanIndex = checkpoint.nextLocalSpanIndex;
           completedCheckpointChunks.push(...checkpoint.completedChunks);
-          for (const [index, completedChunk] of checkpoint.completedChunks.entries()) {
-            const chunk = chunkPlan.chunks[index];
-            if (!chunk) {
-              continue;
-            }
-            restoredChunks.push(completedChunk.body + chunk.separatorAfter);
-            gateAudits.push(completedChunk.gateAudit);
-          }
           report(
             options,
             "draft",
@@ -3120,7 +3124,19 @@ export async function translateMarkdownArticle(source: string, options: Translat
           const outcome = chunkOutcomes[nextChunkToFinalize];
           const finalizingChunk = chunkPlan.chunks[nextChunkToFinalize]!;
           if (!outcome) {
-            // Already restored from checkpoint — nothing to do beyond skipping.
+            // Restored from checkpoint — push its body into restoredChunks at
+            // this plan index so the final document weaves checkpoint bodies
+            // and worker-produced bodies together in plan order. Sparse
+            // checkpoints (retry-failed-chunks workflow) rely on this; for
+            // contiguous prefix checkpoints it produces the same final
+            // document as the previous "push during resume" behaviour.
+            const checkpointEntry = completedCheckpointChunks.find(
+              (entry) => entry.chunkId === `chunk-${finalizingChunk.index + 1}`
+            );
+            if (checkpointEntry) {
+              restoredChunks.push(checkpointEntry.body + finalizingChunk.separatorAfter);
+              gateAudits.push(checkpointEntry.gateAudit);
+            }
             nextChunkToFinalize += 1;
             continue;
           }
