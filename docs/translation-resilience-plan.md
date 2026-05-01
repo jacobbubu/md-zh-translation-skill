@@ -128,3 +128,40 @@ function alignSkeletons(source: StructuralSkeleton, draft: StructuralSkeleton):
 - TM 跨 doc 命中、fuzzy match：Phase 4 v1 已落地够用，等 v1 在生产积累足量数据再说
 - analysis 的并行化：21 shards 串行是真实瓶颈但与本轮主题无关
 - 列表 token 级 streaming / 部分 chunk 续译：观察期之后再判断
+
+## 7. Loonshots Case Study（2026-04-29 ~ 04-30）
+
+整本《Loonshots》（728 KB / 134 chunks）跑完一次后，7 个 chunks 在多次重试中**稳定 fallback to source**——repair 5.5、rescue 5.5 都救不回。每一轮都是同样集合，证明不是随机失败而是当前模型 + 当前 prompt 形态下的真实能力边界。
+
+### 硬骨头清单
+
+| chunk | source 大小 | heading | 主要失败模式 |
+|---|---|---|---|
+| 14 | 4.3 KB | 1 § ONE AT A TIME | 段落重复（第 4-5 段重复 1-2 段）+ 漏译 Radar 段 + V-1 段 |
+| 30 | 8.2 KB | 3 § JT AND LINDY | 段落英文残留（第 3-5 段未译）+ 漏末尾 China Clipper 段 |
+| 54 | 6.1 KB | 5 § HOW TO WIN AT CHESS | 段落重复 + 漏末尾 Xerox PARC 段 + 多处首现锚点缺失 |
+| 69 | 2.9 KB | 6 § WHEN TERROR GOES VIRAL | 末尾重复"狱卒"段 + 缺 Joseph Smith 段 |
+| 72 | 4.3 KB | 7 § THE INVISIBLE AXE | 第 6-9 段重复追加第 2-5 段（整组 4 段重复）|
+| 91 | 7.1 KB | 9 § DRUGS | image placeholder `@@MDZH_IMAGE_DESTINATION_0095@@` 被复制（found 2 expected 1）|
+| 109 | 10.4 KB | Source Notes § INTRODUCTION | draft 返回 meta/audit text（模型在 reference notes 这种密集列表上偷懒）|
+
+### 共同失败签名
+
+- **段落级幻觉**（chunks 14 / 30 / 54 / 69 / 72）：模型在 ≥ 4 KB 的叙事密集 segment 上重复段落、漏译段落、跨段错位。Audit 报 `paragraph_match` 失败，repair / rescue 都救不回。
+- **placeholder 复制**（chunk 91）：image 占位符被错误地复制到译文不同位置，触发 `protected_span_integrity` 失败。
+- **draft 返工/偷懒**（chunk 109）：source 是密集 reference list，模型 draft 阶段返回元话语而非翻译内容（可能识别成"审校提示"而非翻译任务）。
+
+### 已尝试但救不回的手段
+
+- repair 默认升 gpt-5.5（PR #105）—— 带 audit must_fix 的强模型修复
+- rescue 整 chunk 用 gpt-5.5 重做（PR #92）
+- json-blocks 严格 retry 不再 fallback freeform（PR #104）
+- anchor 错绑清理 `cleanMisboundAnchorParens`（PR #107）
+
+### 处置
+
+走 §3.3 「接受能力边界」路径：
+- soft-gate 真"软"（PR #106）让这 7 个 chunks fallback to source（保留英文段），整本书 95%+ 中文，结构完整可读
+- 不为这 7 个 chunks 开新 patch——叠加到已有的 cleanMisbound / dedup / aligner 之上不再有边际改进
+- 等模型升级后回来 retry 验证（sparse-checkpoint-resume PR #108 让 retry 成本低，sparse 路径只翻这 7 个，~18 分钟 vs 全本重跑 ~120 分钟）
+- 总览 fixture：`test/fixtures/resilience/loonshots-narrative-paragraph-hallucination.md`
