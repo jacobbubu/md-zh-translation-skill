@@ -228,7 +228,17 @@ async function executeFinalRescueCommand(
       const trimmed = stdout.replace(/\s+$/u, "");
       finish(trimmed.length > 0 ? trimmed : null);
     });
-    child.stdin.end(protectedSource);
+    // Swallow EPIPE: a fast-exiting command (e.g. `printf '...'` in tests)
+    // can close stdin before our write completes. We don't care — the
+    // command's stdout is what we read; if it ignored stdin that's fine.
+    child.stdin.on("error", () => {
+      // intentional no-op
+    });
+    try {
+      child.stdin.end(protectedSource);
+    } catch {
+      // also ignore — the close handler above is what reports the verdict
+    }
   });
 }
 
