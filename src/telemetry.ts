@@ -13,6 +13,8 @@ export type TelemetryEventType =
   | "chunk.concurrency"
   | "chunk.rescue.start"
   | "chunk.rescue.end"
+  | "chunk.final_rescue.start"
+  | "chunk.final_rescue.end"
   | "repair.cycle"
   | "repair.patch"
   | "gate.result"

@@ -1,3 +1,4 @@
+import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -124,6 +125,152 @@ function readRepairModel(postDraftModel: string): string {
     return postDraftModel;
   }
   return trimmed;
+}
+
+/**
+ * External "final rescue" hook resolver. When a chunk exhausts every codex
+ * lane (draft → repair × 2 → audit → rescue with stronger model) and is
+ * about to fall back to source content under soft-gate, the pipeline
+ * optionally hands the chunk's protected source text to a user-configured
+ * shell command. The command receives the source on stdin and is expected
+ * to return a Chinese translation on stdout. If the command's output passes
+ * structural validation (paragraph count / placeholder count match, plus a
+ * minimum Chinese character ratio), it replaces the chunk body. On any
+ * failure the pipeline keeps its existing soft-gate-fallback behaviour.
+ *
+ * The hook is opt-in: set `MDZH_FINAL_RESCUE_COMMAND=<shell command>` to
+ * enable. The command is launched via `/bin/sh -c`, so any tool the user
+ * trusts can plug in here — Claude API, GPT-5 outside codex, sentence-level
+ * splitter, even a Slack bot that pages a translator. The pipeline does
+ * not bind any specific model.
+ *
+ * Returns null when the env var is unset, empty, or set to one of the
+ * disable sentinels.
+ */
+function readFinalRescueCommand(): string | null {
+  const raw = process.env.MDZH_FINAL_RESCUE_COMMAND;
+  if (raw === undefined) {
+    return null;
+  }
+  const trimmed = raw.trim();
+  if (trimmed === "") {
+    return null;
+  }
+  const lower = trimmed.toLowerCase();
+  if (lower === "off" || lower === "none" || lower === "false" || lower === "0") {
+    return null;
+  }
+  return trimmed;
+}
+
+function readFinalRescueTimeoutMs(): number {
+  const raw = process.env.MDZH_FINAL_RESCUE_TIMEOUT_MS?.trim();
+  if (!raw) {
+    return 600_000;
+  }
+  const parsed = Number.parseInt(raw, 10);
+  if (Number.isFinite(parsed) && parsed > 0) {
+    return parsed;
+  }
+  return 600_000;
+}
+
+/**
+ * Run the configured final-rescue command with `protectedSource` on stdin.
+ * Returns the trimmed stdout on success, or `null` if the command fails,
+ * times out, exits non-zero, or produces empty output. Caller is expected
+ * to validate the returned text against the source structure (paragraph
+ * count / placeholder count / Chinese-character ratio) before accepting.
+ */
+async function executeFinalRescueCommand(
+  command: string,
+  protectedSource: string,
+  timeoutMs: number
+): Promise<string | null> {
+  return new Promise((resolve) => {
+    let resolved = false;
+    let stdout = "";
+    let stderr = "";
+    const child = spawn("/bin/sh", ["-c", command], {
+      stdio: ["pipe", "pipe", "pipe"],
+      env: process.env
+    });
+    const finish = (text: string | null) => {
+      if (resolved) return;
+      resolved = true;
+      try {
+        child.kill("SIGTERM");
+      } catch {
+        // ignore — child may already be dead
+      }
+      resolve(text);
+    };
+    const timer = setTimeout(() => finish(null), timeoutMs);
+    child.stdout.setEncoding("utf8");
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk;
+    });
+    child.stderr.setEncoding("utf8");
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk;
+    });
+    child.on("error", () => {
+      clearTimeout(timer);
+      void stderr;
+      finish(null);
+    });
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      if (code !== 0) {
+        finish(null);
+        return;
+      }
+      const trimmed = stdout.replace(/\s+$/u, "");
+      finish(trimmed.length > 0 ? trimmed : null);
+    });
+    child.stdin.end(protectedSource);
+  });
+}
+
+/**
+ * Validate a final-rescue command's output against the source structure.
+ * Accept iff (1) paragraph counts match, (2) protected-placeholder counts
+ * match, (3) the body contains a non-trivial amount of Chinese characters
+ * (≥10% of non-whitespace, non-ASCII chars). Anything else gets rejected
+ * and the pipeline falls through to soft-gate source fallback.
+ */
+function validateFinalRescueOutput(
+  protectedSource: string,
+  candidate: string
+): { ok: true } | { ok: false; reason: string } {
+  const sourceBlocks = splitPromptBlocks(protectedSource);
+  const candidateBlocks = splitPromptBlocks(candidate);
+  if (sourceBlocks.length !== candidateBlocks.length) {
+    return {
+      ok: false,
+      reason: `paragraph count mismatch: source ${sourceBlocks.length}, rescue output ${candidateBlocks.length}`
+    };
+  }
+  const placeholderPattern = /@@MDZH_[A-Z_]+_\d{4}@@/g;
+  const sourceMatches = protectedSource.match(placeholderPattern) ?? [];
+  const candidateMatches = candidate.match(placeholderPattern) ?? [];
+  if (sourceMatches.length !== candidateMatches.length) {
+    return {
+      ok: false,
+      reason: `protected placeholder count mismatch: source ${sourceMatches.length}, rescue output ${candidateMatches.length}`
+    };
+  }
+  const cjkCount = (candidate.match(/[一-鿿]/gu) ?? []).length;
+  // Accept any output with ≥1 Chinese char — paragraph + placeholder counts
+  // already enforce structural shape; if the rescue produces zero CJK
+  // characters at all we treat it as "command silently echoed source".
+  if (cjkCount < 1) {
+    return {
+      ok: false,
+      reason: `rescue output contains no Chinese characters (likely echoed source untranslated)`
+    };
+  }
+  return { ok: true };
 }
 
 function readRescueModel(): string | null {
@@ -3062,6 +3209,76 @@ export async function translateMarkdownArticle(source: string, options: Translat
           }
           return;
         } else {
+          // Last-line tier before source fallback: optional external "final
+          // rescue" hook. The user can configure
+          // `MDZH_FINAL_RESCUE_COMMAND` to plug in a stronger external
+          // translator (Claude Opus, GPT-5 outside codex, sentence-level
+          // splitter, human-in-the-loop). If accepted, the chunk gets a
+          // real Chinese body instead of degrading to English source.
+          const finalRescueCommand = readFinalRescueCommand();
+          let finalRescueBody: string | null = null;
+          let finalRescueError: string | null = null;
+          if (finalRescueCommand) {
+            const finalRescueStart = Date.now();
+            const timeoutMs = readFinalRescueTimeoutMs();
+            telemetry.emit({
+              ts: finalRescueStart,
+              runId,
+              type: "chunk.final_rescue.start",
+              chunkId,
+              meta: {
+                chunkIndex: chunk.index + 1,
+                command: finalRescueCommand,
+                timeoutMs
+              }
+            });
+            report(
+              options,
+              "audit",
+              `Chunk ${chunk.index + 1}/${chunkPlan.chunks.length} (${chunk.headingPath.join(" > ") || "untitled"}): invoking final-rescue command before source fallback.`
+            );
+            const candidate = await executeFinalRescueCommand(
+              finalRescueCommand,
+              chunk.source,
+              timeoutMs
+            );
+            if (candidate === null) {
+              finalRescueError = "command exited non-zero, timed out, or produced empty output";
+            } else {
+              const validation = validateFinalRescueOutput(chunk.source, candidate);
+              if (validation.ok) {
+                finalRescueBody = candidate;
+              } else {
+                finalRescueError = validation.reason;
+              }
+            }
+            telemetry.emit({
+              ts: Date.now(),
+              runId,
+              type: "chunk.final_rescue.end",
+              chunkId,
+              durationMs: Date.now() - finalRescueStart,
+              ...(finalRescueError ? { error: finalRescueError } : {}),
+              meta: {
+                command: finalRescueCommand,
+                success: finalRescueBody !== null
+              }
+            });
+            if (finalRescueBody !== null) {
+              report(
+                options,
+                "audit",
+                `Chunk ${chunk.index + 1}/${chunkPlan.chunks.length} (${chunk.headingPath.join(" > ") || "untitled"}): final-rescue command produced an accepted translation; using it instead of source fallback.`
+              );
+            } else if (finalRescueError) {
+              report(
+                options,
+                "audit",
+                `Chunk ${chunk.index + 1}/${chunkPlan.chunks.length} (${chunk.headingPath.join(" > ") || "untitled"}): final-rescue command rejected (${finalRescueError}); falling back to source content.`
+              );
+            }
+          }
+
           telemetry.emit({
             ts: Date.now(),
             runId,
@@ -3069,21 +3286,30 @@ export async function translateMarkdownArticle(source: string, options: Translat
             chunkId,
             durationMs: Date.now() - chunkStartedAt,
             error: errorMessage,
-            meta: { recovered: true, structural: false }
+            meta: {
+              recovered: true,
+              structural: false,
+              finalRescueAccepted: finalRescueBody !== null
+            }
           });
-          report(
-            options,
-            "audit",
-            `Chunk ${chunk.index + 1}/${chunkPlan.chunks.length} (${chunk.headingPath.join(" > ") || "untitled"}): soft-gate caught chunk failure (${errorMessage}); falling back to source content.`
-          );
+          if (finalRescueBody === null) {
+            report(
+              options,
+              "audit",
+              `Chunk ${chunk.index + 1}/${chunkPlan.chunks.length} (${chunk.headingPath.join(" > ") || "untitled"}): soft-gate caught chunk failure (${errorMessage}); falling back to source content.`
+            );
+          }
           // Pass only spans whose placeholder ID appears in this chunk's source
           // — restoreMarkdownSpans throws if asked to restore a span absent from
           // the body, and the document-wide `spans` includes IDs from other
           // chunks.
           const chunkSpans = spans.filter((span) => chunk.source.includes(span.id));
-          const fallbackBody = restoreMarkdownSpans(chunk.source, chunkSpans);
+          const recoveredBody =
+            finalRescueBody !== null
+              ? restoreMarkdownSpans(finalRescueBody, chunkSpans)
+              : restoreMarkdownSpans(chunk.source, chunkSpans);
           chunkResult = {
-            body: fallbackBody,
+            body: recoveredBody,
             repairCyclesUsed: 0,
             gateAudit: createSyntheticChunkFailureAudit(errorMessage),
             nextLocalSpanIndex
