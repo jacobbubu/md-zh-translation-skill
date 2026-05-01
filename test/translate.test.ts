@@ -4402,6 +4402,155 @@ test("MDZH_RESCUE_MODEL=off explicitly disables rescue", async () => {
   assert.equal(rescueEvents.length, 0, "no rescue events should fire when MDZH_RESCUE_MODEL=off");
 });
 
+test("MDZH_FINAL_RESCUE_COMMAND replaces source-fallback when its output validates", async () => {
+  // Setup: chunk fails draft + rescue, so it would normally fall back to
+  // source content under soft-gate. With MDZH_FINAL_RESCUE_COMMAND set to
+  // an external translator that produces a valid Chinese body matching
+  // source paragraph count, the chunk body must be the rescue output —
+  // NOT the original English source.
+  const source = "## Hello\n\nWorld.\n";
+
+  const executor: CodexExecutor = {
+    async execute(prompt: string, options: CodexExecOptions): Promise<CodexExecResult> {
+      if (isDocumentAnalysisPrompt(prompt)) {
+        return createExecResult(createEmptyAnchorCatalog());
+      }
+      if (isBundledAuditPrompt(prompt, options) || (options.outputSchema && prompt.includes('"hard_checks"'))) {
+        return createExecResult(wrapAuditForSegments(prompt, createAudit(true)));
+      }
+      // Both primary and rescue draft calls fail.
+      throw new CodexExecutionError("draft fail");
+    }
+  };
+
+  // Final rescue: a tiny shell command that emits a valid 2-paragraph
+  // Chinese body matching the source structure. Using `printf` here keeps
+  // the test hermetic (no API call) while exercising the spawn / stdio
+  // path end-to-end.
+  const previousCommand = process.env.MDZH_FINAL_RESCUE_COMMAND;
+  const previousRescue = process.env.MDZH_RESCUE_MODEL;
+  process.env.MDZH_FINAL_RESCUE_COMMAND = "printf '## 你好\\n\\n世界。\\n'";
+  process.env.MDZH_RESCUE_MODEL = "off";
+  const sink = createMemoryTelemetrySink();
+  let result;
+  try {
+    result = await translateMarkdownArticle(source, {
+      executor,
+      formatter: async (markdown) => markdown,
+      softGate: true,
+      telemetry: sink
+    });
+  } finally {
+    if (previousCommand === undefined) delete process.env.MDZH_FINAL_RESCUE_COMMAND;
+    else process.env.MDZH_FINAL_RESCUE_COMMAND = previousCommand;
+    if (previousRescue === undefined) delete process.env.MDZH_RESCUE_MODEL;
+    else process.env.MDZH_RESCUE_MODEL = previousRescue;
+  }
+
+  assert.match(result.markdown, /你好/, "final-rescue output should appear in body");
+  assert.match(result.markdown, /世界/, "final-rescue output should appear in body");
+  assert.doesNotMatch(result.markdown, /World\./, "source English must NOT remain when final-rescue accepted");
+
+  const finalRescueEvents = [...sink.events].filter((event) => event.type.startsWith("chunk.final_rescue"));
+  assert.ok(finalRescueEvents.length >= 2, "final_rescue.start + .end should both fire");
+  const endEvent = finalRescueEvents.find((e) => e.type === "chunk.final_rescue.end")!;
+  assert.equal((endEvent.meta as Record<string, unknown>).success, true);
+
+  const chunkErrorEvent = [...sink.events].find((e) => e.type === "chunk.error");
+  assert.ok(chunkErrorEvent);
+  assert.equal((chunkErrorEvent!.meta as Record<string, unknown>).finalRescueAccepted, true);
+});
+
+test("MDZH_FINAL_RESCUE_COMMAND output that fails validation still falls back to source", async () => {
+  // Final-rescue command returns a single-paragraph string but source has
+  // 2 paragraphs — paragraph_match validation should reject it and the
+  // pipeline must fall back to source content (English).
+  const source = "## Hello\n\nWorld.\n";
+
+  const executor: CodexExecutor = {
+    async execute(prompt: string, options: CodexExecOptions): Promise<CodexExecResult> {
+      if (isDocumentAnalysisPrompt(prompt)) {
+        return createExecResult(createEmptyAnchorCatalog());
+      }
+      if (isBundledAuditPrompt(prompt, options) || (options.outputSchema && prompt.includes('"hard_checks"'))) {
+        return createExecResult(wrapAuditForSegments(prompt, createAudit(true)));
+      }
+      throw new CodexExecutionError("draft fail");
+    }
+  };
+
+  const previousCommand = process.env.MDZH_FINAL_RESCUE_COMMAND;
+  const previousRescue = process.env.MDZH_RESCUE_MODEL;
+  // Note: emits only one paragraph — paragraph_match should fail.
+  process.env.MDZH_FINAL_RESCUE_COMMAND = "printf '只有一段中文内容，缺少标题段。'";
+  process.env.MDZH_RESCUE_MODEL = "off";
+  const sink = createMemoryTelemetrySink();
+  let result;
+  try {
+    result = await translateMarkdownArticle(source, {
+      executor,
+      formatter: async (markdown) => markdown,
+      softGate: true,
+      telemetry: sink
+    });
+  } finally {
+    if (previousCommand === undefined) delete process.env.MDZH_FINAL_RESCUE_COMMAND;
+    else process.env.MDZH_FINAL_RESCUE_COMMAND = previousCommand;
+    if (previousRescue === undefined) delete process.env.MDZH_RESCUE_MODEL;
+    else process.env.MDZH_RESCUE_MODEL = previousRescue;
+  }
+
+  // Rejected output → source fallback in effect → English remains.
+  assert.match(result.markdown, /Hello/);
+  assert.match(result.markdown, /World/);
+  const endEvent = [...sink.events].find((e) => e.type === "chunk.final_rescue.end")!;
+  assert.ok(endEvent);
+  assert.equal((endEvent.meta as Record<string, unknown>).success, false);
+  const chunkErrorEvent = [...sink.events].find((e) => e.type === "chunk.error");
+  assert.equal((chunkErrorEvent!.meta as Record<string, unknown>).finalRescueAccepted, false);
+});
+
+test("MDZH_FINAL_RESCUE_COMMAND not set: pipeline still source-fallbacks (no behaviour change vs before)", async () => {
+  const source = "## Hello\n\nWorld.\n";
+
+  const executor: CodexExecutor = {
+    async execute(prompt: string, options: CodexExecOptions): Promise<CodexExecResult> {
+      if (isDocumentAnalysisPrompt(prompt)) {
+        return createExecResult(createEmptyAnchorCatalog());
+      }
+      if (isBundledAuditPrompt(prompt, options) || (options.outputSchema && prompt.includes('"hard_checks"'))) {
+        return createExecResult(wrapAuditForSegments(prompt, createAudit(true)));
+      }
+      throw new CodexExecutionError("draft fail");
+    }
+  };
+
+  const previousCommand = process.env.MDZH_FINAL_RESCUE_COMMAND;
+  const previousRescue = process.env.MDZH_RESCUE_MODEL;
+  delete process.env.MDZH_FINAL_RESCUE_COMMAND;
+  process.env.MDZH_RESCUE_MODEL = "off";
+  const sink = createMemoryTelemetrySink();
+  let result;
+  try {
+    result = await translateMarkdownArticle(source, {
+      executor,
+      formatter: async (markdown) => markdown,
+      softGate: true,
+      telemetry: sink
+    });
+  } finally {
+    if (previousCommand !== undefined) process.env.MDZH_FINAL_RESCUE_COMMAND = previousCommand;
+    if (previousRescue === undefined) delete process.env.MDZH_RESCUE_MODEL;
+    else process.env.MDZH_RESCUE_MODEL = previousRescue;
+  }
+
+  // No final_rescue events at all when env unset.
+  const finalRescueEvents = [...sink.events].filter((event) => event.type.startsWith("chunk.final_rescue"));
+  assert.equal(finalRescueEvents.length, 0);
+  // Source preserved (English).
+  assert.match(result.markdown, /World/);
+});
+
 test("default behavior: repair defaults to gpt-5.5 when MDZH_REPAIR_MODEL is unset", async () => {
   // Trigger one repair cycle (audit fails on first pass, second audit passes)
   // and verify the repair stage call landed on gpt-5.5, not the mini default.

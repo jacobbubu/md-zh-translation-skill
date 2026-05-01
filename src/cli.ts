@@ -100,6 +100,18 @@ Performance knobs:
     cannot. Set to \`off\` / \`none\` / \`false\` / \`0\` (or empty) to fall
     back to the post-draft (typically mini) model. Trades cost for first-pass
     repair success on long-form content.
+  - MDZH_FINAL_RESCUE_COMMAND=<shell command> opt-in last-line tier before
+    soft-gate source fallback. When draft + repair + rescue all fail and a
+    chunk would otherwise fall back to English source content, this shell
+    command is launched via \`/bin/sh -c\`; the chunk's protected source
+    text is written to stdin and the command's stdout is taken as the
+    Chinese translation. Output is accepted only if it matches the source
+    paragraph count, preserves the protected-placeholder count, and contains
+    at least one Chinese character; otherwise the pipeline falls back to
+    source as before. Use this hook to plug in a stronger external
+    translator (Claude API, GPT-5 outside codex, sentence-level splitter,
+    human-in-the-loop) without modifying the pipeline. Set
+    MDZH_FINAL_RESCUE_TIMEOUT_MS to override the default 600s timeout.
 
 Exit codes:
   0  Success (may include soft-gate degraded output; see stderr for warnings).
