@@ -3229,6 +3229,8 @@ export async function translateMarkdownArticle(source: string, options: Translat
   });
   const restoredChunks: string[] = [];
   const gateAudits: GateAudit[] = [];
+  let softGateRescuedChunks = 0;
+  let softGateSourceFallbackChunks = 0;
   let repairCyclesUsed = 0;
   let styleApplied = false;
   let nextLocalSpanIndex = spanIndex.size + 1;
@@ -3595,11 +3597,14 @@ export async function translateMarkdownArticle(source: string, options: Translat
             }
           });
           if (acceptedRescueBody === null) {
+            softGateSourceFallbackChunks += 1;
             report(
               options,
               "audit",
               `Chunk ${chunk.index + 1}/${chunkPlan.chunks.length} (${chunk.headingPath.join(" > ") || "untitled"}): soft-gate caught chunk failure (${errorMessage}); falling back to source content.`
             );
+          } else {
+            softGateRescuedChunks += 1;
           }
           // Pass only spans whose placeholder ID appears in this chunk's source
           // — restoreMarkdownSpans throws if asked to restore a span absent from
@@ -3748,12 +3753,18 @@ export async function translateMarkdownArticle(source: string, options: Translat
     const markdown = reconstructMarkdown(frontmatter, formattedBody);
     await writeDebugStateIfRequested(state);
     if (options.softGate) {
-      const softGatedChunks = gateAudits.filter((audit) => !isHardPass(audit)).length;
-      if (softGatedChunks > 0) {
+      if (softGateRescuedChunks > 0) {
         report(
           options,
           "audit",
-          `⚠ Soft-gate fallback applied to ${softGatedChunks} chunk(s). Output is degraded. Re-run with --strict-gate to fail fast instead.`
+          `ℹ ${softGateRescuedChunks} chunk(s) recovered by final-rescue tier (default and/or external hook); body is Chinese, audit was bypassed.`
+        );
+      }
+      if (softGateSourceFallbackChunks > 0) {
+        report(
+          options,
+          "audit",
+          `⚠ Soft-gate fallback applied to ${softGateSourceFallbackChunks} chunk(s); their source remains as English. Re-run with --strict-gate to fail fast instead.`
         );
       }
     }
