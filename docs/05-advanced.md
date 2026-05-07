@@ -12,6 +12,8 @@
 
 ## 1. External rescue hook（PR #110）
 
+> **注意**：自 PR #115 起，pipeline 已经默认带一档"默认 final-rescue"——内置 rescue 失败后用 `gpt-5.5` 单次直翻、跳过 audit / repair，校验只看段落数 + 占位符 + ≥1 中文字符。零配置就生效，绝大多数原本会落 source-fallback 的 chunk 现在会被这一档救回。本节讲的 external hook 是**再下一档**——给你接 Claude / 自己的 LLM / 句子级拆分 / 人工流程的扩展点，仅在默认 final-rescue 也失败时才被调用。开关与详细配置见 [`03-configuration.md`](03-configuration.md)。
+
 ### 1.1 什么时候要用
 
 跑完一遍长文，看到 stderr 有几行：
@@ -20,7 +22,7 @@
 Chunk 30/134 (JT AND LINDY): soft-gate caught chunk failure (...); falling back to source content.
 ```
 
-意思是这一段实在翻不出来，pipeline 保留了英文段。
+意思是这一段连默认 final-rescue 都救不回来，pipeline 保留了英文段。
 
 如果你**不想**保留英文段——希望这一段也是中文——有两条路：
 
@@ -184,14 +186,17 @@ grep 'final_rescue' $MDZH_TELEMETRY_PATH | jq '{type, chunkId, success: .meta.su
 | `command exited non-zero` | hook 内部错误 | 看 hook 的 stderr |
 | `command timed out` | 超过 `MDZH_FINAL_RESCUE_TIMEOUT_MS` | 调大超时或优化 hook 性能 |
 
-### 1.5 跟内置 rescue 的区别
+### 1.5 跟其他 rescue 档的区别
 
-| 维度 | 内置 rescue | external hook |
-|---|---|---|
-| 模型 | 必须是 codex 内置（gpt-5.5） | 任意（Claude / GPT-5 / 自己拼） |
-| 输入 | pipeline 内部组装 prompt | 你完全自由（自己写 prompt） |
-| 失败兜底 | external hook → soft-gate | soft-gate |
-| 何时触发 | repair × 2 都失败 | rescue 也失败 |
+| 维度 | 内置 rescue（第 3 档） | 默认 final-rescue（第 4 档） | external hook（第 5 档） |
+|---|---|---|---|
+| 模型 | codex `gpt-5.5` | codex `gpt-5.5` | 任意（Claude / GPT-5 / 自己拼） |
+| 流程 | 整段重走 draft+audit+repair 全套 | 单次直翻，无 audit / repair | 任意（自定义脚本） |
+| 输入 | pipeline 组装 prompt | pipeline 组装 prompt（含术语表 / 占位符说明 / 上一段译文） | 你完全自由 |
+| 校验 | 完整 audit（hard + soft） | 宽松（段落数 / 占位符 / ≥1 中文） | 同左 |
+| 何时触发 | repair × 2 都失败 | 内置 rescue 也失败 | 默认 final-rescue 也失败 |
+| 失败兜底 | 默认 final-rescue → external hook → soft-gate | external hook → soft-gate | soft-gate |
+| 默认 | 开启 | 开启 | opt-in |
 
 ---
 

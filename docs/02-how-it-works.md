@@ -205,9 +205,23 @@ repair 默认用 **gpt-5.5**（比初始 draft 用的 gpt-5.4-mini 强）—— 
 
 如果 rescue 也失败，进入下一层。
 
-### 2.7 External rescue hook（PR #110，opt-in）
+### 2.7 默认 final-rescue（PR #115，默认开启）
 
-当 codex 内置层（draft + repair + rescue）全都救不回时，调用用户配置的外部命令：
+当内置 rescue 也失败、`MDZH_SOFT_GATE` 仍为 true 时，pipeline 自动跑一档"默认 final-rescue"：
+
+- 仍用 `gpt-5.5`，但**不走 audit / repair**：单次直翻
+- prompt 比内置 rescue 更宽松、信息更多——含章节路径、占位符说明、可选术语表（`MDZH_RESCUE_GLOSSARY_PATH`）、可选上一段译文
+- 校验只做三件事：段落数 = 原文段落数、占位符数 = 原文占位符数、至少含 1 个中文字符
+
+设计意图：内置 rescue 用 `gpt-5.5` 走完整 audit + repair 还失败的 chunk，问题往往不是模型译不出来，而是 audit 反复挑刺把候选枪毙；这一档把 audit 拿掉，用同一个模型再试一次更宽松的版本。
+
+关闭：`MDZH_DEFAULT_FINAL_RESCUE=off`。
+
+如果这一档也失败，进入下一层。
+
+### 2.8 External rescue hook（PR #110，opt-in）
+
+当 codex 内置层（draft + repair + rescue + 默认 final-rescue）全都救不回时，调用用户配置的外部命令：
 
 ```bash
 export MDZH_FINAL_RESCUE_COMMAND="claude-translate.sh"
@@ -222,7 +236,7 @@ export MDZH_FINAL_RESCUE_COMMAND="claude-translate.sh"
 
 详见 [`05-advanced.md` § external rescue hook](05-advanced.md)。
 
-### 2.8 Soft-gate fallback to source
+### 2.9 Soft-gate fallback to source
 
 最后一层兜底：上面所有层都失败，pipeline 把这一段**保留为英文 source**（带占位符还原），继续翻下一个 chunk。
 
@@ -279,12 +293,17 @@ export MDZH_FINAL_RESCUE_COMMAND="claude-translate.sh"
   │     │   │     ├─ 命中 → done
   │     │   │     └─ 仍 fail
   │     │   │           │
-  │     │   │           ├─ External rescue hook (opt-in, MDZH_FINAL_RESCUE_COMMAND)
+  │     │   │           ├─ Default final-rescue (默认开, gpt-5.5 单次直翻, 无 audit)
   │     │   │           │     │
-  │     │   │           │     ├─ 通过校验 → done
-  │     │   │           │     └─ 仍 fail → soft-gate
-  │     │   │           │
-  │     │   │           └─ Soft-gate fallback to source (保留英文段)
+  │     │   │           │     ├─ 通过宽松校验 → done
+  │     │   │           │     └─ 仍 fail
+  │     │   │           │           │
+  │     │   │           │           ├─ External rescue hook (opt-in, MDZH_FINAL_RESCUE_COMMAND)
+  │     │   │           │           │     │
+  │     │   │           │           │     ├─ 通过校验 → done
+  │     │   │           │           │     └─ 仍 fail → soft-gate
+  │     │   │           │           │
+  │     │   │           │           └─ Soft-gate fallback to source (保留英文段)
   │     │   │
   │     │   └─ 后处理：anchor 注入、错绑清理、结构骨架对齐、reprotect
   │     │

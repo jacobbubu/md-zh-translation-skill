@@ -43,8 +43,31 @@ export MDZH_RESCUE_MODEL=gpt-5.5     # 默认
 export MDZH_RESCUE_MODEL=off          # 禁用 rescue（直接进 soft-gate）
 ```
 
+### `MDZH_DEFAULT_FINAL_RESCUE`（PR #115）
+**作用**：开关默认的 final-rescue 一档。位于内置 rescue（第 3 档）之后、external hook（第 5 档）之前；用 `gpt-5.5` 单次直翻、不走 audit / repair，校验只看段落数 + 占位符数 + 至少含 1 个中文字符。
+**默认**：开启
+**禁用**：`off` / `none` / `false` / `0` / 空字符串
+
+```bash
+export MDZH_DEFAULT_FINAL_RESCUE=off    # 跳过新一档，行为回到 PR #110 之前
+```
+
+注意：当 `MDZH_RESCUE_MODEL=off` 时，本档同样会被跳过——两者共享同一个 rescue 模型设置。
+
+### `MDZH_DEFAULT_FINAL_RESCUE_TIMEOUT_MS`
+**作用**：默认 final-rescue 单次 codex 调用超时（毫秒）。
+**默认**：`240000`（4 分钟）
+
+### `MDZH_RESCUE_GLOSSARY_PATH`
+**作用**：默认 final-rescue 在拼 prompt 时把这个文件原样作为"术语表"嵌入。格式不限（Markdown 表格 / `en | zh` 行 / YAML 都行）。读不到时静默跳过。
+**默认**：未设置
+
+```bash
+export MDZH_RESCUE_GLOSSARY_PATH=./loonshots-glossary.md
+```
+
 ### `MDZH_FINAL_RESCUE_COMMAND`（PR #110）
-**作用**：在所有 codex 内置层都失败后、soft-gate fallback 之前，调用用户指定的 shell 命令做最后一搏。
+**作用**：默认 final-rescue 也失败之后、soft-gate fallback 之前，调用用户指定的 shell 命令做最后一搏。
 **默认**：未设置（不启用）
 **契约**：命令通过 `/bin/sh -c` 启动，protectedSource 写到 stdin，stdout 是中文译文。
 
@@ -233,6 +256,9 @@ md-zh-translate --input mybook.md --output mybook.zh.md
 | `POST_DRAFT_MODEL` | 同 `TRANSLATION_MODEL` |
 | `MDZH_REPAIR_MODEL` | `gpt-5.5` |
 | `MDZH_RESCUE_MODEL` | `gpt-5.5` |
+| `MDZH_DEFAULT_FINAL_RESCUE` | 开启 |
+| `MDZH_DEFAULT_FINAL_RESCUE_TIMEOUT_MS` | `240000` |
+| `MDZH_RESCUE_GLOSSARY_PATH` | （未设置） |
 | `MDZH_FINAL_RESCUE_COMMAND` | （未设置） |
 | `MDZH_FINAL_RESCUE_TIMEOUT_MS` | `600000` |
 | `MDZH_CHUNK_CONCURRENCY` | `3` |

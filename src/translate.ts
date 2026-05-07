@@ -309,6 +309,256 @@ function readRescueModel(): string | null {
   return trimmed;
 }
 
+/**
+ * Default "final rescue" tier sits between the heavy in-pipeline rescue
+ * (full draft + audit + repair with `gpt-5.5`) and the optional external
+ * hook (`MDZH_FINAL_RESCUE_COMMAND`). It does a single codex pass with
+ * `gpt-5.5` and no audit / repair gating — looser constraints, richer
+ * prompt context, and the same lenient `validateFinalRescueOutput` checks
+ * that the external hook uses.
+ *
+ * Enabled by default. Set `MDZH_DEFAULT_FINAL_RESCUE` to one of
+ * `off` / `none` / `false` / `0` (or empty string) to disable.
+ */
+function isDefaultFinalRescueEnabled(): boolean {
+  const raw = process.env.MDZH_DEFAULT_FINAL_RESCUE;
+  if (raw === undefined) {
+    return true;
+  }
+  const trimmed = raw.trim();
+  if (trimmed === "") {
+    return false;
+  }
+  const lower = trimmed.toLowerCase();
+  if (lower === "off" || lower === "none" || lower === "false" || lower === "0") {
+    return false;
+  }
+  return true;
+}
+
+const DEFAULT_FINAL_RESCUE_TIMEOUT_MS = 240_000;
+
+function readDefaultFinalRescueTimeoutMs(): number {
+  const raw = process.env.MDZH_DEFAULT_FINAL_RESCUE_TIMEOUT_MS?.trim();
+  if (!raw) {
+    return DEFAULT_FINAL_RESCUE_TIMEOUT_MS;
+  }
+  const parsed = Number.parseInt(raw, 10);
+  if (Number.isFinite(parsed) && parsed > 0) {
+    return parsed;
+  }
+  return DEFAULT_FINAL_RESCUE_TIMEOUT_MS;
+}
+
+async function loadDefaultFinalRescueGlossary(): Promise<string | null> {
+  // Optional glossary file. The pipeline reads it best-effort and inlines
+  // it into the rescue prompt verbatim — users decide the format
+  // (markdown table, YAML, plain `en | zh` lines, etc.). Failure to read
+  // is non-fatal: we just omit the glossary section and continue.
+  const raw = process.env.MDZH_RESCUE_GLOSSARY_PATH?.trim();
+  if (!raw) {
+    return null;
+  }
+  try {
+    const content = await readFile(raw, "utf8");
+    const trimmed = content.trim();
+    return trimmed.length > 0 ? trimmed : null;
+  } catch {
+    return null;
+  }
+}
+
+function describeProtectedSpanForLegend(span: ProtectedSpan): string {
+  const label = span.labelText?.trim();
+  if (label) {
+    return `${span.id} → ${span.kind} (${label})`;
+  }
+  return `${span.id} → ${span.kind}`;
+}
+
+function buildDefaultFinalRescuePrompt(input: {
+  chunk: MarkdownChunk;
+  chunkPlan: MarkdownChunkPlan;
+  protectedSource: string;
+  chunkSpans: ProtectedSpan[];
+  previousChunkBody: string | null;
+  glossary: string | null;
+}): string {
+  const sections: string[] = [];
+
+  sections.push(
+    [
+      "你是一名资深中文 Markdown 译者。前序自动流水线（draft + audit + repair + 升级模型 rescue）均已失败，",
+      "当前是最后一次自动救援机会。请严格遵守以下三条硬约束：",
+      "1. 段落数（按空行分隔的块数）必须与原文严格一致；",
+      "2. 形如 `@@MDZH_*_NNNN@@` 的占位符必须原样保留，不翻译、不改写、不增删；",
+      "3. 只输出译文本身，不要写任何说明、前言、致歉或译者注。"
+    ].join("")
+  );
+
+  const headingPath = (input.chunk.headingPath ?? []).filter(
+    (part): part is string => typeof part === "string" && part.trim().length > 0
+  );
+  const breadcrumbs = headingPath.length > 0 ? headingPath.join(" > ") : "（无章节标题）";
+  sections.push(
+    `【背景】当前为第 ${input.chunk.index + 1} / ${input.chunkPlan.chunks.length} 个分块。所在章节路径：${breadcrumbs}`
+  );
+
+  if (input.glossary) {
+    sections.push(`【术语表（请尽量遵循）】\n${input.glossary}`);
+  }
+
+  if (input.chunkSpans.length > 0) {
+    const lines = input.chunkSpans.map(describeProtectedSpanForLegend);
+    sections.push(`【占位符说明（仅作译文上下文参考，占位符本身原样保留）】\n${lines.join("\n")}`);
+  }
+
+  if (input.previousChunkBody) {
+    const trimmed = input.previousChunkBody.trim();
+    const excerpt = trimmed.length > 800 ? `${trimmed.slice(0, 800)}……` : trimmed;
+    sections.push(
+      `【上一分块译文（仅供文风 / 术语一致性参考，不是要翻译的内容）】\n${excerpt}`
+    );
+  }
+
+  sections.push(`【待翻译原文】\n${input.protectedSource}`);
+
+  sections.push(
+    "请直接输出整段中文译文。再次提醒：段落数严格相等、占位符原样保留、不要写任何解释。"
+  );
+
+  return sections.join("\n\n");
+}
+
+const DEFAULT_FINAL_RESCUE_REASONING_EFFORT: ReasoningEffort = "low";
+
+async function runDefaultFinalRescue(input: {
+  chunk: MarkdownChunk;
+  chunkPlan: MarkdownChunkPlan;
+  chunkId: string;
+  state: TranslationRunState;
+  spans: ProtectedSpan[];
+  executor: CodexExecutor;
+  cwd: string;
+  options: TranslateOptions;
+  runId: string;
+  telemetry: TelemetrySink;
+  rescueModel: string;
+  originalError: string;
+}): Promise<{ body: string | null; error: string | null }> {
+  const protectedSource = input.chunk.source;
+  const chunkSpans = input.spans.filter((span) => protectedSource.includes(span.id));
+  const previousChunk =
+    input.chunk.index > 0 ? input.state.chunks[input.chunk.index - 1] ?? null : null;
+  const previousChunkBody = previousChunk?.finalBody ?? null;
+  const glossary = await loadDefaultFinalRescueGlossary();
+  const prompt = buildDefaultFinalRescuePrompt({
+    chunk: input.chunk,
+    chunkPlan: input.chunkPlan,
+    protectedSource,
+    chunkSpans,
+    previousChunkBody,
+    glossary
+  });
+  const timeoutMs = readDefaultFinalRescueTimeoutMs();
+  const startedAt = Date.now();
+  const totalChunks = input.chunkPlan.chunks.length;
+  const headingLabel = input.chunk.headingPath.join(" > ") || "untitled";
+
+  input.telemetry.emit({
+    ts: startedAt,
+    runId: input.runId,
+    type: "chunk.default_final_rescue.start",
+    chunkId: input.chunkId,
+    meta: {
+      chunkIndex: input.chunk.index + 1,
+      rescueModel: input.rescueModel,
+      timeoutMs,
+      glossaryAttached: glossary !== null,
+      previousBodyAttached: previousChunkBody !== null,
+      promptChars: prompt.length
+    }
+  });
+  report(
+    input.options,
+    "audit",
+    `Chunk ${input.chunk.index + 1}/${totalChunks} (${headingLabel}): default final-rescue starting (model ${input.rescueModel}, single-pass, no audit).`
+  );
+
+  let body: string | null = null;
+  let error: string | null = null;
+  try {
+    const result = await executeStageWithTimeout(
+      input.executor,
+      prompt,
+      {
+        cwd: input.cwd,
+        model: input.rescueModel,
+        reasoningEffort: DEFAULT_FINAL_RESCUE_REASONING_EFFORT,
+        reuseSession: false,
+        onStderr: (stderrChunk) => {
+          const trimmed = stderrChunk.trim();
+          if (trimmed) {
+            report(input.options, "audit", trimmed);
+          }
+        }
+      },
+      {
+        options: input.options,
+        stage: "audit",
+        timeoutMs,
+        heartbeatLabel: `Chunk ${input.chunk.index + 1}/${totalChunks}: default final-rescue`,
+        onHeartbeat: (message) => report(input.options, "audit", message),
+        telemetry: input.telemetry,
+        runId: input.runId,
+        chunkId: input.chunkId,
+        extra: { lane: "default-final-rescue", model: input.rescueModel }
+      }
+    );
+    const candidate = result.text.trim();
+    if (candidate.length === 0) {
+      error = "default final-rescue produced empty output";
+    } else {
+      const validation = validateFinalRescueOutput(protectedSource, candidate);
+      if (validation.ok) {
+        body = candidate;
+      } else {
+        error = validation.reason;
+      }
+    }
+  } catch (err) {
+    error = err instanceof Error ? err.message : String(err);
+  }
+
+  input.telemetry.emit({
+    ts: Date.now(),
+    runId: input.runId,
+    type: "chunk.default_final_rescue.end",
+    chunkId: input.chunkId,
+    durationMs: Date.now() - startedAt,
+    ...(error ? { error } : {}),
+    meta: {
+      rescueModel: input.rescueModel,
+      success: body !== null
+    }
+  });
+  if (body !== null) {
+    report(
+      input.options,
+      "audit",
+      `Chunk ${input.chunk.index + 1}/${totalChunks} (${headingLabel}): default final-rescue produced an accepted translation.`
+    );
+  } else if (error) {
+    report(
+      input.options,
+      "audit",
+      `Chunk ${input.chunk.index + 1}/${totalChunks} (${headingLabel}): default final-rescue rejected (${error}).`
+    );
+  }
+
+  return { body, error };
+}
+
 const DEFAULT_CHUNK_CONCURRENCY = 3;
 
 function readChunkConcurrency(): number {
@@ -3219,13 +3469,47 @@ export async function translateMarkdownArticle(source: string, options: Translat
           }
           return;
         } else {
+          // Default final-rescue tier sits between the heavy in-pipeline
+          // rescue (full draft+audit+repair on `gpt-5.5`) and the optional
+          // external hook. It runs codex once with `gpt-5.5`, no audit and
+          // no repair gating, with a richer prompt (heading path,
+          // placeholder legend, optional glossary, optional previous chunk
+          // body for style consistency). Output is checked with the same
+          // lenient `validateFinalRescueOutput` rules used for the
+          // external hook.
+          let defaultFinalRescueBody: string | null = null;
+          const defaultRescueModel = readRescueModel();
+          if (
+            isDefaultFinalRescueEnabled() &&
+            defaultRescueModel &&
+            defaultRescueModel !== draftModel &&
+            defaultRescueModel !== postDraftModel
+          ) {
+            const outcome = await runDefaultFinalRescue({
+              chunk,
+              chunkPlan,
+              chunkId,
+              state,
+              spans,
+              executor,
+              cwd,
+              options,
+              runId,
+              telemetry,
+              rescueModel: defaultRescueModel,
+              originalError: errorMessage
+            });
+            defaultFinalRescueBody = outcome.body;
+          }
+
           // Last-line tier before source fallback: optional external "final
           // rescue" hook. The user can configure
           // `MDZH_FINAL_RESCUE_COMMAND` to plug in a stronger external
           // translator (Claude Opus, GPT-5 outside codex, sentence-level
           // splitter, human-in-the-loop). If accepted, the chunk gets a
           // real Chinese body instead of degrading to English source.
-          const finalRescueCommand = readFinalRescueCommand();
+          const finalRescueCommand =
+            defaultFinalRescueBody === null ? readFinalRescueCommand() : null;
           let finalRescueBody: string | null = null;
           let finalRescueError: string | null = null;
           if (finalRescueCommand) {
@@ -3289,6 +3573,7 @@ export async function translateMarkdownArticle(source: string, options: Translat
             }
           }
 
+          const acceptedRescueBody = defaultFinalRescueBody ?? finalRescueBody;
           telemetry.emit({
             ts: Date.now(),
             runId,
@@ -3299,10 +3584,17 @@ export async function translateMarkdownArticle(source: string, options: Translat
             meta: {
               recovered: true,
               structural: false,
-              finalRescueAccepted: finalRescueBody !== null
+              defaultFinalRescueAccepted: defaultFinalRescueBody !== null,
+              finalRescueAccepted: finalRescueBody !== null,
+              acceptedTier:
+                defaultFinalRescueBody !== null
+                  ? "default-final-rescue"
+                  : finalRescueBody !== null
+                    ? "external-final-rescue"
+                    : "source-fallback"
             }
           });
-          if (finalRescueBody === null) {
+          if (acceptedRescueBody === null) {
             report(
               options,
               "audit",
@@ -3315,8 +3607,8 @@ export async function translateMarkdownArticle(source: string, options: Translat
           // chunks.
           const chunkSpans = spans.filter((span) => chunk.source.includes(span.id));
           const recoveredBody =
-            finalRescueBody !== null
-              ? restoreMarkdownSpans(finalRescueBody, chunkSpans)
+            acceptedRescueBody !== null
+              ? restoreMarkdownSpans(acceptedRescueBody, chunkSpans)
               : restoreMarkdownSpans(chunk.source, chunkSpans);
           chunkResult = {
             body: recoveredBody,

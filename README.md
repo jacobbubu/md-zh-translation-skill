@@ -39,6 +39,27 @@ md-zh-translate --input article.md --output article.zh.md
 
 ---
 
+## 翻译失败如何兜底
+
+每个分块（chunk）按以下顺序逐档下沉，前一档失败才进下一档；只要任一档产出合格中文就停在那里。
+
+| 档位 | 模型 / 入口 | 校验强度 | 默认 |
+|---|---|---|---|
+| 1. draft | `gpt-5.4-mini` | 完整 audit + 必修项门控 | 开 |
+| 2. repair × 2 | 同 draft 模型 | 同上 | 开 |
+| 3. 内置 rescue（升模型重译） | `gpt-5.5`，整段 draft+audit+repair 全套 | 完整 audit + 必修项门控 | 开 |
+| 4. 默认 final-rescue（**新**） | `gpt-5.5`，**单次直翻、无 audit** | **宽松**：段落数 = 占位符数 = 至少 1 个中文 | 开 |
+| 5. 外部 hook | `MDZH_FINAL_RESCUE_COMMAND` 指定的任意命令 | 同第 4 档 | opt-in |
+| 6. soft-gate fallback | — | — | 开（最终兜底，保留英文段） |
+
+第 4 档为本地、零配置自动启用：用同一个 `gpt-5.5`，去掉 audit / repair 这些反复挑刺的环节，只对结构（段落数、占位符、含中文）做最小校验。它是给"`gpt-5.5` 其实能翻，但 audit 老在卡"的情况设计的最后一道自动救援，避免直接落到第 6 档保留英文段。
+
+- 关掉第 4 档：`MDZH_DEFAULT_FINAL_RESCUE=off`
+- 完整契约和自定义示例：[`docs/05-advanced.md`](docs/05-advanced.md)
+- 全部相关环境变量：[`docs/03-configuration.md`](docs/03-configuration.md)
+
+---
+
 ## 你接下来想做什么？
 
 不同的入口对应不同的需求：
@@ -93,6 +114,6 @@ md-zh-translate install all            # 全部默认目标
 
 ## 项目状态
 
-- 当前默认翻译模型：`gpt-5.4-mini`，repair / rescue 升 `gpt-5.5`
+- 当前默认翻译模型：`gpt-5.4-mini`，repair / rescue / 默认 final-rescue 升 `gpt-5.5`
 - 后处理走 [`@jacobbubu/md-zh-format`](https://www.npmjs.com/package/@jacobbubu/md-zh-format) 美化
 - 持续把真实长文失败收编为 fixture，按 §3.3 「接受能力边界」管理（见 [internals/resilience-plan.md](docs/internals/resilience-plan.md)）
