@@ -496,6 +496,199 @@ test("normalizeDiscoveredAnchorCatalog rejects discovered config-path anchors", 
   ]);
 });
 
+test("normalizeDiscoveredAnchorCatalog rejects anchors whose chineseHint sandwiches an english subtoken", () => {
+  const state = createTranslationRunState({
+    sourcePathHint: "sample.md",
+    documentTitle: "Sample",
+    frontmatterPresent: false,
+    protectedSpans: [],
+    chunks: [
+      {
+        source: "Instead, we use a **Schema-First Extraction** method.\n",
+        separatorAfter: "",
+        headingPath: ["Sample"],
+        segments: [
+          {
+            kind: "translatable",
+            source: "Instead, we use a **Schema-First Extraction** method.\n",
+            separatorAfter: "",
+            spanIds: [],
+            headingHints: [],
+            specialNotes: []
+          }
+        ]
+      }
+    ]
+  });
+
+  const normalized = normalizeDiscoveredAnchorCatalog(state, {
+    anchors: [
+      {
+        english: "Schema-First Extraction",
+        chineseHint: "先 Schema 抽取",
+        familyKey: "schema-first-extraction",
+        displayPolicy: "acronym-compound",
+        sourceForms: ["Schema-First Extraction"],
+        firstOccurrence: {
+          chunkId: "chunk-1",
+          segmentId: "chunk-1-segment-1"
+        }
+      }
+    ],
+    ignoredTerms: []
+  });
+
+  assert.equal(normalized.anchors.length, 0);
+  assert.deepEqual(normalized.ignoredTerms, [
+    {
+      english: "Schema-First Extraction",
+      reason:
+        "chineseHint sandwiches an english subtoken of the anchor, which breaks bold / bilingual rendering"
+    }
+  ]);
+});
+
+test("normalizeDiscoveredAnchorCatalog keeps anchors with an english prefix followed by Chinese", () => {
+  const state = createTranslationRunState({
+    sourcePathHint: "sample.md",
+    documentTitle: "Sample",
+    frontmatterPresent: false,
+    protectedSpans: [],
+    chunks: [
+      {
+        source: "Try Claude Code today.\n",
+        separatorAfter: "",
+        headingPath: ["Sample"],
+        segments: [
+          {
+            kind: "translatable",
+            source: "Try Claude Code today.\n",
+            separatorAfter: "",
+            spanIds: [],
+            headingHints: [],
+            specialNotes: []
+          }
+        ]
+      }
+    ]
+  });
+
+  const normalized = normalizeDiscoveredAnchorCatalog(state, {
+    anchors: [
+      {
+        english: "Claude Code",
+        chineseHint: "Claude 代码",
+        familyKey: "claude-code",
+        displayPolicy: "english-primary",
+        sourceForms: ["Claude Code"],
+        firstOccurrence: {
+          chunkId: "chunk-1",
+          segmentId: "chunk-1-segment-1"
+        }
+      }
+    ],
+    ignoredTerms: []
+  });
+
+  assert.equal(normalized.anchors.length, 1);
+  assert.equal(normalized.anchors[0]?.english, "Claude Code");
+  assert.deepEqual(normalized.ignoredTerms, []);
+});
+
+test("normalizeDiscoveredAnchorCatalog keeps anchors whose chineseHint contains no english", () => {
+  const state = createTranslationRunState({
+    sourcePathHint: "sample.md",
+    documentTitle: "Sample",
+    frontmatterPresent: false,
+    protectedSpans: [],
+    chunks: [
+      {
+        source: "SLMs can index your corpus locally.\n",
+        separatorAfter: "",
+        headingPath: ["Sample"],
+        segments: [
+          {
+            kind: "translatable",
+            source: "SLMs can index your corpus locally.\n",
+            separatorAfter: "",
+            spanIds: [],
+            headingHints: [],
+            specialNotes: []
+          }
+        ]
+      }
+    ]
+  });
+
+  const normalized = normalizeDiscoveredAnchorCatalog(state, {
+    anchors: [
+      {
+        english: "SLMs",
+        chineseHint: "小语言模型",
+        familyKey: "slms",
+        displayPolicy: "acronym-compound",
+        sourceForms: ["SLMs"],
+        firstOccurrence: {
+          chunkId: "chunk-1",
+          segmentId: "chunk-1-segment-1"
+        }
+      }
+    ],
+    ignoredTerms: []
+  });
+
+  assert.equal(normalized.anchors.length, 1);
+  assert.equal(normalized.anchors[0]?.english, "SLMs");
+  assert.deepEqual(normalized.ignoredTerms, []);
+});
+
+test("normalizeDiscoveredAnchorCatalog keeps anchors whose hint english is unrelated to the anchor english", () => {
+  const state = createTranslationRunState({
+    sourcePathHint: "sample.md",
+    documentTitle: "Sample",
+    frontmatterPresent: false,
+    protectedSpans: [],
+    chunks: [
+      {
+        source: "This paper covers Knowledge Graphs end-to-end.\n",
+        separatorAfter: "",
+        headingPath: ["Sample"],
+        segments: [
+          {
+            kind: "translatable",
+            source: "This paper covers Knowledge Graphs end-to-end.\n",
+            separatorAfter: "",
+            spanIds: [],
+            headingHints: [],
+            specialNotes: []
+          }
+        ]
+      }
+    ]
+  });
+
+  const normalized = normalizeDiscoveredAnchorCatalog(state, {
+    anchors: [
+      {
+        english: "Knowledge Graphs",
+        chineseHint: "知识图谱（KG）汇总",
+        familyKey: "knowledge-graphs",
+        displayPolicy: "chinese-primary",
+        sourceForms: ["Knowledge Graphs"],
+        firstOccurrence: {
+          chunkId: "chunk-1",
+          segmentId: "chunk-1-segment-1"
+        }
+      }
+    ],
+    ignoredTerms: []
+  });
+
+  assert.equal(normalized.anchors.length, 1);
+  assert.equal(normalized.anchors[0]?.english, "Knowledge Graphs");
+  assert.deepEqual(normalized.ignoredTerms, []);
+});
+
 test("writeKnownEntityCandidatesIfRequested persists unknown anchors into a candidate file", async () => {
   const tempDir = await mkdtemp(path.join(os.tmpdir(), "mdzh-known-entities-"));
   const outputPath = path.join(tempDir, "known_entities_candidates.json");
